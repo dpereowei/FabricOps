@@ -1,0 +1,13 @@
+apiVersion: fabricops.io/v1alpha1
+kind: FabricNetwork
+metadata:
+  name: dev-network
+spec:
+  orgName: org1
+  domain: org1.example.com
+  orderer:
+    replicas: 1
+  peer:
+    replicas: 1
+  ca:
+    enabled: true
