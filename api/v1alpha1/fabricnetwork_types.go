@@ -53,11 +53,19 @@ type FabricNetworkStatus struct {
 	// - "Degraded": the resource failed to reach or maintain its desired state
 	//
 	// The status of each condition is one of True, False, or Unknown.
-	// +listType=map
-	// +listMapKey=type
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Phase   Phase  `json:"phase,omitempty"`
+	Message string `json:"message,omitempty"`
 }
+
+type Phase string
+
+const (
+	PhasePending  Phase = "Pending"
+	PhaseCreating Phase = "Creating"
+	PhaseReady    Phase = "Ready"
+	PhaseFailed   Phase = "Failed"
+)
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -76,7 +84,7 @@ type FabricNetwork struct {
 
 	// status defines the observed state of FabricNetwork
 	// +optional
-	Status FabricNetworkStatus `json:"status,omitzero"`
+	Status FabricNetworkStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
