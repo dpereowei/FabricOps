@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- fabricops_v1alpha1_fabricnetwork.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

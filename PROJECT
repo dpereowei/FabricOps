@@ -8,4 +8,14 @@ layout:
 - go.kubebuilder.io/v4
 projectName: fabricops
 repo: github.com/dpereowei/fabricops
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: my.domain
+  group: fabricops
+  kind: FabricNetwork
+  path: github.com/dpereowei/fabricops/api/v1alpha1
+  version: v1alpha1
 version: "3"
