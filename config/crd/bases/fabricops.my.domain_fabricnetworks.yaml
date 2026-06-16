@@ -39,10 +39,127 @@ spec:
           spec:
             description: spec defines the desired state of FabricNetwork
             properties:
-              foo:
-                description: foo is an example field of FabricNetwork. Edit fabricnetwork_types.go
-                  to remove/update
-                type: string
+              chaincodes:
+                items:
+                  properties:
+                    channel:
+                      type: string
+                    image:
+                      type: string
+                    name:
+                      type: string
+                    version:
+                      type: string
+                  required:
+                  - channel
+                  - image
+                  - name
+                  - version
+                  type: object
+                type: array
+              channels:
+                items:
+                  properties:
+                    name:
+                      type: string
+                    orgs:
+                      items:
+                        properties:
+                          name:
+                            type: string
+                          peers:
+                            items:
+                              type: string
+                            type: array
+                        required:
+                        - name
+                        - peers
+                        type: object
+                      type: array
+                  required:
+                  - name
+                  - orgs
+                  type: object
+                type: array
+              global:
+                description: |-
+                  INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
+                  Important: Run "make" to regenerate code after modifying this file
+                  The following markers will use OpenAPI v3 schema to validate the value
+                  More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+                properties:
+                  fabricVersion:
+                    type: string
+                  tls:
+                    type: boolean
+                required:
+                - fabricVersion
+                - tls
+                type: object
+              orgs:
+                items:
+                  properties:
+                    ca:
+                      properties:
+                        db:
+                          type: string
+                      required:
+                      - db
+                      type: object
+                    orderers:
+                      items:
+                        properties:
+                          groupName:
+                            type: string
+                          instances:
+                            type: integer
+                          prefix:
+                            type: string
+                          type:
+                            type: string
+                        required:
+                        - groupName
+                        - instances
+                        - prefix
+                        - type
+                        type: object
+                      type: array
+                    organization:
+                      properties:
+                        domain:
+                          type: string
+                        mspName:
+                          type: string
+                        name:
+                          type: string
+                      required:
+                      - domain
+                      - mspName
+                      - name
+                      type: object
+                    peer:
+                      properties:
+                        db:
+                          type: string
+                        instances:
+                          type: integer
+                        prefix:
+                          type: string
+                      required:
+                      - db
+                      - instances
+                      - prefix
+                      type: object
+                  required:
+                  - ca
+                  - organization
+                  type: object
+                type: array
+            required:
+            - chaincodes
+            - channels
+            - global
+            - orgs
             type: object
           status:
             description: status defines the observed state of FabricNetwork

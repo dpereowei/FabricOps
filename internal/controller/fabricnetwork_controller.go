@@ -26,7 +26,6 @@ import (
 
 	fabricopsv1alpha1 "github.com/dpereowei/fabricops/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -34,6 +33,44 @@ import (
 type FabricNetworkReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+}
+
+func (r *FabricNetworkReconciler) ensureNamespace(ctx context.Context, name string) error {
+	var ns corev1.Namespace
+
+	err := r.Get(ctx, client.ObjectKey{Name: name}, &ns)
+	if err == nil {
+		return nil
+	}
+
+	ns = corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+	}
+
+	return r.Create(ctx, &ns)
+}
+
+func (r *FabricNetworkReconciler) reconcileOrgs(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	namespace string,
+) error {
+
+	log := logf.FromContext(ctx)
+
+	for _, org := range net.Spec.Orgs {
+		log.Info(
+			"Reconciling org",
+			"name", org.Organization.Name,
+			"domain", org.Organization.Domain,
+		)
+
+		// create CA + peer
+	}
+
+	return nil
 }
 
 func (r *FabricNetworkReconciler) updateStatusIfChanged(
@@ -91,13 +128,6 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	_ = r.updateStatusIfChanged(
-		ctx,
-		&network,
-		fabricopsv1alpha1.PhaseReady,
-		"Namespace already exists",
-	)
-
 	namespaceName := "fabric-network-" + network.Name
 
 	// Check if the namespace already exists
@@ -106,70 +136,42 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		"namespaceName", namespaceName,
 	)
 
-	var ns corev1.Namespace
-	err := r.Get(ctx, client.ObjectKey{Name: namespaceName}, &ns)
+	if err := r.ensureNamespace(ctx, namespaceName); err != nil {
+		log.Error(err, "failed to ensure namespace exists")
 
-	if err == nil {
-
-		log.Info(
-			"Namespace already exists",
-			"namespaceName", namespaceName,
+		_ = r.updateStatusIfChanged(
+			ctx,
+			&network,
+			fabricopsv1alpha1.PhaseFailed,
+			"Failes to ensure namespace: "+err.Error(),
 		)
+
+		return ctrl.Result{}, err
+	}
+
+	if network.Status.Phase != fabricopsv1alpha1.PhaseReady ||
+		network.Status.Message != "Namespace ready" {
 
 		_ = r.updateStatusIfChanged(
 			ctx,
 			&network,
 			fabricopsv1alpha1.PhaseReady,
-			"Namespace already exists",
+			"Namespace ready",
 		)
-		return ctrl.Result{}, nil
 	}
 
-	if !apierrors.IsNotFound(err) {
+	if err := r.reconcileOrgs(ctx, &network, namespaceName); err != nil {
+		log.Error(err, "failed to reconcile orgs")
+
 		_ = r.updateStatusIfChanged(
 			ctx,
 			&network,
 			fabricopsv1alpha1.PhaseFailed,
-			"Error checking namespace: "+err.Error(),
+			"failed to reconcile orgs: "+err.Error(),
 		)
+
 		return ctrl.Result{}, err
 	}
-
-	// Namespace does not exist, create it
-	log.Info(
-		"Creating namespace",
-		"namespaceName", namespaceName,
-	)
-
-	ns = corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: namespaceName,
-		},
-	}
-
-	_ = r.updateStatusIfChanged(
-		ctx,
-		&network,
-		fabricopsv1alpha1.PhaseCreating,
-		"Creating namespace",
-	)
-
-	if err := r.Create(ctx, &ns); err != nil {
-		log.Error(err, "failed to create namespace")
-
-		network.Status.Phase = fabricopsv1alpha1.PhaseFailed
-		network.Status.Message = "Failed to create namespace: " + err.Error()
-
-		_ = r.Status().Update(ctx, &network)
-		return ctrl.Result{}, err
-	}
-
-	_ = r.updateStatusIfChanged(
-		ctx,
-		&network,
-		fabricopsv1alpha1.PhaseReady,
-		"Namespace created",
-	)
 
 	return ctrl.Result{}, nil
 }

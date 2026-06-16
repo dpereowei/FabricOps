@@ -30,10 +30,66 @@ type FabricNetworkSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+	Global GlobalConfig `json:"global"`
 
-	// foo is an example field of FabricNetwork. Edit fabricnetwork_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+	Orgs []Org `json:"orgs"`
+
+	Channels []Channel `json:"channels"`
+
+	Chaincodes []Chaincode `json:"chaincodes"`
+}
+
+type GlobalConfig struct {
+	FabricVersion string `json:"fabricVersion"`
+	TLS           bool   `json:"tls"`
+}
+
+type Org struct {
+	Organisation OrgMeta        `json:"organization"`
+	CA           CAConfig       `json:"ca"`
+	Orderers     []OrdererGroup `json:"orderers,omitempty"`
+	Peer         *PeerConfig    `json:"peer,omitempty"`
+}
+
+type OrgMeta struct {
+	Name    string `json:"name"`
+	Domain  string `json:"domain"`
+	MSPName string `json:"mspName"`
+}
+
+type CAConfig struct {
+	DB string `json:"db"`
+}
+
+type OrdererGroup struct {
+	GroupName string `json:"groupName"`
+	Type      string `json:"type"`
+	Instances int    `json:"instances"`
+	Prefix    string `json:"prefix"`
+}
+
+type PeerConfig struct {
+	Instances int    `json:"instances"`
+	DB        string `json:"db"`
+	Prefix    string `json:"prefix"`
+}
+
+type Channel struct {
+	Name string `json:"name"`
+
+	Orgs []ChannelOrg `json:"orgs"`
+}
+
+type ChannelOrg struct {
+	Name  string   `json:"name"`
+	Peers []string `json:"peers"`
+}
+
+type Chaincode struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Channel string `json:"channel"`
+	Image   string `json:"image"`
 }
 
 // FabricNetworkStatus defines the observed state of FabricNetwork.
