@@ -46,6 +46,7 @@ const (
 	labelWorkload               = "fabricops.my.domain/workload"
 
 	componentCA      = "ca"
+	componentAdmin   = "admin"
 	componentOrderer = "orderer"
 	componentPeer    = "peer"
 
@@ -75,6 +76,8 @@ const (
 	tlsCACertKey     = "ca.crt"
 	tlsServerCertKey = "server.crt"
 	tlsServerKeyKey  = "server.key"
+	tlsClientCertKey = "client.crt"
+	tlsClientKeyKey  = "client.key"
 )
 
 func sanitizeName(name string) string {
@@ -249,6 +252,14 @@ func tlsSecretKeys() []string {
 	}
 }
 
+func adminTLSSecretKeys() []string {
+	return []string{
+		tlsCACertKey,
+		tlsClientCertKey,
+		tlsClientKeyKey,
+	}
+}
+
 func requiredIdentitySecrets(
 	net *fabricopsv1alpha1.FabricNetwork,
 	org fabricopsv1alpha1.Org,
@@ -256,6 +267,23 @@ func requiredIdentitySecrets(
 ) []identitySecretRequirement {
 	tlsEnabled := net.Spec.Global.TLS
 	requirements := []identitySecretRequirement{}
+	adminName := adminIdentityName(org)
+
+	requirements = append(requirements, identitySecretRequirement{
+		namespace: namespace,
+		name:      identitySecretName(adminName, secretKindMSP),
+		kind:      secretKindAdminMSP,
+		keys:      mspSecretKeys(tlsEnabled),
+	})
+
+	if tlsEnabled {
+		requirements = append(requirements, identitySecretRequirement{
+			namespace: namespace,
+			name:      identitySecretName(adminName, secretKindTLS),
+			kind:      secretKindAdminTLS,
+			keys:      adminTLSSecretKeys(),
+		})
+	}
 
 	for _, group := range org.Orderers {
 		for i := 0; i < group.Instances; i++ {

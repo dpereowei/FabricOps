@@ -262,9 +262,13 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(identity.Reason).To(Equal("IdentityMaterialPresent"))
 
 			expectIdentitySecret(ctx, ordererNamespace, orgIdentitySecretName(network.Spec.Orgs[0]), secretKindOrgCA, true)
+			expectIdentitySecret(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindMSP), secretKindAdminMSP, true)
+			expectIdentitySecret(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindTLS), secretKindAdminTLS, true)
 			expectIdentitySecret(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true)
 			expectIdentitySecret(ctx, ordererNamespace, "orderer0-tls", secretKindTLS, true)
 			expectIdentitySecret(ctx, bankNamespace, orgIdentitySecretName(network.Spec.Orgs[1]), secretKindOrgCA, true)
+			expectIdentitySecret(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindMSP), secretKindAdminMSP, true)
+			expectIdentitySecret(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindTLS), secretKindAdminTLS, true)
 			expectIdentitySecret(ctx, bankNamespace, "peer0-msp", secretKindMSP, true)
 			expectIdentitySecret(ctx, bankNamespace, "peer0-tls", secretKindTLS, true)
 		})
@@ -300,6 +304,14 @@ var _ = Describe("FabricNetwork Controller", func() {
 			ordererMSP.Data[mspSignCertKey] = []byte("not a pem certificate")
 			Expect(k8sClient.Update(ctx, &ordererMSP)).To(Succeed())
 
+			var ordererAdminTLS corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "orderer-admin-tls",
+			}, &ordererAdminTLS)).To(Succeed())
+			ordererAdminTLS.Data[tlsClientCertKey] = []byte("not a pem certificate")
+			Expect(k8sClient.Update(ctx, &ordererAdminTLS)).To(Succeed())
+
 			By("Reconciling again")
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -308,6 +320,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 
 			expectIdentitySecret(ctx, bankNamespace, "peer0-tls", secretKindTLS, true)
 			expectIdentitySecret(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true)
+			expectIdentitySecret(ctx, ordererNamespace, "orderer-admin-tls", secretKindAdminTLS, true)
 
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())

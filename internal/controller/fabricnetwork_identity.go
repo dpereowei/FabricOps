@@ -40,7 +40,9 @@ import (
 )
 
 const (
-	secretKindOrgCA = "org-ca"
+	secretKindOrgCA    = "org-ca"
+	secretKindAdminMSP = "admin-msp"
+	secretKindAdminTLS = "admin-tls"
 
 	orgMSPCACertKey = "msp-ca.crt"
 	orgMSPCAKeyKey  = "msp-ca.key"
@@ -63,6 +65,10 @@ func (r *FabricNetworkReconciler) reconcileIdentityMaterial(
 ) error {
 	authority, err := r.ensureOrgIdentityAuthority(ctx, net, org, namespace)
 	if err != nil {
+		return err
+	}
+
+	if err := r.ensureAdminIdentitySecrets(ctx, net, org, namespace, authority); err != nil {
 		return err
 	}
 
@@ -111,6 +117,10 @@ func orgIdentitySecretName(org fabricopsv1alpha1.Org) string {
 	return sanitizeName(org.Organization.Name + "-identity-ca")
 }
 
+func adminIdentityName(org fabricopsv1alpha1.Org) string {
+	return sanitizeName(org.Organization.Name + "-admin")
+}
+
 func (r *FabricNetworkReconciler) ensureOrgIdentityAuthority(
 	ctx context.Context,
 	net *fabricopsv1alpha1.FabricNetwork,
@@ -148,6 +158,39 @@ func (r *FabricNetworkReconciler) ensureOrgIdentityAuthority(
 	return parseIdentityAuthority(secret)
 }
 
+func (r *FabricNetworkReconciler) ensureAdminIdentitySecrets(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	authority *identityAuthority,
+) error {
+	adminName := adminIdentityName(org)
+	mspSecret, err := buildWorkloadMSPSecret(net, org, namespace, adminName, componentAdmin, authority)
+	if err != nil {
+		return err
+	}
+	mspSecret.Labels[labelIdentityKind] = secretKindAdminMSP
+	if _, err := r.ensureSecret(ctx, mspSecret, func(secret corev1.Secret) string {
+		return identitySecretValidationError(secret, secretKindAdminMSP, net.Spec.Global.TLS)
+	}); err != nil {
+		return err
+	}
+
+	if !net.Spec.Global.TLS {
+		return nil
+	}
+
+	tlsSecret, err := buildAdminTLSSecret(net, org, namespace, adminName, authority)
+	if err != nil {
+		return err
+	}
+	_, err = r.ensureSecret(ctx, tlsSecret, func(secret corev1.Secret) string {
+		return identitySecretValidationError(secret, secretKindAdminTLS, net.Spec.Global.TLS)
+	})
+	return err
+}
+
 func (r *FabricNetworkReconciler) ensureWorkloadIdentitySecrets(
 	ctx context.Context,
 	net *fabricopsv1alpha1.FabricNetwork,
@@ -180,6 +223,44 @@ func (r *FabricNetworkReconciler) ensureWorkloadIdentitySecrets(
 		return identitySecretValidationError(secret, secretKindTLS, net.Spec.Global.TLS)
 	})
 	return err
+}
+
+func buildAdminTLSSecret(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	adminName string,
+	authority *identityAuthority,
+) (*corev1.Secret, error) {
+	certPEM, keyPEM, err := issueWorkloadCertificate(
+		adminName,
+		componentAdmin,
+		nil,
+		authority.tlsCACertPEM,
+		authority.tlsCAKey,
+		x509.KeyUsageDigitalSignature,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      identitySecretName(adminName, secretKindTLS),
+			Namespace: namespace,
+			Labels: identityLabels(net, org, componentAdmin, adminName, map[string]string{
+				labelIdentityKind: secretKindAdminTLS,
+				labelWorkload:     adminName,
+			}),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			tlsCACertKey:     authority.tlsCACertPEM,
+			tlsClientCertKey: certPEM,
+			tlsClientKeyKey:  keyPEM,
+		},
+	}, nil
 }
 
 func buildWorkloadMSPSecret(
@@ -528,6 +609,10 @@ func identitySecretValidationError(secret corev1.Secret, kind string, tlsEnabled
 		return mspIdentitySecretValidationError(secret, tlsEnabled)
 	case secretKindTLS:
 		return tlsIdentitySecretValidationError(secret)
+	case secretKindAdminMSP:
+		return mspIdentitySecretValidationError(secret, tlsEnabled)
+	case secretKindAdminTLS:
+		return adminTLSIdentitySecretValidationError(secret)
 	default:
 		return ""
 	}
@@ -581,6 +666,43 @@ func tlsIdentitySecretValidationError(secret corev1.Secret) string {
 	}
 
 	return ""
+}
+
+func adminTLSIdentitySecretValidationError(secret corev1.Secret) string {
+	missing := missingSecretKeys(secret, []string{
+		tlsCACertKey,
+		tlsClientCertKey,
+		tlsClientKeyKey,
+	})
+	if len(missing) > 0 {
+		return "missing keys: " + strings.Join(missing, ",")
+	}
+
+	if _, err := parsePEMCertificate(secret.Data[tlsCACertKey]); err != nil {
+		return "invalid TLS CA certificate"
+	}
+	cert, err := parsePEMCertificate(secret.Data[tlsClientCertKey])
+	if err != nil {
+		return "invalid TLS client certificate"
+	}
+	if !hasExtKeyUsage(cert, x509.ExtKeyUsageClientAuth) {
+		return "TLS client certificate missing client auth usage"
+	}
+	if _, err := parsePEMPrivateKey(secret.Data[tlsClientKeyKey]); err != nil {
+		return "invalid TLS client key"
+	}
+
+	return ""
+}
+
+func hasExtKeyUsage(cert *x509.Certificate, usage x509.ExtKeyUsage) bool {
+	for _, actual := range cert.ExtKeyUsage {
+		if actual == usage {
+			return true
+		}
+	}
+
+	return false
 }
 
 func parsePEMCertificate(data []byte) (*x509.Certificate, error) {
