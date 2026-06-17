@@ -51,9 +51,28 @@ const (
 	containerOrderer = "orderer"
 	containerPeer    = "peer"
 
-	caPort      int32 = 7054
-	ordererPort int32 = 7050
-	peerPort    int32 = 7051
+	caPort            int32 = 7054
+	ordererPort       int32 = 7050
+	peerPort          int32 = 7051
+	peerChaincodePort int32 = 7052
+
+	ordererMSPPath = "/var/hyperledger/orderer/msp"
+	ordererTLSPath = "/var/hyperledger/orderer/tls"
+	peerMSPPath    = "/etc/hyperledger/fabric/peer/msp"
+	peerTLSPath    = "/etc/hyperledger/fabric/peer/tls"
+
+	secretKindMSP = "msp"
+	secretKindTLS = "tls"
+
+	mspConfigKey    = "config.yaml"
+	mspCACertKey    = "cacert.pem"
+	mspTLSCACertKey = "tlscacert.pem"
+	mspSignCertKey  = "signcert.pem"
+	mspKeyStoreKey  = "keystore.pem"
+
+	tlsCACertKey     = "ca.crt"
+	tlsServerCertKey = "server.crt"
+	tlsServerKeyKey  = "server.key"
 )
 
 func sanitizeName(name string) string {
@@ -114,6 +133,214 @@ func compactNetworkName(name string) string {
 	}
 
 	return s
+}
+
+func serviceDNS(name, namespace string, port int32) string {
+	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", name, namespace, port)
+}
+
+func identitySecretName(workloadName, kind string) string {
+	return sanitizeName(fmt.Sprintf("%s-%s", workloadName, kind))
+}
+
+func mspSecretItems(tlsEnabled bool) []corev1.KeyToPath {
+	items := []corev1.KeyToPath{
+		{Key: mspConfigKey, Path: "config.yaml"},
+		{Key: mspCACertKey, Path: "cacerts/ca.pem"},
+		{Key: mspSignCertKey, Path: "signcerts/cert.pem"},
+		{Key: mspKeyStoreKey, Path: "keystore/key.pem"},
+	}
+
+	if tlsEnabled {
+		items = append(items, corev1.KeyToPath{
+			Key:  mspTLSCACertKey,
+			Path: "tlscacerts/tlsca.pem",
+		})
+	}
+
+	return items
+}
+
+func tlsSecretItems() []corev1.KeyToPath {
+	return []corev1.KeyToPath{
+		{Key: tlsCACertKey, Path: "ca.crt"},
+		{Key: tlsServerCertKey, Path: "server.crt"},
+		{Key: tlsServerKeyKey, Path: "server.key"},
+	}
+}
+
+func identityVolumes(workloadName string, tlsEnabled bool) []corev1.Volume {
+	volumes := []corev1.Volume{
+		{
+			Name: secretKindMSP,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: identitySecretName(workloadName, secretKindMSP),
+					Items:      mspSecretItems(tlsEnabled),
+				},
+			},
+		},
+	}
+
+	if tlsEnabled {
+		volumes = append(volumes, corev1.Volume{
+			Name: secretKindTLS,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: identitySecretName(workloadName, secretKindTLS),
+					Items:      tlsSecretItems(),
+				},
+			},
+		})
+	}
+
+	return volumes
+}
+
+func identityVolumeMounts(mspPath, tlsPath string, tlsEnabled bool) []corev1.VolumeMount {
+	mounts := []corev1.VolumeMount{
+		{
+			Name:      secretKindMSP,
+			MountPath: mspPath,
+			ReadOnly:  true,
+		},
+	}
+
+	if tlsEnabled {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      secretKindTLS,
+			MountPath: tlsPath,
+			ReadOnly:  true,
+		})
+	}
+
+	return mounts
+}
+
+type identitySecretRequirement struct {
+	namespace string
+	name      string
+	keys      []string
+}
+
+func mspSecretKeys(tlsEnabled bool) []string {
+	keys := []string{
+		mspConfigKey,
+		mspCACertKey,
+		mspSignCertKey,
+		mspKeyStoreKey,
+	}
+
+	if tlsEnabled {
+		keys = append(keys, mspTLSCACertKey)
+	}
+
+	return keys
+}
+
+func tlsSecretKeys() []string {
+	return []string{
+		tlsCACertKey,
+		tlsServerCertKey,
+		tlsServerKeyKey,
+	}
+}
+
+func requiredIdentitySecrets(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) []identitySecretRequirement {
+	tlsEnabled := net.Spec.Global.TLS
+	requirements := []identitySecretRequirement{}
+
+	for _, group := range org.Orderers {
+		for i := 0; i < group.Instances; i++ {
+			name := sanitizeName(fmt.Sprintf("%s%d", group.Prefix, i))
+			requirements = append(requirements, identitySecretRequirement{
+				namespace: namespace,
+				name:      identitySecretName(name, secretKindMSP),
+				keys:      mspSecretKeys(tlsEnabled),
+			})
+
+			if tlsEnabled {
+				requirements = append(requirements, identitySecretRequirement{
+					namespace: namespace,
+					name:      identitySecretName(name, secretKindTLS),
+					keys:      tlsSecretKeys(),
+				})
+			}
+		}
+	}
+
+	if org.Peer == nil {
+		return requirements
+	}
+
+	for i := 0; i < org.Peer.Instances; i++ {
+		name := sanitizeName(fmt.Sprintf("%s%d", org.Peer.Prefix, i))
+		requirements = append(requirements, identitySecretRequirement{
+			namespace: namespace,
+			name:      identitySecretName(name, secretKindMSP),
+			keys:      mspSecretKeys(tlsEnabled),
+		})
+
+		if tlsEnabled {
+			requirements = append(requirements, identitySecretRequirement{
+				namespace: namespace,
+				name:      identitySecretName(name, secretKindTLS),
+				keys:      tlsSecretKeys(),
+			})
+		}
+	}
+
+	return requirements
+}
+
+func missingSecretKeys(secret corev1.Secret, keys []string) []string {
+	missing := []string{}
+	for _, key := range keys {
+		if _, ok := secret.Data[key]; !ok {
+			missing = append(missing, key)
+		}
+	}
+
+	return missing
+}
+
+func (r *FabricNetworkReconciler) identityMaterialStatus(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) (bool, string, error) {
+	missing := []string{}
+
+	for _, requirement := range requiredIdentitySecrets(net, org, namespace) {
+		var secret corev1.Secret
+		err := r.Get(ctx, client.ObjectKey{
+			Namespace: requirement.namespace,
+			Name:      requirement.name,
+		}, &secret)
+		if apierrors.IsNotFound(err) {
+			missing = append(missing, fmt.Sprintf("%s/%s", requirement.namespace, requirement.name))
+			continue
+		}
+		if err != nil {
+			return false, "", err
+		}
+
+		missingKeys := missingSecretKeys(secret, requirement.keys)
+		if len(missingKeys) > 0 {
+			missing = append(missing, fmt.Sprintf("%s/%s missing keys: %s", requirement.namespace, requirement.name, strings.Join(missingKeys, ",")))
+		}
+	}
+
+	if len(missing) > 0 {
+		return false, "Missing identity material: " + strings.Join(missing, "; "), nil
+	}
+
+	return true, "", nil
 }
 
 func orgLabels(net *fabricopsv1alpha1.FabricNetwork, org fabricopsv1alpha1.Org, component string) map[string]string {
@@ -181,16 +408,31 @@ func (r *FabricNetworkReconciler) isDeploymentReady(
 	ctx context.Context,
 	namespace, name string,
 ) (bool, error) {
-	var deploy appsv1.Deployment
-	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &deploy); err != nil {
+	status, err := r.deploymentWorkloadStatus(ctx, namespace, name)
+	if err != nil {
 		return false, err
 	}
 
-	if deploy.Spec.Replicas == nil {
-		return false, nil
+	return workloadReady(status), nil
+}
+
+func (r *FabricNetworkReconciler) deploymentWorkloadStatus(
+	ctx context.Context,
+	namespace, name string,
+) (fabricopsv1alpha1.WorkloadStatus, error) {
+	var deploy appsv1.Deployment
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &deploy); err != nil {
+		return fabricopsv1alpha1.WorkloadStatus{}, err
 	}
 
-	return deploy.Status.ReadyReplicas >= *deploy.Spec.Replicas, nil
+	if deploy.Spec.Replicas == nil {
+		return fabricopsv1alpha1.WorkloadStatus{}, nil
+	}
+
+	return fabricopsv1alpha1.WorkloadStatus{
+		Desired: *deploy.Spec.Replicas,
+		Ready:   deploy.Status.ReadyReplicas,
+	}, nil
 }
 
 func buildCADeployment(
@@ -280,6 +522,25 @@ func buildOrdererDeployment(
 	replicas := int32(1)
 	labels := orgLabels(net, org, componentOrderer)
 	labels[labelOrdererGroup] = sanitizeName(group.GroupName)
+	tlsEnabled := net.Spec.Global.TLS
+	env := []corev1.EnvVar{
+		{Name: "ORDERER_GENERAL_LISTENADDRESS", Value: "0.0.0.0"},
+		{Name: "ORDERER_GENERAL_LISTENPORT", Value: fmt.Sprintf("%d", ordererPort)},
+		{Name: "ORDERER_GENERAL_LOCALMSPID", Value: org.Organization.MSPName},
+		{Name: "ORDERER_GENERAL_LOCALMSPDIR", Value: ordererMSPPath},
+	}
+
+	if tlsEnabled {
+		env = append(env,
+			corev1.EnvVar{Name: "ORDERER_GENERAL_TLS_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "ORDERER_GENERAL_TLS_PRIVATEKEY", Value: ordererTLSPath + "/server.key"},
+			corev1.EnvVar{Name: "ORDERER_GENERAL_TLS_CERTIFICATE", Value: ordererTLSPath + "/server.crt"},
+			corev1.EnvVar{Name: "ORDERER_GENERAL_TLS_ROOTCAS", Value: "[" + ordererTLSPath + "/ca.crt]"},
+			corev1.EnvVar{Name: "ORDERER_GENERAL_CLUSTER_CLIENTCERTIFICATE", Value: ordererTLSPath + "/server.crt"},
+			corev1.EnvVar{Name: "ORDERER_GENERAL_CLUSTER_CLIENTPRIVATEKEY", Value: ordererTLSPath + "/server.key"},
+			corev1.EnvVar{Name: "ORDERER_GENERAL_CLUSTER_ROOTCAS", Value: "[" + ordererTLSPath + "/ca.crt]"},
+		)
+	}
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -311,18 +572,16 @@ func buildOrdererDeployment(
 					},
 				},
 				Spec: corev1.PodSpec{
+					Volumes: identityVolumes(name, net.Spec.Global.TLS),
 					Containers: []corev1.Container{
 						{
 							Name:  containerOrderer,
 							Image: fabricComponentImage("orderer", net.Spec.Global.FabricVersion),
-							Env: []corev1.EnvVar{
-								{Name: "ORDERER_GENERAL_LISTENADDRESS", Value: "0.0.0.0"},
-								{Name: "ORDERER_GENERAL_LISTENPORT", Value: fmt.Sprintf("%d", ordererPort)},
-								{Name: "ORDERER_GENERAL_LOCALMSPID", Value: org.Organization.MSPName},
-							},
+							Env:   env,
 							Ports: []corev1.ContainerPort{
 								{ContainerPort: ordererPort, Name: "orderer"},
 							},
+							VolumeMounts: identityVolumeMounts(ordererMSPPath, ordererTLSPath, tlsEnabled),
 						},
 					},
 				},
@@ -375,12 +634,35 @@ func buildPeerDeployment(
 ) *appsv1.Deployment {
 	name := sanitizeName(fmt.Sprintf("%s%d", org.Peer.Prefix, instance))
 	replicas := int32(1)
+	peerAddress := serviceDNS(name, namespace, peerPort)
+	chaincodeAddress := serviceDNS(name, namespace, peerChaincodePort)
+	tlsEnabled := net.Spec.Global.TLS
 	selector := map[string]string{
 		labelFabricNetwork:          sanitizeName(net.Name),
 		labelFabricNetworkNamespace: sanitizeName(net.Namespace),
 		labelOrg:                    sanitizeName(org.Organization.Name),
 		labelComponent:              componentPeer,
 		labelInstance:               fmt.Sprintf("%d", instance),
+	}
+	env := []corev1.EnvVar{
+		{Name: "CORE_PEER_ID", Value: name},
+		{Name: "CORE_PEER_ADDRESS", Value: peerAddress},
+		{Name: "CORE_PEER_LISTENADDRESS", Value: fmt.Sprintf("0.0.0.0:%d", peerPort)},
+		{Name: "CORE_PEER_CHAINCODEADDRESS", Value: chaincodeAddress},
+		{Name: "CORE_PEER_CHAINCODELISTENADDRESS", Value: fmt.Sprintf("0.0.0.0:%d", peerChaincodePort)},
+		{Name: "CORE_PEER_GOSSIP_ENDPOINT", Value: peerAddress},
+		{Name: "CORE_PEER_GOSSIP_EXTERNALENDPOINT", Value: peerAddress},
+		{Name: "CORE_PEER_LOCALMSPID", Value: org.Organization.MSPName},
+		{Name: "CORE_PEER_MSPCONFIGPATH", Value: peerMSPPath},
+	}
+
+	if tlsEnabled {
+		env = append(env,
+			corev1.EnvVar{Name: "CORE_PEER_TLS_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "CORE_PEER_TLS_CERT_FILE", Value: peerTLSPath + "/server.crt"},
+			corev1.EnvVar{Name: "CORE_PEER_TLS_KEY_FILE", Value: peerTLSPath + "/server.key"},
+			corev1.EnvVar{Name: "CORE_PEER_TLS_ROOTCERT_FILE", Value: peerTLSPath + "/ca.crt"},
+		)
 	}
 
 	return &appsv1.Deployment{
@@ -399,19 +681,17 @@ func buildPeerDeployment(
 					Labels: selector,
 				},
 				Spec: corev1.PodSpec{
+					Volumes: identityVolumes(name, net.Spec.Global.TLS),
 					Containers: []corev1.Container{
 						{
 							Name:  containerPeer,
 							Image: fabricComponentImage("peer", net.Spec.Global.FabricVersion),
-							Env: []corev1.EnvVar{
-								{Name: "CORE_PEER_ID", Value: name},
-								{Name: "CORE_PEER_ADDRESS", Value: fmt.Sprintf("%s:%d", name, peerPort)},
-								{Name: "CORE_PEER_LISTENADDRESS", Value: "0.0.0.0:7051"},
-								{Name: "CORE_PEER_LOCALMSPID", Value: org.Organization.MSPName},
-							},
+							Env:   env,
 							Ports: []corev1.ContainerPort{
 								{ContainerPort: peerPort, Name: "peer"},
+								{ContainerPort: peerChaincodePort, Name: "chaincode"},
 							},
+							VolumeMounts: identityVolumeMounts(peerMSPPath, peerTLSPath, tlsEnabled),
 						},
 					},
 				},
@@ -449,6 +729,11 @@ func buildPeerService(
 					Port:       peerPort,
 					TargetPort: intstr.FromInt32(peerPort),
 				},
+				{
+					Name:       "chaincode",
+					Port:       peerChaincodePort,
+					TargetPort: intstr.FromInt32(peerChaincodePort),
+				},
 			},
 		},
 	}
@@ -483,22 +768,31 @@ func (r *FabricNetworkReconciler) reconcileOrderers(
 	net *fabricopsv1alpha1.FabricNetwork,
 	org fabricopsv1alpha1.Org,
 	namespace string,
-) error {
+) (fabricopsv1alpha1.WorkloadStatus, error) {
+	status := fabricopsv1alpha1.WorkloadStatus{}
+
 	for _, group := range org.Orderers {
 		for i := 0; i < group.Instances; i++ {
 			deploy := buildOrdererDeployment(net, org, group, i, namespace)
 			if err := r.ensureDeployment(ctx, deploy); err != nil {
-				return err
+				return status, err
 			}
 
 			svc := buildOrdererService(net, org, group, i, namespace)
 			if err := r.ensureService(ctx, svc); err != nil {
-				return err
+				return status, err
 			}
+
+			deploymentStatus, err := r.deploymentWorkloadStatus(ctx, namespace, deploy.Name)
+			if err != nil {
+				return status, err
+			}
+			status.Desired += deploymentStatus.Desired
+			status.Ready += deploymentStatus.Ready
 		}
 	}
 
-	return nil
+	return status, nil
 }
 
 func (r *FabricNetworkReconciler) reconcilePeers(
@@ -506,22 +800,31 @@ func (r *FabricNetworkReconciler) reconcilePeers(
 	net *fabricopsv1alpha1.FabricNetwork,
 	org fabricopsv1alpha1.Org,
 	namespace string,
-) error {
+) (fabricopsv1alpha1.WorkloadStatus, error) {
+	status := fabricopsv1alpha1.WorkloadStatus{}
+
 	if org.Peer == nil {
-		return nil
+		return status, nil
 	}
 
 	for i := 0; i < org.Peer.Instances; i++ {
 		deploy := buildPeerDeployment(net, org, i, namespace)
 		if err := r.ensureDeployment(ctx, deploy); err != nil {
-			return err
+			return status, err
 		}
 
 		svc := buildPeerService(net, org, i, namespace)
 		if err := r.ensureService(ctx, svc); err != nil {
-			return err
+			return status, err
 		}
+
+		deploymentStatus, err := r.deploymentWorkloadStatus(ctx, namespace, deploy.Name)
+		if err != nil {
+			return status, err
+		}
+		status.Desired += deploymentStatus.Desired
+		status.Ready += deploymentStatus.Ready
 	}
 
-	return nil
+	return status, nil
 }

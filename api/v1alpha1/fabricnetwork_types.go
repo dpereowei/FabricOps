@@ -85,10 +85,22 @@ type Chaincode struct {
 	Image   string `json:"image"`
 }
 
+type WorkloadStatus struct {
+	Desired int32 `json:"desired"`
+	Ready   int32 `json:"ready"`
+}
+
 type OrgStatus struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace,omitempty"`
-	CAReady   bool   `json:"caReady"`
+	Name          string         `json:"name"`
+	Namespace     string         `json:"namespace,omitempty"`
+	IdentityReady bool           `json:"identityReady"`
+	IdentityError string         `json:"identityError,omitempty"`
+	CAReady       bool           `json:"caReady"`
+	Orderers      WorkloadStatus `json:"orderers,omitempty"`
+	OrderersReady bool           `json:"orderersReady"`
+	Peers         WorkloadStatus `json:"peers,omitempty"`
+	PeersReady    bool           `json:"peersReady"`
+	Ready         bool           `json:"ready"`
 }
 
 // FabricNetworkStatus defines the observed state of FabricNetwork.
@@ -97,6 +109,13 @@ type FabricNetworkStatus struct {
 	Phase     Phase       `json:"phase,omitempty"`
 	Message   string      `json:"message,omitempty"`
 	OrgStatus []OrgStatus `json:"orgStatus,omitempty"`
+
+	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 type Phase string

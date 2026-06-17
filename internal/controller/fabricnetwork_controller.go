@@ -19,10 +19,12 @@ package controller
 import (
 	"context"
 	"reflect"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -37,6 +39,11 @@ type FabricNetworkReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
+
+const (
+	conditionReady                 = "Ready"
+	conditionIdentityMaterialReady = "IdentityMaterialReady"
+)
 
 func orgNamespaceName(net *fabricopsv1alpha1.FabricNetwork, org fabricopsv1alpha1.Org) string {
 	return sanitizeName("fo-" + networkNamespaceSlug(net) + "-" + org.Organization.Name)
@@ -117,19 +124,33 @@ func (r *FabricNetworkReconciler) reconcileOrg(
 		return status, err
 	}
 
+	identityReady, identityError, err := r.identityMaterialStatus(ctx, net, org, namespace)
+	if err != nil {
+		return status, err
+	}
+	status.IdentityReady = identityReady
+	status.IdentityError = identityError
+
 	caReady, err := r.reconcileCA(ctx, net, org, namespace)
 	if err != nil {
 		return status, err
 	}
 	status.CAReady = caReady
 
-	if err := r.reconcileOrderers(ctx, net, org, namespace); err != nil {
+	orderers, err := r.reconcileOrderers(ctx, net, org, namespace)
+	if err != nil {
 		return status, err
 	}
+	status.Orderers = orderers
+	status.OrderersReady = workloadReady(orderers)
 
-	if err := r.reconcilePeers(ctx, net, org, namespace); err != nil {
+	peers, err := r.reconcilePeers(ctx, net, org, namespace)
+	if err != nil {
 		return status, err
 	}
+	status.Peers = peers
+	status.PeersReady = workloadReady(peers)
+	status.Ready = status.IdentityReady && status.CAReady && status.OrderersReady && status.PeersReady
 
 	return status, nil
 }
@@ -155,18 +176,84 @@ func orgStatusesEqual(a, b []fabricopsv1alpha1.OrgStatus) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-func allCAsReady(statuses []fabricopsv1alpha1.OrgStatus) bool {
+func workloadReady(status fabricopsv1alpha1.WorkloadStatus) bool {
+	return status.Ready >= status.Desired
+}
+
+func allOrgsReady(statuses []fabricopsv1alpha1.OrgStatus) bool {
 	if len(statuses) == 0 {
 		return false
 	}
 
 	for _, status := range statuses {
-		if !status.CAReady {
+		if !status.Ready {
 			return false
 		}
 	}
 
 	return true
+}
+
+func identityMaterialReady(statuses []fabricopsv1alpha1.OrgStatus) bool {
+	for _, status := range statuses {
+		if !status.IdentityReady {
+			return false
+		}
+	}
+
+	return true
+}
+
+func identityMaterialMessage(statuses []fabricopsv1alpha1.OrgStatus) string {
+	messages := []string{}
+	for _, status := range statuses {
+		if status.IdentityError != "" {
+			messages = append(messages, status.Name+": "+status.IdentityError)
+		}
+	}
+
+	if len(messages) == 0 {
+		return "All required identity material is present"
+	}
+
+	return strings.Join(messages, "; ")
+}
+
+func readyCondition(
+	net *fabricopsv1alpha1.FabricNetwork,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) []metav1.Condition {
+	conditions := append([]metav1.Condition(nil), net.Status.Conditions...)
+	apiMeta.SetStatusCondition(&conditions, metav1.Condition{
+		Type:               conditionReady,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: net.Generation,
+	})
+
+	return conditions
+}
+
+func identityMaterialCondition(
+	net *fabricopsv1alpha1.FabricNetwork,
+	conditions []metav1.Condition,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) []metav1.Condition {
+	conditions = append([]metav1.Condition(nil), conditions...)
+	apiMeta.SetStatusCondition(&conditions, metav1.Condition{
+		Type:               conditionIdentityMaterialReady,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: net.Generation,
+	})
+
+	return conditions
 }
 
 func (r *FabricNetworkReconciler) updateStatus(
@@ -175,10 +262,12 @@ func (r *FabricNetworkReconciler) updateStatus(
 	newPhase fabricopsv1alpha1.Phase,
 	newMessage string,
 	orgStatus []fabricopsv1alpha1.OrgStatus,
+	conditions []metav1.Condition,
 ) error {
 	if net.Status.Phase == newPhase &&
 		net.Status.Message == newMessage &&
-		orgStatusesEqual(net.Status.OrgStatus, orgStatus) {
+		orgStatusesEqual(net.Status.OrgStatus, orgStatus) &&
+		reflect.DeepEqual(net.Status.Conditions, conditions) {
 		return nil
 	}
 
@@ -186,6 +275,7 @@ func (r *FabricNetworkReconciler) updateStatus(
 	base.Status.Phase = newPhase
 	base.Status.Message = newMessage
 	base.Status.OrgStatus = orgStatus
+	base.Status.Conditions = conditions
 
 	log := logf.FromContext(ctx)
 
@@ -206,6 +296,7 @@ func (r *FabricNetworkReconciler) updateStatus(
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -234,18 +325,41 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			fabricopsv1alpha1.PhaseFailed,
 			"Failed to reconcile orgs: "+err.Error(),
 			orgStatuses,
+			identityMaterialCondition(
+				&network,
+				readyCondition(&network, metav1.ConditionFalse, "ReconcileError", "Failed to reconcile orgs: "+err.Error()),
+				metav1.ConditionUnknown,
+				"ReconcileError",
+				"Failed to check identity material: "+err.Error(),
+			),
 		)
 
 		return ctrl.Result{}, err
 	}
 
-	if allCAsReady(orgStatuses) {
+	identityReady := identityMaterialReady(orgStatuses)
+	identityStatus := metav1.ConditionFalse
+	identityReason := "IdentityMaterialMissing"
+	if identityReady {
+		identityStatus = metav1.ConditionTrue
+		identityReason = "IdentityMaterialPresent"
+	}
+	identityMessage := identityMaterialMessage(orgStatuses)
+
+	if allOrgsReady(orgStatuses) {
 		if err := r.updateStatus(
 			ctx,
 			&network,
 			fabricopsv1alpha1.PhaseReady,
-			"All orgs reconciled",
+			"All Fabric components are ready",
 			orgStatuses,
+			identityMaterialCondition(
+				&network,
+				readyCondition(&network, metav1.ConditionTrue, "ComponentsReady", "All Fabric components are ready"),
+				identityStatus,
+				identityReason,
+				identityMessage,
+			),
 		); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -253,12 +367,26 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
+	readyReason := "ComponentsNotReady"
+	readyMessage := "Waiting for Fabric components to become ready"
+	if !identityReady {
+		readyReason = "IdentityMaterialMissing"
+		readyMessage = "Waiting for required Fabric identity material"
+	}
+
 	if err := r.updateStatus(
 		ctx,
 		&network,
 		fabricopsv1alpha1.PhaseCreating,
-		"Waiting for org CAs to become ready",
+		readyMessage,
 		orgStatuses,
+		identityMaterialCondition(
+			&network,
+			readyCondition(&network, metav1.ConditionFalse, readyReason, readyMessage),
+			identityStatus,
+			identityReason,
+			identityMessage,
+		),
 	); err != nil {
 		return ctrl.Result{}, err
 	}
