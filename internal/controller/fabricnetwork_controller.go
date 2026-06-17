@@ -124,6 +124,10 @@ func (r *FabricNetworkReconciler) reconcileOrg(
 		return status, err
 	}
 
+	if err := r.reconcileIdentityMaterial(ctx, net, org, namespace); err != nil {
+		return status, err
+	}
+
 	identityReady, identityError, err := r.identityMaterialStatus(ctx, net, org, namespace)
 	if err != nil {
 		return status, err
@@ -296,7 +300,7 @@ func (r *FabricNetworkReconciler) updateStatus(
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.

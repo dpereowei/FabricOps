@@ -42,6 +42,8 @@ const (
 	labelComponent              = "fabricops.my.domain/component"
 	labelOrdererGroup           = "fabricops.my.domain/orderer-group"
 	labelInstance               = "fabricops.my.domain/instance"
+	labelIdentityKind           = "fabricops.my.domain/identity-kind"
+	labelWorkload               = "fabricops.my.domain/workload"
 
 	componentCA      = "ca"
 	componentOrderer = "orderer"
@@ -220,6 +222,7 @@ func identityVolumeMounts(mspPath, tlsPath string, tlsEnabled bool) []corev1.Vol
 type identitySecretRequirement struct {
 	namespace string
 	name      string
+	kind      string
 	keys      []string
 }
 
@@ -260,6 +263,7 @@ func requiredIdentitySecrets(
 			requirements = append(requirements, identitySecretRequirement{
 				namespace: namespace,
 				name:      identitySecretName(name, secretKindMSP),
+				kind:      secretKindMSP,
 				keys:      mspSecretKeys(tlsEnabled),
 			})
 
@@ -267,6 +271,7 @@ func requiredIdentitySecrets(
 				requirements = append(requirements, identitySecretRequirement{
 					namespace: namespace,
 					name:      identitySecretName(name, secretKindTLS),
+					kind:      secretKindTLS,
 					keys:      tlsSecretKeys(),
 				})
 			}
@@ -282,6 +287,7 @@ func requiredIdentitySecrets(
 		requirements = append(requirements, identitySecretRequirement{
 			namespace: namespace,
 			name:      identitySecretName(name, secretKindMSP),
+			kind:      secretKindMSP,
 			keys:      mspSecretKeys(tlsEnabled),
 		})
 
@@ -289,6 +295,7 @@ func requiredIdentitySecrets(
 			requirements = append(requirements, identitySecretRequirement{
 				namespace: namespace,
 				name:      identitySecretName(name, secretKindTLS),
+				kind:      secretKindTLS,
 				keys:      tlsSecretKeys(),
 			})
 		}
@@ -333,6 +340,11 @@ func (r *FabricNetworkReconciler) identityMaterialStatus(
 		missingKeys := missingSecretKeys(secret, requirement.keys)
 		if len(missingKeys) > 0 {
 			missing = append(missing, fmt.Sprintf("%s/%s missing keys: %s", requirement.namespace, requirement.name, strings.Join(missingKeys, ",")))
+			continue
+		}
+
+		if validationError := identitySecretValidationError(secret, requirement.kind, net.Spec.Global.TLS); validationError != "" {
+			missing = append(missing, fmt.Sprintf("%s/%s invalid: %s", requirement.namespace, requirement.name, validationError))
 		}
 	}
 

@@ -1,0 +1,643 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"fmt"
+	"math/big"
+	"net"
+	"strings"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	fabricopsv1alpha1 "github.com/dpereowei/fabricops/api/v1alpha1"
+)
+
+const (
+	secretKindOrgCA = "org-ca"
+
+	orgMSPCACertKey = "msp-ca.crt"
+	orgMSPCAKeyKey  = "msp-ca.key"
+	orgTLSCACertKey = "tls-ca.crt"
+	orgTLSCAKeyKey  = "tls-ca.key"
+)
+
+type identityAuthority struct {
+	mspCACertPEM []byte
+	mspCAKey     *ecdsa.PrivateKey
+	tlsCACertPEM []byte
+	tlsCAKey     *ecdsa.PrivateKey
+}
+
+func (r *FabricNetworkReconciler) reconcileIdentityMaterial(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) error {
+	authority, err := r.ensureOrgIdentityAuthority(ctx, net, org, namespace)
+	if err != nil {
+		return err
+	}
+
+	for _, group := range org.Orderers {
+		for i := 0; i < group.Instances; i++ {
+			name := sanitizeName(fmt.Sprintf("%s%d", group.Prefix, i))
+			if err := r.ensureWorkloadIdentitySecrets(
+				ctx,
+				net,
+				org,
+				namespace,
+				name,
+				componentOrderer,
+				workloadDNSNames(name, namespace),
+				authority,
+			); err != nil {
+				return err
+			}
+		}
+	}
+
+	if org.Peer == nil {
+		return nil
+	}
+
+	for i := 0; i < org.Peer.Instances; i++ {
+		name := sanitizeName(fmt.Sprintf("%s%d", org.Peer.Prefix, i))
+		if err := r.ensureWorkloadIdentitySecrets(
+			ctx,
+			net,
+			org,
+			namespace,
+			name,
+			componentPeer,
+			workloadDNSNames(name, namespace),
+			authority,
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func orgIdentitySecretName(org fabricopsv1alpha1.Org) string {
+	return sanitizeName(org.Organization.Name + "-identity-ca")
+}
+
+func (r *FabricNetworkReconciler) ensureOrgIdentityAuthority(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) (*identityAuthority, error) {
+	desiredAuthority, err := generateIdentityAuthority(org)
+	if err != nil {
+		return nil, err
+	}
+
+	name := orgIdentitySecretName(org)
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: identityLabels(net, org, secretKindOrgCA, name, map[string]string{
+				labelIdentityKind: secretKindOrgCA,
+			}),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			orgMSPCACertKey: desiredAuthority.mspCACertPEM,
+			orgMSPCAKeyKey:  pemEncodeECPrivateKey(desiredAuthority.mspCAKey),
+			orgTLSCACertKey: desiredAuthority.tlsCACertPEM,
+			orgTLSCAKeyKey:  pemEncodeECPrivateKey(desiredAuthority.tlsCAKey),
+		},
+	}
+
+	secret, err := r.ensureSecret(ctx, desired, orgIdentitySecretValidationError)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseIdentityAuthority(secret)
+}
+
+func (r *FabricNetworkReconciler) ensureWorkloadIdentitySecrets(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	workloadName string,
+	component string,
+	dnsNames []string,
+	authority *identityAuthority,
+) error {
+	mspSecret, err := buildWorkloadMSPSecret(net, org, namespace, workloadName, component, authority)
+	if err != nil {
+		return err
+	}
+	if _, err := r.ensureSecret(ctx, mspSecret, func(secret corev1.Secret) string {
+		return identitySecretValidationError(secret, secretKindMSP, net.Spec.Global.TLS)
+	}); err != nil {
+		return err
+	}
+
+	if !net.Spec.Global.TLS {
+		return nil
+	}
+
+	tlsSecret, err := buildWorkloadTLSSecret(net, org, namespace, workloadName, component, dnsNames, authority)
+	if err != nil {
+		return err
+	}
+	_, err = r.ensureSecret(ctx, tlsSecret, func(secret corev1.Secret) string {
+		return identitySecretValidationError(secret, secretKindTLS, net.Spec.Global.TLS)
+	})
+	return err
+}
+
+func buildWorkloadMSPSecret(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	workloadName string,
+	component string,
+	authority *identityAuthority,
+) (*corev1.Secret, error) {
+	certPEM, keyPEM, err := issueWorkloadCertificate(
+		workloadName,
+		component,
+		nil,
+		authority.mspCACertPEM,
+		authority.mspCAKey,
+		x509.KeyUsageDigitalSignature,
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	data := map[string][]byte{
+		mspConfigKey:   []byte(mspConfigYAML()),
+		mspCACertKey:   authority.mspCACertPEM,
+		mspSignCertKey: certPEM,
+		mspKeyStoreKey: keyPEM,
+	}
+
+	if net.Spec.Global.TLS {
+		data[mspTLSCACertKey] = authority.tlsCACertPEM
+	}
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      identitySecretName(workloadName, secretKindMSP),
+			Namespace: namespace,
+			Labels: identityLabels(net, org, component, workloadName, map[string]string{
+				labelIdentityKind: secretKindMSP,
+				labelWorkload:     workloadName,
+			}),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: data,
+	}, nil
+}
+
+func buildWorkloadTLSSecret(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	workloadName string,
+	component string,
+	dnsNames []string,
+	authority *identityAuthority,
+) (*corev1.Secret, error) {
+	certPEM, keyPEM, err := issueWorkloadCertificate(
+		workloadName,
+		component,
+		dnsNames,
+		authority.tlsCACertPEM,
+		authority.tlsCAKey,
+		x509.KeyUsageDigitalSignature|x509.KeyUsageKeyEncipherment,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      identitySecretName(workloadName, secretKindTLS),
+			Namespace: namespace,
+			Labels: identityLabels(net, org, component, workloadName, map[string]string{
+				labelIdentityKind: secretKindTLS,
+				labelWorkload:     workloadName,
+			}),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			tlsCACertKey:     authority.tlsCACertPEM,
+			tlsServerCertKey: certPEM,
+			tlsServerKeyKey:  keyPEM,
+		},
+	}, nil
+}
+
+func (r *FabricNetworkReconciler) ensureSecret(
+	ctx context.Context,
+	desired *corev1.Secret,
+	validationError func(corev1.Secret) string,
+) (corev1.Secret, error) {
+	var existing corev1.Secret
+	key := client.ObjectKeyFromObject(desired)
+
+	err := r.Get(ctx, key, &existing)
+	if apierrors.IsNotFound(err) {
+		log := logf.FromContext(ctx)
+		log.Info("Creating Secret", "name", desired.Name, "namespace", desired.Namespace)
+		return *desired, r.Create(ctx, desired)
+	}
+	if err != nil {
+		return corev1.Secret{}, err
+	}
+
+	changed := false
+	if existing.Labels == nil {
+		existing.Labels = map[string]string{}
+		changed = true
+	}
+	for key, value := range desired.Labels {
+		if existing.Labels[key] != value {
+			existing.Labels[key] = value
+			changed = true
+		}
+	}
+
+	if validationError != nil {
+		if reason := validationError(existing); reason != "" {
+			existing.Data = desired.Data
+			existing.Type = desired.Type
+			changed = true
+		}
+	}
+
+	if !changed {
+		return existing, nil
+	}
+
+	log := logf.FromContext(ctx)
+	log.Info("Updating Secret", "name", existing.Name, "namespace", existing.Namespace)
+	return existing, r.Update(ctx, &existing)
+}
+
+func identityLabels(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	component string,
+	workloadName string,
+	extra map[string]string,
+) map[string]string {
+	labels := orgLabels(net, org, component)
+	labels[labelWorkload] = workloadName
+
+	for key, value := range extra {
+		labels[key] = value
+	}
+
+	return labels
+}
+
+func generateIdentityAuthority(org fabricopsv1alpha1.Org) (*identityAuthority, error) {
+	mspCert, mspKey, err := generateCertificateAuthority("ca."+org.Organization.Domain, org.Organization.MSPName)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsCert, tlsKey, err := generateCertificateAuthority("tlsca."+org.Organization.Domain, org.Organization.MSPName)
+	if err != nil {
+		return nil, err
+	}
+
+	return &identityAuthority{
+		mspCACertPEM: mspCert,
+		mspCAKey:     mspKey,
+		tlsCACertPEM: tlsCert,
+		tlsCAKey:     tlsKey,
+	}, nil
+}
+
+func generateCertificateAuthority(commonName, organization string) ([]byte, *ecdsa.PrivateKey, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	serial, err := randomSerial()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName:   commonName,
+			Organization: []string{organization},
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().AddDate(10, 0, 0),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return pemEncodeCertificate(certDER), key, nil
+}
+
+func issueWorkloadCertificate(
+	commonName string,
+	organizationalUnit string,
+	dnsNames []string,
+	caCertPEM []byte,
+	caKey *ecdsa.PrivateKey,
+	keyUsage x509.KeyUsage,
+	usages []x509.ExtKeyUsage,
+) ([]byte, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	caCert, err := parsePEMCertificate(caCertPEM)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	serial, err := randomSerial()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName:         commonName,
+			OrganizationalUnit: []string{organizationalUnit},
+		},
+		DNSNames:              dnsNames,
+		IPAddresses:           workloadIPAddresses(dnsNames),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().AddDate(1, 0, 0),
+		KeyUsage:              keyUsage,
+		ExtKeyUsage:           usages,
+		BasicConstraintsValid: true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return pemEncodeCertificate(certDER), pemEncodeECPrivateKey(key), nil
+}
+
+func randomSerial() (*big.Int, error) {
+	limit := new(big.Int).Lsh(big.NewInt(1), 128)
+	return rand.Int(rand.Reader, limit)
+}
+
+func workloadDNSNames(name, namespace string) []string {
+	return []string{
+		name,
+		fmt.Sprintf("%s.%s", name, namespace),
+		fmt.Sprintf("%s.%s.svc", name, namespace),
+		fmt.Sprintf("%s.%s.svc.cluster.local", name, namespace),
+		"localhost",
+	}
+}
+
+func workloadIPAddresses(names []string) []net.IP {
+	ips := []net.IP{}
+	for _, name := range names {
+		if ip := net.ParseIP(name); ip != nil {
+			ips = append(ips, ip)
+		}
+	}
+
+	ips = append(ips, net.ParseIP("127.0.0.1"))
+	return ips
+}
+
+func pemEncodeCertificate(der []byte) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func pemEncodeECPrivateKey(key *ecdsa.PrivateKey) []byte {
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil
+	}
+
+	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+}
+
+func parseIdentityAuthority(secret corev1.Secret) (*identityAuthority, error) {
+	mspCAKey, err := parsePEMECPrivateKey(secret.Data[orgMSPCAKeyKey])
+	if err != nil {
+		return nil, fmt.Errorf("invalid MSP CA key: %w", err)
+	}
+	if _, err := parsePEMCertificate(secret.Data[orgMSPCACertKey]); err != nil {
+		return nil, fmt.Errorf("invalid MSP CA certificate: %w", err)
+	}
+
+	tlsCAKey, err := parsePEMECPrivateKey(secret.Data[orgTLSCAKeyKey])
+	if err != nil {
+		return nil, fmt.Errorf("invalid TLS CA key: %w", err)
+	}
+	if _, err := parsePEMCertificate(secret.Data[orgTLSCACertKey]); err != nil {
+		return nil, fmt.Errorf("invalid TLS CA certificate: %w", err)
+	}
+
+	return &identityAuthority{
+		mspCACertPEM: secret.Data[orgMSPCACertKey],
+		mspCAKey:     mspCAKey,
+		tlsCACertPEM: secret.Data[orgTLSCACertKey],
+		tlsCAKey:     tlsCAKey,
+	}, nil
+}
+
+func orgIdentitySecretValidationError(secret corev1.Secret) string {
+	missing := missingSecretKeys(secret, []string{
+		orgMSPCACertKey,
+		orgMSPCAKeyKey,
+		orgTLSCACertKey,
+		orgTLSCAKeyKey,
+	})
+	if len(missing) > 0 {
+		return "missing keys: " + strings.Join(missing, ",")
+	}
+
+	if _, err := parsePEMCertificate(secret.Data[orgMSPCACertKey]); err != nil {
+		return "invalid MSP CA certificate"
+	}
+	if _, err := parsePEMECPrivateKey(secret.Data[orgMSPCAKeyKey]); err != nil {
+		return "invalid MSP CA key"
+	}
+	if _, err := parsePEMCertificate(secret.Data[orgTLSCACertKey]); err != nil {
+		return "invalid TLS CA certificate"
+	}
+	if _, err := parsePEMECPrivateKey(secret.Data[orgTLSCAKeyKey]); err != nil {
+		return "invalid TLS CA key"
+	}
+
+	return ""
+}
+
+func identitySecretValidationError(secret corev1.Secret, kind string, tlsEnabled bool) string {
+	switch kind {
+	case secretKindMSP:
+		return mspIdentitySecretValidationError(secret, tlsEnabled)
+	case secretKindTLS:
+		return tlsIdentitySecretValidationError(secret)
+	default:
+		return ""
+	}
+}
+
+func mspIdentitySecretValidationError(secret corev1.Secret, tlsEnabled bool) string {
+	missing := missingSecretKeys(secret, mspSecretKeys(tlsEnabled))
+	if len(missing) > 0 {
+		return "missing keys: " + strings.Join(missing, ",")
+	}
+
+	if strings.TrimSpace(string(secret.Data[mspConfigKey])) == "" {
+		return "empty MSP config"
+	}
+	if _, err := parsePEMCertificate(secret.Data[mspCACertKey]); err != nil {
+		return "invalid MSP CA certificate"
+	}
+	if tlsEnabled {
+		if _, err := parsePEMCertificate(secret.Data[mspTLSCACertKey]); err != nil {
+			return "invalid TLS CA certificate"
+		}
+	}
+	signCert, err := parsePEMCertificate(secret.Data[mspSignCertKey])
+	if err != nil {
+		return "invalid signing certificate"
+	}
+	if len(signCert.ExtKeyUsage) > 0 {
+		return "signing certificate has incompatible extended key usage"
+	}
+	if _, err := parsePEMPrivateKey(secret.Data[mspKeyStoreKey]); err != nil {
+		return "invalid private key"
+	}
+
+	return ""
+}
+
+func tlsIdentitySecretValidationError(secret corev1.Secret) string {
+	missing := missingSecretKeys(secret, tlsSecretKeys())
+	if len(missing) > 0 {
+		return "missing keys: " + strings.Join(missing, ",")
+	}
+
+	if _, err := parsePEMCertificate(secret.Data[tlsCACertKey]); err != nil {
+		return "invalid TLS CA certificate"
+	}
+	if _, err := parsePEMCertificate(secret.Data[tlsServerCertKey]); err != nil {
+		return "invalid TLS server certificate"
+	}
+	if _, err := parsePEMPrivateKey(secret.Data[tlsServerKeyKey]); err != nil {
+		return "invalid TLS server key"
+	}
+
+	return ""
+}
+
+func parsePEMCertificate(data []byte) (*x509.Certificate, error) {
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("missing certificate PEM block")
+	}
+
+	return x509.ParseCertificate(block.Bytes)
+}
+
+func parsePEMECPrivateKey(data []byte) (*ecdsa.PrivateKey, error) {
+	key, err := parsePEMPrivateKey(data)
+	if err != nil {
+		return nil, err
+	}
+
+	ecKey, ok := key.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("private key is not ECDSA")
+	}
+
+	return ecKey, nil
+}
+
+func parsePEMPrivateKey(data []byte) (any, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("missing private key PEM block")
+	}
+
+	switch block.Type {
+	case "EC PRIVATE KEY":
+		return x509.ParseECPrivateKey(block.Bytes)
+	case "PRIVATE KEY":
+		return x509.ParsePKCS8PrivateKey(block.Bytes)
+	case "RSA PRIVATE KEY":
+		return x509.ParsePKCS1PrivateKey(block.Bytes)
+	default:
+		return nil, fmt.Errorf("unsupported private key PEM block %q", block.Type)
+	}
+}
+
+func mspConfigYAML() string {
+	return `NodeOUs:
+  Enable: true
+  ClientOUIdentifier:
+    Certificate: cacerts/ca.pem
+    OrganizationalUnitIdentifier: client
+  PeerOUIdentifier:
+    Certificate: cacerts/ca.pem
+    OrganizationalUnitIdentifier: peer
+  AdminOUIdentifier:
+    Certificate: cacerts/ca.pem
+    OrganizationalUnitIdentifier: admin
+  OrdererOUIdentifier:
+    Certificate: cacerts/ca.pem
+    OrganizationalUnitIdentifier: orderer
+`
+}

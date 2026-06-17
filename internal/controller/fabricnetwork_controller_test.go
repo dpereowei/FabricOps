@@ -224,13 +224,12 @@ var _ = Describe("FabricNetwork Controller", func() {
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
 			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseCreating))
-			Expect(network.Status.Message).To(Equal("Waiting for required Fabric identity material"))
+			Expect(network.Status.Message).To(Equal("Waiting for Fabric components to become ready"))
 			Expect(network.Status.OrgStatus).To(HaveLen(2))
 			Expect(network.Status.OrgStatus[0].Name).To(Equal("Orderer"))
 			Expect(network.Status.OrgStatus[0].Namespace).To(Equal(ordererNamespace))
-			Expect(network.Status.OrgStatus[0].IdentityReady).To(BeFalse())
-			Expect(network.Status.OrgStatus[0].IdentityError).To(ContainSubstring("fo-test-orderer/orderer0-msp"))
-			Expect(network.Status.OrgStatus[0].IdentityError).To(ContainSubstring("fo-test-orderer/orderer0-tls"))
+			Expect(network.Status.OrgStatus[0].IdentityReady).To(BeTrue())
+			Expect(network.Status.OrgStatus[0].IdentityError).To(BeEmpty())
 			Expect(network.Status.OrgStatus[0].CAReady).To(BeFalse())
 			Expect(network.Status.OrgStatus[0].Orderers.Desired).To(Equal(int32(1)))
 			Expect(network.Status.OrgStatus[0].Orderers.Ready).To(Equal(int32(0)))
@@ -241,9 +240,8 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.OrgStatus[0].Ready).To(BeFalse())
 			Expect(network.Status.OrgStatus[1].Name).To(Equal("BankA"))
 			Expect(network.Status.OrgStatus[1].Namespace).To(Equal(bankNamespace))
-			Expect(network.Status.OrgStatus[1].IdentityReady).To(BeFalse())
-			Expect(network.Status.OrgStatus[1].IdentityError).To(ContainSubstring("fo-test-banka/peer0-msp"))
-			Expect(network.Status.OrgStatus[1].IdentityError).To(ContainSubstring("fo-test-banka/peer0-tls"))
+			Expect(network.Status.OrgStatus[1].IdentityReady).To(BeTrue())
+			Expect(network.Status.OrgStatus[1].IdentityError).To(BeEmpty())
 			Expect(network.Status.OrgStatus[1].CAReady).To(BeFalse())
 			Expect(network.Status.OrgStatus[1].Orderers.Desired).To(Equal(int32(0)))
 			Expect(network.Status.OrgStatus[1].Orderers.Ready).To(Equal(int32(0)))
@@ -256,12 +254,65 @@ var _ = Describe("FabricNetwork Controller", func() {
 			ready := apiMeta.FindStatusCondition(network.Status.Conditions, conditionReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-			Expect(ready.Reason).To(Equal("IdentityMaterialMissing"))
+			Expect(ready.Reason).To(Equal("ComponentsNotReady"))
 
 			identity := apiMeta.FindStatusCondition(network.Status.Conditions, conditionIdentityMaterialReady)
 			Expect(identity).NotTo(BeNil())
-			Expect(identity.Status).To(Equal(metav1.ConditionFalse))
-			Expect(identity.Reason).To(Equal("IdentityMaterialMissing"))
+			Expect(identity.Status).To(Equal(metav1.ConditionTrue))
+			Expect(identity.Reason).To(Equal("IdentityMaterialPresent"))
+
+			expectIdentitySecret(ctx, ordererNamespace, orgIdentitySecretName(network.Spec.Orgs[0]), secretKindOrgCA, true)
+			expectIdentitySecret(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true)
+			expectIdentitySecret(ctx, ordererNamespace, "orderer0-tls", secretKindTLS, true)
+			expectIdentitySecret(ctx, bankNamespace, orgIdentitySecretName(network.Spec.Orgs[1]), secretKindOrgCA, true)
+			expectIdentitySecret(ctx, bankNamespace, "peer0-msp", secretKindMSP, true)
+			expectIdentitySecret(ctx, bankNamespace, "peer0-tls", secretKindTLS, true)
+		})
+
+		It("should recreate missing and malformed generated identity secrets", func() {
+			By("Reconciling the created resource")
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			ordererNamespace := "fo-test-orderer"
+			bankNamespace := "fo-test-banka"
+
+			By("Deleting one generated secret and corrupting another")
+			var peerTLS corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "peer0-tls",
+			}, &peerTLS)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &peerTLS)).To(Succeed())
+
+			var ordererMSP corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "orderer0-msp",
+			}, &ordererMSP)).To(Succeed())
+			ordererMSP.Data[mspSignCertKey] = []byte("not a pem certificate")
+			Expect(k8sClient.Update(ctx, &ordererMSP)).To(Succeed())
+
+			By("Reconciling again")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			expectIdentitySecret(ctx, bankNamespace, "peer0-tls", secretKindTLS, true)
+			expectIdentitySecret(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true)
+
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.OrgStatus[0].IdentityReady).To(BeTrue())
+			Expect(network.Status.OrgStatus[1].IdentityReady).To(BeTrue())
 		})
 
 		It("should mark the network ready only after all org workloads are ready", func() {
@@ -278,9 +329,6 @@ var _ = Describe("FabricNetwork Controller", func() {
 
 			ordererNamespace := "fo-test-orderer"
 			bankNamespace := "fo-test-banka"
-
-			createIdentitySecrets(ctx, ordererNamespace, "orderer0", true)
-			createIdentitySecrets(ctx, bankNamespace, "peer0", true)
 
 			markDeploymentReady(ctx, ordererNamespace, "orderer-ca")
 			markDeploymentReady(ctx, ordererNamespace, "orderer0")
@@ -442,45 +490,25 @@ func containerPorts(container corev1.Container) []int32 {
 	return ports
 }
 
-func createIdentitySecrets(ctx context.Context, namespace, workloadName string, tlsEnabled bool) {
-	createSecret(ctx, namespace, identitySecretName(workloadName, secretKindMSP), mspSecretData(tlsEnabled))
-	if tlsEnabled {
-		createSecret(ctx, namespace, identitySecretName(workloadName, secretKindTLS), tlsSecretData())
-	}
-}
-
-func createSecret(ctx context.Context, namespace, name string, data map[string][]byte) {
+func expectIdentitySecret(ctx context.Context, namespace, name, kind string, tlsEnabled bool) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
 			Name:      name,
 		},
-		Data: data,
 	}
-	Expect(k8sClient.Create(ctx, secret)).To(Succeed())
-}
+	Expect(k8sClient.Get(ctx, types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}, secret)).To(Succeed())
 
-func mspSecretData(tlsEnabled bool) map[string][]byte {
-	data := map[string][]byte{
-		mspConfigKey:   []byte("NodeOUs:\n  Enable: true\n"),
-		mspCACertKey:   []byte("ca"),
-		mspSignCertKey: []byte("cert"),
-		mspKeyStoreKey: []byte("key"),
+	if kind == secretKindOrgCA {
+		Expect(orgIdentitySecretValidationError(*secret)).To(BeEmpty())
+		return
 	}
 
-	if tlsEnabled {
-		data[mspTLSCACertKey] = []byte("tls-ca")
-	}
-
-	return data
-}
-
-func tlsSecretData() map[string][]byte {
-	return map[string][]byte{
-		tlsCACertKey:     []byte("ca"),
-		tlsServerCertKey: []byte("cert"),
-		tlsServerKeyKey:  []byte("key"),
-	}
+	Expect(identitySecretValidationError(*secret, kind, tlsEnabled)).To(BeEmpty())
+	Expect(secret.Labels[labelIdentityKind]).To(Equal(kind))
 }
 
 func servicePorts(service corev1.Service) []int32 {
