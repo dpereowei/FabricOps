@@ -21,15 +21,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // FabricNetworkSpec defines the desired state of FabricNetwork
 type FabricNetworkSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 	Global GlobalConfig `json:"global"`
 
 	Orgs []Org `json:"orgs"`
@@ -45,7 +38,7 @@ type GlobalConfig struct {
 }
 
 type Org struct {
-	Organisation OrgMeta        `json:"organization"`
+	Organization OrgMeta        `json:"organization"`
 	CA           CAConfig       `json:"ca"`
 	Orderers     []OrdererGroup `json:"orderers,omitempty"`
 	Peer         *PeerConfig    `json:"peer,omitempty"`
@@ -92,26 +85,18 @@ type Chaincode struct {
 	Image   string `json:"image"`
 }
 
+type OrgStatus struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
+	CAReady   bool   `json:"caReady"`
+}
+
 // FabricNetworkStatus defines the observed state of FabricNetwork.
 type FabricNetworkStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the FabricNetwork resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
 	// +optional
-	Phase   Phase  `json:"phase,omitempty"`
-	Message string `json:"message,omitempty"`
+	Phase     Phase       `json:"phase,omitempty"`
+	Message   string      `json:"message,omitempty"`
+	OrgStatus []OrgStatus `json:"orgStatus,omitempty"`
 }
 
 type Phase string

@@ -82,11 +82,6 @@ spec:
                   type: object
                 type: array
               global:
-                description: |-
-                  INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-                  Important: Run "make" to regenerate code after modifying this file
-                  The following markers will use OpenAPI v3 schema to validate the value
-                  More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
                 properties:
                   fabricVersion:
                     type: string
@@ -166,17 +161,21 @@ spec:
             properties:
               message:
                 type: string
+              orgStatus:
+                items:
+                  properties:
+                    caReady:
+                      type: boolean
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - caReady
+                  - name
+                  type: object
+                type: array
               phase:
-                description: |-
-                  conditions represent the current state of the FabricNetwork resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
                 type: string
             type: object
         required:

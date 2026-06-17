@@ -18,15 +18,18 @@ package controller
 
 import (
 	"context"
+	"reflect"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	fabricopsv1alpha1 "github.com/dpereowei/fabricops/api/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // FabricNetworkReconciler reconciles a FabricNetwork object
@@ -35,57 +38,154 @@ type FabricNetworkReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-func (r *FabricNetworkReconciler) ensureNamespace(ctx context.Context, name string) error {
-	var ns corev1.Namespace
+func orgNamespaceName(net *fabricopsv1alpha1.FabricNetwork, org fabricopsv1alpha1.Org) string {
+	return sanitizeName("fo-" + networkNamespaceSlug(net) + "-" + org.Organization.Name)
+}
 
-	err := r.Get(ctx, client.ObjectKey{Name: name}, &ns)
+func buildOrgNamespace(net *fabricopsv1alpha1.FabricNetwork, org fabricopsv1alpha1.Org) *corev1.Namespace {
+	name := orgNamespaceName(net, org)
+
+	return &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+			Labels: map[string]string{
+				labelFabricNetwork:             sanitizeName(net.Name),
+				labelFabricNetworkNamespace:    sanitizeName(net.Namespace),
+				labelOrg:                       sanitizeName(org.Organization.Name),
+				"app.kubernetes.io/managed-by": "fabricops",
+			},
+		},
+	}
+}
+
+func (r *FabricNetworkReconciler) ensureNamespace(ctx context.Context, desired *corev1.Namespace) error {
+	var existing corev1.Namespace
+
+	err := r.Get(ctx, client.ObjectKey{Name: desired.Name}, &existing)
 	if err == nil {
+		changed := false
+		if existing.Labels == nil {
+			existing.Labels = map[string]string{}
+			changed = true
+		}
+
+		for key, value := range desired.Labels {
+			if existing.Labels[key] != value {
+				existing.Labels[key] = value
+				changed = true
+			}
+		}
+
+		if changed {
+			log := logf.FromContext(ctx)
+			log.Info("Updating Namespace labels", "namespace", desired.Name)
+			return r.Update(ctx, &existing)
+		}
+
 		return nil
 	}
 
-	ns = corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
+	if !apierrors.IsNotFound(err) {
+		return err
 	}
 
-	return r.Create(ctx, &ns)
+	log := logf.FromContext(ctx)
+	log.Info("Creating Namespace", "namespace", desired.Name)
+	return r.Create(ctx, desired)
+}
+
+func (r *FabricNetworkReconciler) reconcileOrg(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+) (fabricopsv1alpha1.OrgStatus, error) {
+	log := logf.FromContext(ctx)
+	namespace := orgNamespaceName(net, org)
+
+	log.Info("Reconciling org",
+		"name", org.Organization.Name,
+		"domain", org.Organization.Domain,
+		"namespace", namespace,
+	)
+
+	status := fabricopsv1alpha1.OrgStatus{
+		Name:      org.Organization.Name,
+		Namespace: namespace,
+	}
+
+	if err := r.ensureNamespace(ctx, buildOrgNamespace(net, org)); err != nil {
+		return status, err
+	}
+
+	caReady, err := r.reconcileCA(ctx, net, org, namespace)
+	if err != nil {
+		return status, err
+	}
+	status.CAReady = caReady
+
+	if err := r.reconcileOrderers(ctx, net, org, namespace); err != nil {
+		return status, err
+	}
+
+	if err := r.reconcilePeers(ctx, net, org, namespace); err != nil {
+		return status, err
+	}
+
+	return status, nil
 }
 
 func (r *FabricNetworkReconciler) reconcileOrgs(
 	ctx context.Context,
 	net *fabricopsv1alpha1.FabricNetwork,
-	namespace string,
-) error {
-
-	log := logf.FromContext(ctx)
+) ([]fabricopsv1alpha1.OrgStatus, error) {
+	orgStatuses := make([]fabricopsv1alpha1.OrgStatus, 0, len(net.Spec.Orgs))
 
 	for _, org := range net.Spec.Orgs {
-		log.Info(
-			"Reconciling org",
-			"name", org.Organization.Name,
-			"domain", org.Organization.Domain,
-		)
-
-		// create CA + peer
+		status, err := r.reconcileOrg(ctx, net, org)
+		if err != nil {
+			return orgStatuses, err
+		}
+		orgStatuses = append(orgStatuses, status)
 	}
 
-	return nil
+	return orgStatuses, nil
 }
 
-func (r *FabricNetworkReconciler) updateStatusIfChanged(
+func orgStatusesEqual(a, b []fabricopsv1alpha1.OrgStatus) bool {
+	return reflect.DeepEqual(a, b)
+}
+
+func allCAsReady(statuses []fabricopsv1alpha1.OrgStatus) bool {
+	if len(statuses) == 0 {
+		return false
+	}
+
+	for _, status := range statuses {
+		if !status.CAReady {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (r *FabricNetworkReconciler) updateStatus(
 	ctx context.Context,
 	net *fabricopsv1alpha1.FabricNetwork,
 	newPhase fabricopsv1alpha1.Phase,
 	newMessage string,
+	orgStatus []fabricopsv1alpha1.OrgStatus,
 ) error {
-	if net.Status.Phase == newPhase && net.Status.Message == newMessage {
+	if net.Status.Phase == newPhase &&
+		net.Status.Message == newMessage &&
+		orgStatusesEqual(net.Status.OrgStatus, orgStatus) {
 		return nil
 	}
 
 	base := net.DeepCopy()
 	base.Status.Phase = newPhase
 	base.Status.Message = newMessage
+	base.Status.OrgStatus = orgStatus
 
 	log := logf.FromContext(ctx)
 
@@ -103,16 +203,12 @@ func (r *FabricNetworkReconciler) updateStatusIfChanged(
 // +kubebuilder:rbac:groups=fabricops.my.domain,resources=fabricnetworks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=fabricops.my.domain,resources=fabricnetworks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=fabricops.my.domain,resources=fabricnetworks/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the FabricNetwork object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
 func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -128,52 +224,46 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	namespaceName := "fabric-network-" + network.Name
+	orgStatuses, err := r.reconcileOrgs(ctx, &network)
+	if err != nil {
+		log.Error(err, "Failed to reconcile orgs")
 
-	// Check if the namespace already exists
-	log.Info(
-		"Checking namespace",
-		"namespaceName", namespaceName,
-	)
-
-	if err := r.ensureNamespace(ctx, namespaceName); err != nil {
-		log.Error(err, "failed to ensure namespace exists")
-
-		_ = r.updateStatusIfChanged(
+		_ = r.updateStatus(
 			ctx,
 			&network,
 			fabricopsv1alpha1.PhaseFailed,
-			"Failes to ensure namespace: "+err.Error(),
+			"Failed to reconcile orgs: "+err.Error(),
+			orgStatuses,
 		)
 
 		return ctrl.Result{}, err
 	}
 
-	if network.Status.Phase != fabricopsv1alpha1.PhaseReady ||
-		network.Status.Message != "Namespace ready" {
-
-		_ = r.updateStatusIfChanged(
+	if allCAsReady(orgStatuses) {
+		if err := r.updateStatus(
 			ctx,
 			&network,
 			fabricopsv1alpha1.PhaseReady,
-			"Namespace ready",
-		)
+			"All orgs reconciled",
+			orgStatuses,
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, nil
 	}
 
-	if err := r.reconcileOrgs(ctx, &network, namespaceName); err != nil {
-		log.Error(err, "failed to reconcile orgs")
-
-		_ = r.updateStatusIfChanged(
-			ctx,
-			&network,
-			fabricopsv1alpha1.PhaseFailed,
-			"failed to reconcile orgs: "+err.Error(),
-		)
-
+	if err := r.updateStatus(
+		ctx,
+		&network,
+		fabricopsv1alpha1.PhaseCreating,
+		"Waiting for org CAs to become ready",
+		orgStatuses,
+	); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
