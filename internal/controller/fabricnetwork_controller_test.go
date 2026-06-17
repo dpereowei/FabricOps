@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -141,40 +142,8 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(ns.Labels[labelFabricNetworkNamespace]).To(Equal(resourceNamespace))
 			Expect(ns.Labels[labelOrg]).To(Equal("banka"))
 
-			var ordererDeploy appsv1.Deployment
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Namespace: ordererNamespace,
-				Name:      "orderer0",
-			}, &ordererDeploy)).To(Succeed())
-			ordererContainer := ordererDeploy.Spec.Template.Spec.Containers[0]
-			ordererEnv := envMap(ordererContainer)
-			Expect(ordererEnv["ORDERER_GENERAL_LISTENADDRESS"]).To(Equal("0.0.0.0"))
-			Expect(ordererEnv["ORDERER_GENERAL_LISTENPORT"]).To(Equal("7050"))
-			Expect(ordererEnv).NotTo(HaveKey("ORDERER_GENERAL_CLUSTER_LISTENADDRESS"))
-			Expect(ordererEnv).NotTo(HaveKey("ORDERER_GENERAL_CLUSTER_LISTENPORT"))
-			Expect(ordererEnv["ORDERER_GENERAL_LOCALMSPID"]).To(Equal("OrdererMSP"))
-			Expect(ordererEnv["ORDERER_GENERAL_LOCALMSPDIR"]).To(Equal(ordererMSPPath))
-			Expect(ordererEnv["ORDERER_GENERAL_TLS_ENABLED"]).To(Equal("true"))
-			Expect(ordererEnv["ORDERER_GENERAL_TLS_PRIVATEKEY"]).To(Equal(ordererTLSPath + "/server.key"))
-			Expect(ordererEnv["ORDERER_GENERAL_TLS_CERTIFICATE"]).To(Equal(ordererTLSPath + "/server.crt"))
-			Expect(ordererEnv["ORDERER_GENERAL_TLS_ROOTCAS"]).To(Equal("[" + ordererTLSPath + "/ca.crt]"))
-			Expect(ordererEnv["ORDERER_GENERAL_CLUSTER_CLIENTCERTIFICATE"]).To(Equal(ordererTLSPath + "/server.crt"))
-			Expect(ordererEnv["ORDERER_GENERAL_CLUSTER_CLIENTPRIVATEKEY"]).To(Equal(ordererTLSPath + "/server.key"))
-			Expect(ordererEnv["ORDERER_GENERAL_CLUSTER_ROOTCAS"]).To(Equal("[" + ordererTLSPath + "/ca.crt]"))
-			Expect(containerPorts(ordererContainer)).To(ContainElements(int32(7050)))
-			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "orderer0-msp"))
-			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "orderer0-tls"))
-			Expect(secretVolumeItemKeys(ordererDeploy.Spec.Template.Spec, secretKindMSP)).To(ContainElements(mspConfigKey, mspCACertKey, mspTLSCACertKey, mspSignCertKey, mspKeyStoreKey))
-			Expect(secretVolumeItemKeys(ordererDeploy.Spec.Template.Spec, secretKindTLS)).To(ContainElements(tlsCACertKey, tlsServerCertKey, tlsServerKeyKey))
-			Expect(volumeMountPaths(ordererContainer)).To(HaveKeyWithValue(secretKindMSP, ordererMSPPath))
-			Expect(volumeMountPaths(ordererContainer)).To(HaveKeyWithValue(secretKindTLS, ordererTLSPath))
-
-			var ordererSvc corev1.Service
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Namespace: ordererNamespace,
-				Name:      "orderer0",
-			}, &ordererSvc)).To(Succeed())
-			Expect(servicePorts(ordererSvc)).To(ContainElements(int32(7050)))
+			expectDeploymentNotFound(ctx, ordererNamespace, "orderer0")
+			expectServiceNotFound(ctx, ordererNamespace, "orderer0")
 
 			var caDeploy appsv1.Deployment
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -198,50 +167,19 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Name:      "banka-ca",
 			}, &caSvc)).To(Succeed())
 
-			var peerDeploy appsv1.Deployment
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Namespace: bankNamespace,
-				Name:      "peer0",
-			}, &peerDeploy)).To(Succeed())
-			peerContainer := peerDeploy.Spec.Template.Spec.Containers[0]
-			peerEnv := envMap(peerContainer)
-			Expect(peerEnv["CORE_PEER_ID"]).To(Equal("peer0"))
-			Expect(peerEnv["CORE_PEER_ADDRESS"]).To(Equal("peer0.fo-test-banka.svc.cluster.local:7051"))
-			Expect(peerEnv["CORE_PEER_LISTENADDRESS"]).To(Equal("0.0.0.0:7051"))
-			Expect(peerEnv["CORE_PEER_CHAINCODEADDRESS"]).To(Equal("peer0.fo-test-banka.svc.cluster.local:7052"))
-			Expect(peerEnv["CORE_PEER_CHAINCODELISTENADDRESS"]).To(Equal("0.0.0.0:7052"))
-			Expect(peerEnv["CORE_PEER_GOSSIP_ENDPOINT"]).To(Equal("peer0.fo-test-banka.svc.cluster.local:7051"))
-			Expect(peerEnv["CORE_PEER_GOSSIP_EXTERNALENDPOINT"]).To(Equal("peer0.fo-test-banka.svc.cluster.local:7051"))
-			Expect(peerEnv["CORE_PEER_LOCALMSPID"]).To(Equal("BankAMSP"))
-			Expect(peerEnv["CORE_PEER_MSPCONFIGPATH"]).To(Equal(peerMSPPath))
-			Expect(peerEnv["CORE_PEER_TLS_ENABLED"]).To(Equal("true"))
-			Expect(peerEnv["CORE_PEER_TLS_CERT_FILE"]).To(Equal(peerTLSPath + "/server.crt"))
-			Expect(peerEnv["CORE_PEER_TLS_KEY_FILE"]).To(Equal(peerTLSPath + "/server.key"))
-			Expect(peerEnv["CORE_PEER_TLS_ROOTCERT_FILE"]).To(Equal(peerTLSPath + "/ca.crt"))
-			Expect(containerPorts(peerContainer)).To(ContainElements(int32(7051), int32(7052)))
-			Expect(secretVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "peer0-msp"))
-			Expect(secretVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "peer0-tls"))
-			Expect(secretVolumeItemKeys(peerDeploy.Spec.Template.Spec, secretKindMSP)).To(ContainElements(mspConfigKey, mspCACertKey, mspTLSCACertKey, mspSignCertKey, mspKeyStoreKey))
-			Expect(secretVolumeItemKeys(peerDeploy.Spec.Template.Spec, secretKindTLS)).To(ContainElements(tlsCACertKey, tlsServerCertKey, tlsServerKeyKey))
-			Expect(volumeMountPaths(peerContainer)).To(HaveKeyWithValue(secretKindMSP, peerMSPPath))
-			Expect(volumeMountPaths(peerContainer)).To(HaveKeyWithValue(secretKindTLS, peerTLSPath))
-
-			var peerSvc corev1.Service
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Namespace: bankNamespace,
-				Name:      "peer0",
-			}, &peerSvc)).To(Succeed())
-			Expect(servicePorts(peerSvc)).To(ContainElements(int32(7051), int32(7052)))
+			expectDeploymentNotFound(ctx, bankNamespace, "peer0")
+			expectServiceNotFound(ctx, bankNamespace, "peer0")
 
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
 			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseCreating))
-			Expect(network.Status.Message).To(Equal("Waiting for Fabric components to become ready"))
+			Expect(network.Status.Message).To(Equal("Waiting for required Fabric identity material"))
 			Expect(network.Status.OrgStatus).To(HaveLen(2))
 			Expect(network.Status.OrgStatus[0].Name).To(Equal("Orderer"))
 			Expect(network.Status.OrgStatus[0].Namespace).To(Equal(ordererNamespace))
-			Expect(network.Status.OrgStatus[0].IdentityReady).To(BeTrue())
-			Expect(network.Status.OrgStatus[0].IdentityError).To(BeEmpty())
+			Expect(network.Status.OrgStatus[0].IdentityReady).To(BeFalse())
+			Expect(network.Status.OrgStatus[0].IdentityError).To(ContainSubstring("orderer-admin-msp"))
+			Expect(network.Status.OrgStatus[0].IdentityError).To(ContainSubstring("orderer0-msp"))
 			Expect(network.Status.OrgStatus[0].CAReady).To(BeFalse())
 			Expect(network.Status.OrgStatus[0].Orderers.Desired).To(Equal(int32(1)))
 			Expect(network.Status.OrgStatus[0].Orderers.Ready).To(Equal(int32(0)))
@@ -252,8 +190,9 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.OrgStatus[0].Ready).To(BeFalse())
 			Expect(network.Status.OrgStatus[1].Name).To(Equal("BankA"))
 			Expect(network.Status.OrgStatus[1].Namespace).To(Equal(bankNamespace))
-			Expect(network.Status.OrgStatus[1].IdentityReady).To(BeTrue())
-			Expect(network.Status.OrgStatus[1].IdentityError).To(BeEmpty())
+			Expect(network.Status.OrgStatus[1].IdentityReady).To(BeFalse())
+			Expect(network.Status.OrgStatus[1].IdentityError).To(ContainSubstring("banka-admin-msp"))
+			Expect(network.Status.OrgStatus[1].IdentityError).To(ContainSubstring("peer0-msp"))
 			Expect(network.Status.OrgStatus[1].CAReady).To(BeFalse())
 			Expect(network.Status.OrgStatus[1].Orderers.Desired).To(Equal(int32(0)))
 			Expect(network.Status.OrgStatus[1].Orderers.Ready).To(Equal(int32(0)))
@@ -266,30 +205,32 @@ var _ = Describe("FabricNetwork Controller", func() {
 			ready := apiMeta.FindStatusCondition(network.Status.Conditions, conditionReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-			Expect(ready.Reason).To(Equal("ComponentsNotReady"))
+			Expect(ready.Reason).To(Equal("IdentityMaterialMissing"))
 
 			identity := apiMeta.FindStatusCondition(network.Status.Conditions, conditionIdentityMaterialReady)
 			Expect(identity).NotTo(BeNil())
-			Expect(identity.Status).To(Equal(metav1.ConditionTrue))
-			Expect(identity.Reason).To(Equal("IdentityMaterialPresent"))
+			Expect(identity.Status).To(Equal(metav1.ConditionFalse))
+			Expect(identity.Reason).To(Equal("IdentityMaterialMissing"))
 
 			expectIdentitySecret(ctx, ordererNamespace, caBootstrapSecretName(network.Spec.Orgs[0]), secretKindCABootstrap, true)
 			expectIdentitySecret(ctx, ordererNamespace, adminEnrollmentSecretName(network.Spec.Orgs[0]), secretKindAdminEnroll, true)
-			expectIdentitySecret(ctx, ordererNamespace, orgIdentitySecretName(network.Spec.Orgs[0]), secretKindOrgCA, true)
-			expectIdentitySecret(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindMSP), secretKindAdminMSP, true)
-			expectIdentitySecret(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindTLS), secretKindAdminTLS, true)
-			expectIdentitySecret(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true)
-			expectIdentitySecret(ctx, ordererNamespace, "orderer0-tls", secretKindTLS, true)
+			expectIdentitySecret(ctx, ordererNamespace, "orderer0-enrollment", secretKindWorkloadEnroll, true)
+			expectSecretNotFound(ctx, ordererNamespace, orgIdentitySecretName(network.Spec.Orgs[0]))
+			expectSecretNotFound(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindMSP))
+			expectSecretNotFound(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindTLS))
+			expectSecretNotFound(ctx, ordererNamespace, "orderer0-msp")
+			expectSecretNotFound(ctx, ordererNamespace, "orderer0-tls")
 			expectIdentitySecret(ctx, bankNamespace, caBootstrapSecretName(network.Spec.Orgs[1]), secretKindCABootstrap, true)
 			expectIdentitySecret(ctx, bankNamespace, adminEnrollmentSecretName(network.Spec.Orgs[1]), secretKindAdminEnroll, true)
-			expectIdentitySecret(ctx, bankNamespace, orgIdentitySecretName(network.Spec.Orgs[1]), secretKindOrgCA, true)
-			expectIdentitySecret(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindMSP), secretKindAdminMSP, true)
-			expectIdentitySecret(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindTLS), secretKindAdminTLS, true)
-			expectIdentitySecret(ctx, bankNamespace, "peer0-msp", secretKindMSP, true)
-			expectIdentitySecret(ctx, bankNamespace, "peer0-tls", secretKindTLS, true)
+			expectIdentitySecret(ctx, bankNamespace, "peer0-enrollment", secretKindWorkloadEnroll, true)
+			expectSecretNotFound(ctx, bankNamespace, orgIdentitySecretName(network.Spec.Orgs[1]))
+			expectSecretNotFound(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindMSP))
+			expectSecretNotFound(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindTLS))
+			expectSecretNotFound(ctx, bankNamespace, "peer0-msp")
+			expectSecretNotFound(ctx, bankNamespace, "peer0-tls")
 		})
 
-		It("should recreate missing and malformed generated identity secrets", func() {
+		It("should create and repair generated fallback identity secrets after enrollment failure", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &FabricNetworkReconciler{
 				Client: k8sClient,
@@ -303,6 +244,38 @@ var _ = Describe("FabricNetwork Controller", func() {
 
 			ordererNamespace := "fo-test-orderer"
 			bankNamespace := "fo-test-banka"
+			markDeploymentReady(ctx, ordererNamespace, "orderer-ca")
+			markDeploymentReady(ctx, bankNamespace, "banka-ca")
+
+			By("Reconciling after CAs report readiness")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+
+			By("Marking workload enrollment jobs as failed")
+			markJobFailed(ctx, ordererNamespace, workloadEnrollmentJobName("orderer0"))
+			markJobFailed(ctx, bankNamespace, workloadEnrollmentJobName("peer0"))
+
+			By("Reconciling after enrollment failures")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			expectIdentitySecret(ctx, ordererNamespace, orgIdentitySecretName(network.Spec.Orgs[0]), secretKindOrgCA, true)
+			expectIdentitySecret(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindMSP), secretKindAdminMSP, true)
+			expectIdentitySecret(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindTLS), secretKindAdminTLS, true)
+			expectIdentitySecretSource(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true, identitySourceDevGenerated)
+			expectIdentitySecretSource(ctx, ordererNamespace, "orderer0-tls", secretKindTLS, true, identitySourceDevGenerated)
+			expectIdentitySecret(ctx, bankNamespace, orgIdentitySecretName(network.Spec.Orgs[1]), secretKindOrgCA, true)
+			expectIdentitySecret(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindMSP), secretKindAdminMSP, true)
+			expectIdentitySecret(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindTLS), secretKindAdminTLS, true)
+			expectIdentitySecretSource(ctx, bankNamespace, "peer0-msp", secretKindMSP, true, identitySourceDevGenerated)
+			expectIdentitySecretSource(ctx, bankNamespace, "peer0-tls", secretKindTLS, true, identitySourceDevGenerated)
 
 			By("Deleting one generated secret and corrupting another")
 			var peerTLS corev1.Secret
@@ -344,19 +317,27 @@ var _ = Describe("FabricNetwork Controller", func() {
 			bankAdminEnrollment.Data[caBootstrapUserPassKey] = []byte("banka-admin:not-the-current-password")
 			Expect(k8sClient.Update(ctx, &bankAdminEnrollment)).To(Succeed())
 
+			var bankPeerEnrollment corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "peer0-enrollment",
+			}, &bankPeerEnrollment)).To(Succeed())
+			bankPeerEnrollment.Data[caBootstrapUserPassKey] = []byte("peer0:not-the-current-password")
+			Expect(k8sClient.Update(ctx, &bankPeerEnrollment)).To(Succeed())
+
 			By("Reconciling again")
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			expectIdentitySecret(ctx, bankNamespace, "peer0-tls", secretKindTLS, true)
-			expectIdentitySecret(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true)
-			expectIdentitySecret(ctx, ordererNamespace, "orderer-admin-tls", secretKindAdminTLS, true)
+			expectIdentitySecretSource(ctx, bankNamespace, "peer0-tls", secretKindTLS, true, identitySourceDevGenerated)
+			expectIdentitySecretSource(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true, identitySourceDevGenerated)
+			expectIdentitySecretSource(ctx, ordererNamespace, "orderer-admin-tls", secretKindAdminTLS, true, identitySourceDevGenerated)
 			expectIdentitySecret(ctx, bankNamespace, "banka-ca-bootstrap", secretKindCABootstrap, true)
 			expectIdentitySecret(ctx, bankNamespace, "banka-admin-enrollment", secretKindAdminEnroll, true)
+			expectIdentitySecret(ctx, bankNamespace, "peer0-enrollment", secretKindWorkloadEnroll, true)
 
-			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
 			Expect(network.Status.OrgStatus[0].IdentityReady).To(BeTrue())
 			Expect(network.Status.OrgStatus[1].IdentityReady).To(BeTrue())
@@ -447,6 +428,52 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(envMap(publishContainer)[envTLSEnabled]).To(Equal("true"))
 			Expect(publishContainer.Command[2]).To(ContainSubstring("kubectl -n \"$POD_NAMESPACE\" create secret generic"))
 			Expect(publishContainer.Command[2]).To(ContainSubstring(labelIdentitySource + "=" + identitySourceFabricCA))
+
+			var ordererJob batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      workloadEnrollmentJobName("orderer0"),
+			}, &ordererJob)).To(Succeed())
+			ordererEnrollContainer := ordererJob.Spec.Template.Spec.InitContainers[0]
+			Expect(ordererEnrollContainer.Name).To(Equal(enrollWorkloadContainerName))
+			Expect(envMap(ordererEnrollContainer)[envWorkloadName]).To(Equal("orderer0"))
+			Expect(envMap(ordererEnrollContainer)[envWorkloadType]).To(Equal(componentOrderer))
+			Expect(envSecretRefs(ordererEnrollContainer)).To(HaveKeyWithValue(envWorkloadUsername, "orderer0-enrollment/username"))
+			Expect(envSecretRefs(ordererEnrollContainer)).To(HaveKeyWithValue(envWorkloadPassword, "orderer0-enrollment/password"))
+
+			var peerJob batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      workloadEnrollmentJobName("peer0"),
+			}, &peerJob)).To(Succeed())
+			Expect(peerJob.Spec.Template.Spec.ServiceAccountName).To(Equal(enrollmentServiceAccountName(bankOrg)))
+			Expect(peerJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(peerJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
+			Expect(peerJob.Spec.Template.Spec.Containers).To(HaveLen(1))
+
+			workloadEnrollContainer := peerJob.Spec.Template.Spec.InitContainers[0]
+			Expect(workloadEnrollContainer.Name).To(Equal(enrollWorkloadContainerName))
+			Expect(workloadEnrollContainer.Image).To(Equal(caImage()))
+			Expect(envMap(workloadEnrollContainer)[envCAAddress]).To(Equal("banka-ca.fo-test-banka.svc.cluster.local:7054"))
+			Expect(envMap(workloadEnrollContainer)[envWorkloadName]).To(Equal("peer0"))
+			Expect(envMap(workloadEnrollContainer)[envWorkloadType]).To(Equal(componentPeer))
+			Expect(envMap(workloadEnrollContainer)[envWorkloadCSRHosts]).To(ContainSubstring("peer0.fo-test-banka.svc.cluster.local"))
+			Expect(envMap(workloadEnrollContainer)[envTLSEnabled]).To(Equal("true"))
+			Expect(envSecretRefs(workloadEnrollContainer)).To(HaveKeyWithValue(envCABootstrapUserPass, "banka-ca-bootstrap/user-pass"))
+			Expect(envSecretRefs(workloadEnrollContainer)).To(HaveKeyWithValue(envWorkloadUsername, "peer0-enrollment/username"))
+			Expect(envSecretRefs(workloadEnrollContainer)).To(HaveKeyWithValue(envWorkloadPassword, "peer0-enrollment/password"))
+			Expect(workloadEnrollContainer.Command[2]).To(ContainSubstring("fabric-ca-client register"))
+			Expect(workloadEnrollContainer.Command[2]).To(ContainSubstring("--id.type \"$FABRICOPS_WORKLOAD_TYPE\""))
+			Expect(workloadEnrollContainer.Command[2]).To(ContainSubstring("fabric-ca-client enroll"))
+
+			workloadPublishContainer := peerJob.Spec.Template.Spec.Containers[0]
+			Expect(workloadPublishContainer.Name).To(Equal(publishWorkloadContainerName))
+			Expect(workloadPublishContainer.Image).To(Equal(kubectlImage()))
+			Expect(envMap(workloadPublishContainer)[envWorkloadMSPSecret]).To(Equal("peer0-msp"))
+			Expect(envMap(workloadPublishContainer)[envWorkloadTLSSecret]).To(Equal("peer0-tls"))
+			Expect(envMap(workloadPublishContainer)[envTLSEnabled]).To(Equal("true"))
+			Expect(workloadPublishContainer.Command[2]).To(ContainSubstring("kubectl -n \"$POD_NAMESPACE\" create secret generic"))
+			Expect(workloadPublishContainer.Command[2]).To(ContainSubstring(labelIdentitySource + "=" + identitySourceFabricCA))
 		})
 
 		It("should mark the network ready only after all org workloads are ready", func() {
@@ -465,8 +492,96 @@ var _ = Describe("FabricNetwork Controller", func() {
 			bankNamespace := "fo-test-banka"
 
 			markDeploymentReady(ctx, ordererNamespace, "orderer-ca")
-			markDeploymentReady(ctx, ordererNamespace, "orderer0")
 			markDeploymentReady(ctx, bankNamespace, "banka-ca")
+
+			By("Reconciling after CAs report readiness")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			writeEnrolledOrgIdentitySecrets(ctx, &network, network.Spec.Orgs[0], ordererNamespace)
+			writeEnrolledOrgIdentitySecrets(ctx, &network, network.Spec.Orgs[1], bankNamespace)
+
+			By("Reconciling after enrolled identities are published")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var ordererDeploy appsv1.Deployment
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "orderer0",
+			}, &ordererDeploy)).To(Succeed())
+			ordererContainer := ordererDeploy.Spec.Template.Spec.Containers[0]
+			ordererEnv := envMap(ordererContainer)
+			Expect(ordererEnv["ORDERER_GENERAL_LISTENADDRESS"]).To(Equal("0.0.0.0"))
+			Expect(ordererEnv["ORDERER_GENERAL_LISTENPORT"]).To(Equal("7050"))
+			Expect(ordererEnv).NotTo(HaveKey("ORDERER_GENERAL_CLUSTER_LISTENADDRESS"))
+			Expect(ordererEnv).NotTo(HaveKey("ORDERER_GENERAL_CLUSTER_LISTENPORT"))
+			Expect(ordererEnv["ORDERER_GENERAL_LOCALMSPID"]).To(Equal("OrdererMSP"))
+			Expect(ordererEnv["ORDERER_GENERAL_LOCALMSPDIR"]).To(Equal(ordererMSPPath))
+			Expect(ordererEnv["ORDERER_GENERAL_TLS_ENABLED"]).To(Equal("true"))
+			Expect(ordererEnv["ORDERER_GENERAL_TLS_PRIVATEKEY"]).To(Equal(ordererTLSPath + "/server.key"))
+			Expect(ordererEnv["ORDERER_GENERAL_TLS_CERTIFICATE"]).To(Equal(ordererTLSPath + "/server.crt"))
+			Expect(ordererEnv["ORDERER_GENERAL_TLS_ROOTCAS"]).To(Equal("[" + ordererTLSPath + "/ca.crt]"))
+			Expect(ordererEnv["ORDERER_GENERAL_CLUSTER_CLIENTCERTIFICATE"]).To(Equal(ordererTLSPath + "/server.crt"))
+			Expect(ordererEnv["ORDERER_GENERAL_CLUSTER_CLIENTPRIVATEKEY"]).To(Equal(ordererTLSPath + "/server.key"))
+			Expect(ordererEnv["ORDERER_GENERAL_CLUSTER_ROOTCAS"]).To(Equal("[" + ordererTLSPath + "/ca.crt]"))
+			Expect(containerPorts(ordererContainer)).To(ContainElements(int32(7050)))
+			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "orderer0-msp"))
+			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "orderer0-tls"))
+			Expect(secretVolumeItemKeys(ordererDeploy.Spec.Template.Spec, secretKindMSP)).To(ContainElements(mspConfigKey, mspCACertKey, mspTLSCACertKey, mspSignCertKey, mspKeyStoreKey))
+			Expect(secretVolumeItemKeys(ordererDeploy.Spec.Template.Spec, secretKindTLS)).To(ContainElements(tlsCACertKey, tlsServerCertKey, tlsServerKeyKey))
+			Expect(volumeMountPaths(ordererContainer)).To(HaveKeyWithValue(secretKindMSP, ordererMSPPath))
+			Expect(volumeMountPaths(ordererContainer)).To(HaveKeyWithValue(secretKindTLS, ordererTLSPath))
+
+			var ordererSvc corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "orderer0",
+			}, &ordererSvc)).To(Succeed())
+			Expect(servicePorts(ordererSvc)).To(ContainElements(int32(7050)))
+
+			var peerDeploy appsv1.Deployment
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "peer0",
+			}, &peerDeploy)).To(Succeed())
+			peerContainer := peerDeploy.Spec.Template.Spec.Containers[0]
+			peerEnv := envMap(peerContainer)
+			Expect(peerEnv["CORE_PEER_ID"]).To(Equal("peer0"))
+			Expect(peerEnv["CORE_PEER_ADDRESS"]).To(Equal("peer0.fo-test-banka.svc.cluster.local:7051"))
+			Expect(peerEnv["CORE_PEER_LISTENADDRESS"]).To(Equal("0.0.0.0:7051"))
+			Expect(peerEnv["CORE_PEER_CHAINCODEADDRESS"]).To(Equal("peer0.fo-test-banka.svc.cluster.local:7052"))
+			Expect(peerEnv["CORE_PEER_CHAINCODELISTENADDRESS"]).To(Equal("0.0.0.0:7052"))
+			Expect(peerEnv["CORE_PEER_GOSSIP_ENDPOINT"]).To(Equal("peer0.fo-test-banka.svc.cluster.local:7051"))
+			Expect(peerEnv["CORE_PEER_GOSSIP_EXTERNALENDPOINT"]).To(Equal("peer0.fo-test-banka.svc.cluster.local:7051"))
+			Expect(peerEnv["CORE_PEER_LOCALMSPID"]).To(Equal("BankAMSP"))
+			Expect(peerEnv["CORE_PEER_MSPCONFIGPATH"]).To(Equal(peerMSPPath))
+			Expect(peerEnv["CORE_PEER_TLS_ENABLED"]).To(Equal("true"))
+			Expect(peerEnv["CORE_PEER_TLS_CERT_FILE"]).To(Equal(peerTLSPath + "/server.crt"))
+			Expect(peerEnv["CORE_PEER_TLS_KEY_FILE"]).To(Equal(peerTLSPath + "/server.key"))
+			Expect(peerEnv["CORE_PEER_TLS_ROOTCERT_FILE"]).To(Equal(peerTLSPath + "/ca.crt"))
+			Expect(containerPorts(peerContainer)).To(ContainElements(int32(7051), int32(7052)))
+			Expect(secretVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "peer0-msp"))
+			Expect(secretVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "peer0-tls"))
+			Expect(secretVolumeItemKeys(peerDeploy.Spec.Template.Spec, secretKindMSP)).To(ContainElements(mspConfigKey, mspCACertKey, mspTLSCACertKey, mspSignCertKey, mspKeyStoreKey))
+			Expect(secretVolumeItemKeys(peerDeploy.Spec.Template.Spec, secretKindTLS)).To(ContainElements(tlsCACertKey, tlsServerCertKey, tlsServerKeyKey))
+			Expect(volumeMountPaths(peerContainer)).To(HaveKeyWithValue(secretKindMSP, peerMSPPath))
+			Expect(volumeMountPaths(peerContainer)).To(HaveKeyWithValue(secretKindTLS, peerTLSPath))
+
+			var peerSvc corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "peer0",
+			}, &peerSvc)).To(Succeed())
+			Expect(servicePorts(peerSvc)).To(ContainElements(int32(7051), int32(7052)))
+
+			markDeploymentReady(ctx, ordererNamespace, "orderer0")
 			markDeploymentReady(ctx, bankNamespace, "peer0")
 
 			By("Reconciling after workloads report readiness")
@@ -475,7 +590,6 @@ var _ = Describe("FabricNetwork Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
 			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseReady))
 			Expect(network.Status.Message).To(Equal("All Fabric components are ready"))
@@ -630,6 +744,115 @@ func markDeploymentReady(ctx context.Context, namespace, name string) {
 	Expect(k8sClient.Status().Update(ctx, &deploy)).To(Succeed())
 }
 
+func markJobFailed(ctx context.Context, namespace, name string) {
+	var job batchv1.Job
+	Expect(k8sClient.Get(ctx, types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}, &job)).To(Succeed())
+
+	now := metav1.Now()
+	job.Status.Failed = 1
+	job.Status.StartTime = &now
+	job.Status.Conditions = append(job.Status.Conditions,
+		batchv1.JobCondition{
+			Type:               batchv1.JobFailureTarget,
+			Status:             corev1.ConditionTrue,
+			Reason:             "BackoffLimitExceeded",
+			LastTransitionTime: now,
+		},
+		batchv1.JobCondition{
+			Type:               batchv1.JobFailed,
+			Status:             corev1.ConditionTrue,
+			Reason:             "BackoffLimitExceeded",
+			LastTransitionTime: now,
+		},
+	)
+	Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
+}
+
+func writeEnrolledOrgIdentitySecrets(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) {
+	authority, err := generateIdentityAuthority(org)
+	Expect(err).NotTo(HaveOccurred())
+
+	adminName := adminIdentityName(org)
+	adminMSP, err := buildWorkloadMSPSecret(net, org, namespace, adminName, componentAdmin, authority)
+	Expect(err).NotTo(HaveOccurred())
+	adminMSP.Labels[labelIdentityKind] = secretKindAdminMSP
+	adminMSP.Labels[labelIdentitySource] = identitySourceFabricCA
+	upsertSecret(ctx, adminMSP)
+
+	if net.Spec.Global.TLS {
+		adminTLS, err := buildAdminTLSSecret(net, org, namespace, adminName, authority)
+		Expect(err).NotTo(HaveOccurred())
+		adminTLS.Labels[labelIdentitySource] = identitySourceFabricCA
+		upsertSecret(ctx, adminTLS)
+	}
+
+	for _, group := range org.Orderers {
+		for i := 0; i < group.Instances; i++ {
+			name := sanitizeName(fmt.Sprintf("%s%d", group.Prefix, i))
+			writeEnrolledWorkloadIdentitySecrets(ctx, net, org, namespace, name, componentOrderer, authority)
+		}
+	}
+
+	if org.Peer == nil {
+		return
+	}
+
+	for i := 0; i < org.Peer.Instances; i++ {
+		name := sanitizeName(fmt.Sprintf("%s%d", org.Peer.Prefix, i))
+		writeEnrolledWorkloadIdentitySecrets(ctx, net, org, namespace, name, componentPeer, authority)
+	}
+}
+
+func writeEnrolledWorkloadIdentitySecrets(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	workloadName string,
+	component string,
+	authority *identityAuthority,
+) {
+	msp, err := buildWorkloadMSPSecret(net, org, namespace, workloadName, component, authority)
+	Expect(err).NotTo(HaveOccurred())
+	msp.Labels[labelIdentitySource] = identitySourceFabricCA
+	upsertSecret(ctx, msp)
+
+	if !net.Spec.Global.TLS {
+		return
+	}
+
+	tls, err := buildWorkloadTLSSecret(net, org, namespace, workloadName, component, workloadDNSNames(workloadName, namespace), authority)
+	Expect(err).NotTo(HaveOccurred())
+	tls.Labels[labelIdentitySource] = identitySourceFabricCA
+	upsertSecret(ctx, tls)
+}
+
+func upsertSecret(ctx context.Context, desired *corev1.Secret) {
+	var existing corev1.Secret
+	err := k8sClient.Get(ctx, types.NamespacedName{
+		Namespace: desired.Namespace,
+		Name:      desired.Name,
+	}, &existing)
+	if errors.IsNotFound(err) {
+		Expect(k8sClient.Create(ctx, desired)).To(Succeed())
+		return
+	}
+	Expect(err).NotTo(HaveOccurred())
+
+	existing.Labels = desired.Labels
+	existing.Type = desired.Type
+	existing.Data = desired.Data
+	Expect(k8sClient.Update(ctx, &existing)).To(Succeed())
+}
+
 func envMap(container corev1.Container) map[string]string {
 	env := map[string]string{}
 	for _, item := range container.Env {
@@ -710,6 +933,44 @@ func expectIdentitySecret(ctx context.Context, namespace, name, kind string, tls
 
 	Expect(identitySecretValidationError(*secret, kind, tlsEnabled)).To(BeEmpty())
 	Expect(secret.Labels[labelIdentityKind]).To(Equal(kind))
+}
+
+func expectIdentitySecretSource(ctx context.Context, namespace, name, kind string, tlsEnabled bool, source string) {
+	expectIdentitySecret(ctx, namespace, name, kind, tlsEnabled)
+
+	var secret corev1.Secret
+	Expect(k8sClient.Get(ctx, types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}, &secret)).To(Succeed())
+	Expect(secret.Labels[labelIdentitySource]).To(Equal(source))
+}
+
+func expectSecretNotFound(ctx context.Context, namespace, name string) {
+	var secret corev1.Secret
+	err := k8sClient.Get(ctx, types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}, &secret)
+	Expect(errors.IsNotFound(err)).To(BeTrue())
+}
+
+func expectDeploymentNotFound(ctx context.Context, namespace, name string) {
+	var deploy appsv1.Deployment
+	err := k8sClient.Get(ctx, types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}, &deploy)
+	Expect(errors.IsNotFound(err)).To(BeTrue())
+}
+
+func expectServiceNotFound(ctx context.Context, namespace, name string) {
+	var service corev1.Service
+	err := k8sClient.Get(ctx, types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}, &service)
+	Expect(errors.IsNotFound(err)).To(BeTrue())
 }
 
 func servicePorts(service corev1.Service) []int32 {

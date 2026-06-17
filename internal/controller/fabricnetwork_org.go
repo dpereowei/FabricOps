@@ -71,7 +71,8 @@ const (
 	secretKindMSP = "msp"
 	secretKindTLS = "tls"
 
-	identitySourceFabricCA = "fabric-ca"
+	identitySourceFabricCA     = "fabric-ca"
+	identitySourceDevGenerated = "dev-generated"
 
 	mspConfigKey    = "config.yaml"
 	mspCACertKey    = "cacert.pem"
@@ -321,6 +322,12 @@ func requiredIdentitySecrets(
 			name := sanitizeName(fmt.Sprintf("%s%d", group.Prefix, i))
 			requirements = append(requirements, identitySecretRequirement{
 				namespace: namespace,
+				name:      identityEnrollmentSecretName(name),
+				kind:      secretKindWorkloadEnroll,
+				keys:      caBootstrapSecretKeys(),
+			})
+			requirements = append(requirements, identitySecretRequirement{
+				namespace: namespace,
 				name:      identitySecretName(name, secretKindMSP),
 				kind:      secretKindMSP,
 				keys:      mspSecretKeys(tlsEnabled),
@@ -343,6 +350,12 @@ func requiredIdentitySecrets(
 
 	for i := 0; i < org.Peer.Instances; i++ {
 		name := sanitizeName(fmt.Sprintf("%s%d", org.Peer.Prefix, i))
+		requirements = append(requirements, identitySecretRequirement{
+			namespace: namespace,
+			name:      identityEnrollmentSecretName(name),
+			kind:      secretKindWorkloadEnroll,
+			keys:      caBootstrapSecretKeys(),
+		})
 		requirements = append(requirements, identitySecretRequirement{
 			namespace: namespace,
 			name:      identitySecretName(name, secretKindMSP),

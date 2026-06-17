@@ -40,11 +40,12 @@ import (
 )
 
 const (
-	secretKindOrgCA       = "org-ca"
-	secretKindCABootstrap = "ca-bootstrap"
-	secretKindAdminEnroll = "admin-enrollment"
-	secretKindAdminMSP    = "admin-msp"
-	secretKindAdminTLS    = "admin-tls"
+	secretKindOrgCA          = "org-ca"
+	secretKindCABootstrap    = "ca-bootstrap"
+	secretKindAdminEnroll    = "admin-enrollment"
+	secretKindWorkloadEnroll = "workload-enrollment"
+	secretKindAdminMSP       = "admin-msp"
+	secretKindAdminTLS       = "admin-tls"
 
 	orgMSPCACertKey = "msp-ca.crt"
 	orgMSPCAKeyKey  = "msp-ca.key"
@@ -75,6 +76,35 @@ func (r *FabricNetworkReconciler) reconcileIdentityMaterial(
 		return err
 	}
 
+	for _, group := range org.Orderers {
+		for i := 0; i < group.Instances; i++ {
+			name := sanitizeName(fmt.Sprintf("%s%d", group.Prefix, i))
+			if err := r.ensureEnrollmentCredentialSecret(ctx, net, org, namespace, name, componentOrderer, secretKindWorkloadEnroll); err != nil {
+				return err
+			}
+		}
+	}
+
+	if org.Peer == nil {
+		return nil
+	}
+
+	for i := 0; i < org.Peer.Instances; i++ {
+		name := sanitizeName(fmt.Sprintf("%s%d", org.Peer.Prefix, i))
+		if err := r.ensureEnrollmentCredentialSecret(ctx, net, org, namespace, name, componentPeer, secretKindWorkloadEnroll); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (r *FabricNetworkReconciler) reconcileGeneratedIdentityFallback(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) error {
 	authority, err := r.ensureOrgIdentityAuthority(ctx, net, org, namespace)
 	if err != nil {
 		return err
@@ -138,7 +168,11 @@ func adminIdentityName(org fabricopsv1alpha1.Org) string {
 }
 
 func adminEnrollmentSecretName(org fabricopsv1alpha1.Org) string {
-	return sanitizeName(adminIdentityName(org) + "-enrollment")
+	return identityEnrollmentSecretName(adminIdentityName(org))
+}
+
+func identityEnrollmentSecretName(identityName string) string {
+	return sanitizeName(identityName + "-enrollment")
 }
 
 func (r *FabricNetworkReconciler) ensureCABootstrapSecret(
@@ -194,46 +228,7 @@ func (r *FabricNetworkReconciler) ensureAdminEnrollmentSecret(
 	org fabricopsv1alpha1.Org,
 	namespace string,
 ) error {
-	desired, err := buildAdminEnrollmentSecret(net, org, namespace)
-	if err != nil {
-		return err
-	}
-
-	_, err = r.ensureSecret(ctx, desired, func(secret corev1.Secret) string {
-		return identitySecretValidationError(secret, secretKindAdminEnroll, net.Spec.Global.TLS)
-	})
-	return err
-}
-
-func buildAdminEnrollmentSecret(
-	net *fabricopsv1alpha1.FabricNetwork,
-	org fabricopsv1alpha1.Org,
-	namespace string,
-) (*corev1.Secret, error) {
-	password, err := generateBootstrapPassword()
-	if err != nil {
-		return nil, err
-	}
-
-	name := adminEnrollmentSecretName(org)
-	username := adminIdentityName(org)
-	userPass := username + ":" + password
-
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: identityLabels(net, org, componentAdmin, username, map[string]string{
-				labelIdentityKind: secretKindAdminEnroll,
-			}),
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			caBootstrapUsernameKey: []byte(username),
-			caBootstrapPasswordKey: []byte(password),
-			caBootstrapUserPassKey: []byte(userPass),
-		},
-	}, nil
+	return r.ensureEnrollmentCredentialSecret(ctx, net, org, namespace, adminIdentityName(org), componentAdmin, secretKindAdminEnroll)
 }
 
 func (r *FabricNetworkReconciler) ensureOrgIdentityAuthority(
@@ -286,7 +281,7 @@ func (r *FabricNetworkReconciler) ensureAdminIdentitySecrets(
 		return err
 	}
 	mspSecret.Labels[labelIdentityKind] = secretKindAdminMSP
-	if _, err := r.ensureSecret(ctx, mspSecret, func(secret corev1.Secret) string {
+	if _, err := r.ensureGeneratedSecret(ctx, mspSecret, func(secret corev1.Secret) string {
 		return identitySecretValidationError(secret, secretKindAdminMSP, net.Spec.Global.TLS)
 	}); err != nil {
 		return err
@@ -300,7 +295,7 @@ func (r *FabricNetworkReconciler) ensureAdminIdentitySecrets(
 	if err != nil {
 		return err
 	}
-	_, err = r.ensureSecret(ctx, tlsSecret, func(secret corev1.Secret) string {
+	_, err = r.ensureGeneratedSecret(ctx, tlsSecret, func(secret corev1.Secret) string {
 		return identitySecretValidationError(secret, secretKindAdminTLS, net.Spec.Global.TLS)
 	})
 	return err
@@ -316,11 +311,15 @@ func (r *FabricNetworkReconciler) ensureWorkloadIdentitySecrets(
 	dnsNames []string,
 	authority *identityAuthority,
 ) error {
+	if err := r.ensureEnrollmentCredentialSecret(ctx, net, org, namespace, workloadName, component, secretKindWorkloadEnroll); err != nil {
+		return err
+	}
+
 	mspSecret, err := buildWorkloadMSPSecret(net, org, namespace, workloadName, component, authority)
 	if err != nil {
 		return err
 	}
-	if _, err := r.ensureSecret(ctx, mspSecret, func(secret corev1.Secret) string {
+	if _, err := r.ensureGeneratedSecret(ctx, mspSecret, func(secret corev1.Secret) string {
 		return identitySecretValidationError(secret, secretKindMSP, net.Spec.Global.TLS)
 	}); err != nil {
 		return err
@@ -334,10 +333,63 @@ func (r *FabricNetworkReconciler) ensureWorkloadIdentitySecrets(
 	if err != nil {
 		return err
 	}
-	_, err = r.ensureSecret(ctx, tlsSecret, func(secret corev1.Secret) string {
+	_, err = r.ensureGeneratedSecret(ctx, tlsSecret, func(secret corev1.Secret) string {
 		return identitySecretValidationError(secret, secretKindTLS, net.Spec.Global.TLS)
 	})
 	return err
+}
+
+func (r *FabricNetworkReconciler) ensureEnrollmentCredentialSecret(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	identityName string,
+	component string,
+	kind string,
+) error {
+	desired, err := buildEnrollmentCredentialSecret(net, org, namespace, identityName, component, kind)
+	if err != nil {
+		return err
+	}
+
+	_, err = r.ensureSecret(ctx, desired, func(secret corev1.Secret) string {
+		return identitySecretValidationError(secret, kind, net.Spec.Global.TLS)
+	})
+	return err
+}
+
+func buildEnrollmentCredentialSecret(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	identityName string,
+	component string,
+	kind string,
+) (*corev1.Secret, error) {
+	password, err := generateBootstrapPassword()
+	if err != nil {
+		return nil, err
+	}
+
+	name := identityEnrollmentSecretName(identityName)
+	userPass := identityName + ":" + password
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: identityLabels(net, org, component, identityName, map[string]string{
+				labelIdentityKind: kind,
+			}),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			caBootstrapUsernameKey: []byte(identityName),
+			caBootstrapPasswordKey: []byte(password),
+			caBootstrapUserPassKey: []byte(userPass),
+		},
+	}, nil
 }
 
 func buildAdminTLSSecret(
@@ -365,8 +417,9 @@ func buildAdminTLSSecret(
 			Name:      identitySecretName(adminName, secretKindTLS),
 			Namespace: namespace,
 			Labels: identityLabels(net, org, componentAdmin, adminName, map[string]string{
-				labelIdentityKind: secretKindAdminTLS,
-				labelWorkload:     adminName,
+				labelIdentityKind:   secretKindAdminTLS,
+				labelIdentitySource: identitySourceDevGenerated,
+				labelWorkload:       adminName,
 			}),
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -415,8 +468,9 @@ func buildWorkloadMSPSecret(
 			Name:      identitySecretName(workloadName, secretKindMSP),
 			Namespace: namespace,
 			Labels: identityLabels(net, org, component, workloadName, map[string]string{
-				labelIdentityKind: secretKindMSP,
-				labelWorkload:     workloadName,
+				labelIdentityKind:   secretKindMSP,
+				labelIdentitySource: identitySourceDevGenerated,
+				labelWorkload:       workloadName,
 			}),
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -451,8 +505,9 @@ func buildWorkloadTLSSecret(
 			Name:      identitySecretName(workloadName, secretKindTLS),
 			Namespace: namespace,
 			Labels: identityLabels(net, org, component, workloadName, map[string]string{
-				labelIdentityKind: secretKindTLS,
-				labelWorkload:     workloadName,
+				labelIdentityKind:   secretKindTLS,
+				labelIdentitySource: identitySourceDevGenerated,
+				labelWorkload:       workloadName,
 			}),
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -508,6 +563,59 @@ func (r *FabricNetworkReconciler) ensureSecret(
 
 	log := logf.FromContext(ctx)
 	log.Info("Updating Secret", "name", existing.Name, "namespace", existing.Namespace)
+	return existing, r.Update(ctx, &existing)
+}
+
+func (r *FabricNetworkReconciler) ensureGeneratedSecret(
+	ctx context.Context,
+	desired *corev1.Secret,
+	validationError func(corev1.Secret) string,
+) (corev1.Secret, error) {
+	var existing corev1.Secret
+	key := client.ObjectKeyFromObject(desired)
+
+	err := r.Get(ctx, key, &existing)
+	if apierrors.IsNotFound(err) {
+		log := logf.FromContext(ctx)
+		log.Info("Creating generated fallback Secret", "name", desired.Name, "namespace", desired.Namespace)
+		return *desired, r.Create(ctx, desired)
+	}
+	if err != nil {
+		return corev1.Secret{}, err
+	}
+
+	if existing.Labels[labelIdentitySource] == identitySourceFabricCA {
+		if validationError == nil || validationError(existing) == "" {
+			return existing, nil
+		}
+	}
+
+	changed := false
+	if existing.Labels == nil {
+		existing.Labels = map[string]string{}
+		changed = true
+	}
+	for key, value := range desired.Labels {
+		if existing.Labels[key] != value {
+			existing.Labels[key] = value
+			changed = true
+		}
+	}
+
+	if validationError != nil {
+		if reason := validationError(existing); reason != "" {
+			existing.Data = desired.Data
+			existing.Type = desired.Type
+			changed = true
+		}
+	}
+
+	if !changed {
+		return existing, nil
+	}
+
+	log := logf.FromContext(ctx)
+	log.Info("Updating generated fallback Secret", "name", existing.Name, "namespace", existing.Namespace)
 	return existing, r.Update(ctx, &existing)
 }
 
@@ -736,6 +844,8 @@ func identitySecretValidationError(secret corev1.Secret, kind string, tlsEnabled
 	case secretKindCABootstrap:
 		return caBootstrapSecretValidationError(secret)
 	case secretKindAdminEnroll:
+		return enrollmentCredentialSecretValidationError(secret)
+	case secretKindWorkloadEnroll:
 		return enrollmentCredentialSecretValidationError(secret)
 	case secretKindMSP:
 		return mspIdentitySecretValidationError(secret, tlsEnabled)

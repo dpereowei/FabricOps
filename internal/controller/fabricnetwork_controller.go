@@ -128,13 +128,6 @@ func (r *FabricNetworkReconciler) reconcileOrg(
 		return status, err
 	}
 
-	identityReady, identityError, err := r.identityMaterialStatus(ctx, net, org, namespace)
-	if err != nil {
-		return status, err
-	}
-	status.IdentityReady = identityReady
-	status.IdentityError = identityError
-
 	caReady, err := r.reconcileCA(ctx, net, org, namespace)
 	if err != nil {
 		return status, err
@@ -145,6 +138,28 @@ func (r *FabricNetworkReconciler) reconcileOrg(
 		if err := r.reconcileAdminEnrollment(ctx, net, org, namespace); err != nil {
 			return status, err
 		}
+		if err := r.reconcileWorkloadEnrollments(ctx, net, org, namespace); err != nil {
+			return status, err
+		}
+		if _, err := r.reconcileGeneratedIdentityFallbackIfNeeded(ctx, net, org, namespace); err != nil {
+			return status, err
+		}
+	}
+
+	identityReady, identityError, err := r.identityMaterialStatus(ctx, net, org, namespace)
+	if err != nil {
+		return status, err
+	}
+	status.IdentityReady = identityReady
+	status.IdentityError = identityError
+
+	if !status.IdentityReady {
+		status.Orderers = desiredOrdererStatus(org)
+		status.OrderersReady = workloadReady(status.Orderers)
+		status.Peers = desiredPeerStatus(org)
+		status.PeersReady = workloadReady(status.Peers)
+		status.Ready = false
+		return status, nil
 	}
 
 	orderers, err := r.reconcileOrderers(ctx, net, org, namespace)
@@ -188,6 +203,24 @@ func orgStatusesEqual(a, b []fabricopsv1alpha1.OrgStatus) bool {
 
 func workloadReady(status fabricopsv1alpha1.WorkloadStatus) bool {
 	return status.Ready >= status.Desired
+}
+
+func desiredOrdererStatus(org fabricopsv1alpha1.Org) fabricopsv1alpha1.WorkloadStatus {
+	status := fabricopsv1alpha1.WorkloadStatus{}
+	for _, group := range org.Orderers {
+		status.Desired += int32(group.Instances)
+	}
+	return status
+}
+
+func desiredPeerStatus(org fabricopsv1alpha1.Org) fabricopsv1alpha1.WorkloadStatus {
+	if org.Peer == nil {
+		return fabricopsv1alpha1.WorkloadStatus{}
+	}
+
+	return fabricopsv1alpha1.WorkloadStatus{
+		Desired: int32(org.Peer.Instances),
+	}
 }
 
 func allOrgsReady(statuses []fabricopsv1alpha1.OrgStatus) bool {

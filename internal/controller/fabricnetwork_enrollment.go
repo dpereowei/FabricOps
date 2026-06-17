@@ -18,7 +18,9 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -34,8 +36,10 @@ import (
 const (
 	enrollmentWorkDir = "/fabricops/enrollment"
 
-	enrollAdminContainerName  = "enroll-admin"
-	publishAdminContainerName = "publish-admin-identity"
+	enrollAdminContainerName     = "enroll-admin"
+	publishAdminContainerName    = "publish-admin-identity"
+	enrollWorkloadContainerName  = "enroll-workload"
+	publishWorkloadContainerName = "publish-workload-identity"
 
 	envCAAddress             = "FABRICOPS_CA_ADDRESS"
 	envCABootstrapUserPass   = "FABRICOPS_CA_BOOTSTRAP_USER_PASS"
@@ -44,6 +48,13 @@ const (
 	envAdminName             = "FABRICOPS_ADMIN_NAME"
 	envAdminMSPSecret        = "FABRICOPS_ADMIN_MSP_SECRET"
 	envAdminTLSSecret        = "FABRICOPS_ADMIN_TLS_SECRET"
+	envWorkloadUsername      = "FABRICOPS_WORKLOAD_USERNAME"
+	envWorkloadPassword      = "FABRICOPS_WORKLOAD_PASSWORD"
+	envWorkloadName          = "FABRICOPS_WORKLOAD_NAME"
+	envWorkloadType          = "FABRICOPS_WORKLOAD_TYPE"
+	envWorkloadCSRHosts      = "FABRICOPS_WORKLOAD_CSR_HOSTS"
+	envWorkloadMSPSecret     = "FABRICOPS_WORKLOAD_MSP_SECRET"
+	envWorkloadTLSSecret     = "FABRICOPS_WORKLOAD_TLS_SECRET"
 	envTLSEnabled            = "FABRICOPS_TLS_ENABLED"
 	envPodNamespace          = "POD_NAMESPACE"
 	enrollmentVolumeName     = "enrollment-output"
@@ -56,6 +67,10 @@ func kubectlImage() string {
 
 func adminEnrollmentJobName(org fabricopsv1alpha1.Org) string {
 	return sanitizeName(adminIdentityName(org) + "-enroll")
+}
+
+func workloadEnrollmentJobName(workloadName string) string {
+	return sanitizeName(workloadName + "-enroll")
 }
 
 func enrollmentServiceAccountName(org fabricopsv1alpha1.Org) string {
@@ -76,17 +91,143 @@ func (r *FabricNetworkReconciler) reconcileAdminEnrollment(
 		return nil
 	}
 
+	if err := r.ensureEnrollmentRBAC(ctx, net, org, namespace); err != nil {
+		return err
+	}
+
+	return r.ensureJob(ctx, buildAdminEnrollmentJob(net, org, namespace))
+}
+
+func (r *FabricNetworkReconciler) reconcileWorkloadEnrollments(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) error {
+	if err := r.ensureEnrollmentRBAC(ctx, net, org, namespace); err != nil {
+		return err
+	}
+
+	for _, group := range org.Orderers {
+		for i := 0; i < group.Instances; i++ {
+			name := sanitizeName(fmt.Sprintf("%s%d", group.Prefix, i))
+			if err := r.reconcileWorkloadEnrollment(ctx, net, org, namespace, name, componentOrderer, workloadDNSNames(name, namespace)); err != nil {
+				return err
+			}
+		}
+	}
+
+	if org.Peer == nil {
+		return nil
+	}
+
+	for i := 0; i < org.Peer.Instances; i++ {
+		name := sanitizeName(fmt.Sprintf("%s%d", org.Peer.Prefix, i))
+		if err := r.reconcileWorkloadEnrollment(ctx, net, org, namespace, name, componentPeer, workloadDNSNames(name, namespace)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (r *FabricNetworkReconciler) reconcileWorkloadEnrollment(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	workloadName string,
+	component string,
+	csrHosts []string,
+) error {
+	enrolled, err := r.workloadIdentityEnrolled(ctx, net, namespace, workloadName)
+	if err != nil {
+		return err
+	}
+	if enrolled {
+		return nil
+	}
+
+	return r.ensureJob(ctx, buildWorkloadEnrollmentJob(net, org, namespace, workloadName, component, csrHosts))
+}
+
+func (r *FabricNetworkReconciler) reconcileGeneratedIdentityFallbackIfNeeded(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) (bool, error) {
+	needed, err := r.generatedIdentityFallbackNeeded(ctx, org, namespace)
+	if err != nil || !needed {
+		return needed, err
+	}
+
+	return true, r.reconcileGeneratedIdentityFallback(ctx, net, org, namespace)
+}
+
+func (r *FabricNetworkReconciler) generatedIdentityFallbackNeeded(
+	ctx context.Context,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) (bool, error) {
+	adminFailed, err := r.enrollmentJobFailed(ctx, namespace, adminEnrollmentJobName(org))
+	if err != nil || adminFailed {
+		return adminFailed, err
+	}
+
+	for _, group := range org.Orderers {
+		for i := 0; i < group.Instances; i++ {
+			name := sanitizeName(fmt.Sprintf("%s%d", group.Prefix, i))
+			failed, err := r.enrollmentJobFailed(ctx, namespace, workloadEnrollmentJobName(name))
+			if err != nil || failed {
+				return failed, err
+			}
+		}
+	}
+
+	if org.Peer == nil {
+		return false, nil
+	}
+
+	for i := 0; i < org.Peer.Instances; i++ {
+		name := sanitizeName(fmt.Sprintf("%s%d", org.Peer.Prefix, i))
+		failed, err := r.enrollmentJobFailed(ctx, namespace, workloadEnrollmentJobName(name))
+		if err != nil || failed {
+			return failed, err
+		}
+	}
+
+	return false, nil
+}
+
+func (r *FabricNetworkReconciler) enrollmentJobFailed(ctx context.Context, namespace, name string) (bool, error) {
+	var job batchv1.Job
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &job); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+
+	for _, condition := range job.Status.Conditions {
+		if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func (r *FabricNetworkReconciler) ensureEnrollmentRBAC(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) error {
 	if err := r.ensureServiceAccount(ctx, buildEnrollmentServiceAccount(net, org, namespace)); err != nil {
 		return err
 	}
 	if err := r.ensureRole(ctx, buildEnrollmentRole(net, org, namespace)); err != nil {
 		return err
 	}
-	if err := r.ensureRoleBinding(ctx, buildEnrollmentRoleBinding(net, org, namespace)); err != nil {
-		return err
-	}
-
-	return r.ensureJob(ctx, buildAdminEnrollmentJob(net, org, namespace))
+	return r.ensureRoleBinding(ctx, buildEnrollmentRoleBinding(net, org, namespace))
 }
 
 func (r *FabricNetworkReconciler) adminIdentityEnrolled(
@@ -97,17 +238,37 @@ func (r *FabricNetworkReconciler) adminIdentityEnrolled(
 ) (bool, error) {
 	adminName := adminIdentityName(org)
 
+	return r.fabricCAIdentityEnrolled(ctx, net, namespace, adminName, secretKindAdminMSP, secretKindAdminTLS)
+}
+
+func (r *FabricNetworkReconciler) workloadIdentityEnrolled(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	namespace string,
+	workloadName string,
+) (bool, error) {
+	return r.fabricCAIdentityEnrolled(ctx, net, namespace, workloadName, secretKindMSP, secretKindTLS)
+}
+
+func (r *FabricNetworkReconciler) fabricCAIdentityEnrolled(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	namespace string,
+	workloadName string,
+	mspKind string,
+	tlsKind string,
+) (bool, error) {
 	mspSecret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: namespace,
-		Name:      identitySecretName(adminName, secretKindMSP),
+		Name:      identitySecretName(workloadName, secretKindMSP),
 	}, mspSecret); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
 	if mspSecret.Labels[labelIdentitySource] != identitySourceFabricCA {
 		return false, nil
 	}
-	if identitySecretValidationError(*mspSecret, secretKindAdminMSP, net.Spec.Global.TLS) != "" {
+	if identitySecretValidationError(*mspSecret, mspKind, net.Spec.Global.TLS) != "" {
 		return false, nil
 	}
 
@@ -118,14 +279,14 @@ func (r *FabricNetworkReconciler) adminIdentityEnrolled(
 	tlsSecret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: namespace,
-		Name:      identitySecretName(adminName, secretKindTLS),
+		Name:      identitySecretName(workloadName, secretKindTLS),
 	}, tlsSecret); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
 	if tlsSecret.Labels[labelIdentitySource] != identitySourceFabricCA {
 		return false, nil
 	}
-	if identitySecretValidationError(*tlsSecret, secretKindAdminTLS, net.Spec.Global.TLS) != "" {
+	if identitySecretValidationError(*tlsSecret, tlsKind, net.Spec.Global.TLS) != "" {
 		return false, nil
 	}
 
@@ -263,6 +424,76 @@ func buildAdminEnrollmentJob(
 	}
 }
 
+func buildWorkloadEnrollmentJob(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	workloadName string,
+	component string,
+	csrHosts []string,
+) *batchv1.Job {
+	labels := identityLabels(net, org, component, workloadName, map[string]string{
+		labelIdentityKind: secretKindWorkloadEnroll,
+	})
+	backoffLimit := int32(4)
+
+	return &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      workloadEnrollmentJobName(workloadName),
+			Namespace: namespace,
+			Labels:    labels,
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: &backoffLimit,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+				},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: enrollmentServiceAccountName(org),
+					RestartPolicy:      corev1.RestartPolicyNever,
+					Volumes: []corev1.Volume{
+						{
+							Name: enrollmentVolumeName,
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+					},
+					InitContainers: []corev1.Container{
+						{
+							Name:    enrollWorkloadContainerName,
+							Image:   caImage(),
+							Command: []string{"sh", "-ec", workloadEnrollmentScript()},
+							Env:     workloadEnrollmentEnv(net, org, namespace, workloadName, component, csrHosts),
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      enrollmentVolumeName,
+									MountPath: enrollmentWorkDir,
+								},
+							},
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Name:    publishWorkloadContainerName,
+							Image:   kubectlImage(),
+							Command: []string{"sh", "-ec", publishWorkloadIdentityScript()},
+							Env:     publishWorkloadIdentityEnv(net, workloadName),
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      enrollmentVolumeName,
+									MountPath: enrollmentWorkDir,
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func adminEnrollmentEnv(org fabricopsv1alpha1.Org, namespace string) []corev1.EnvVar {
 	adminName := adminIdentityName(org)
 
@@ -299,6 +530,52 @@ func adminEnrollmentEnv(org fabricopsv1alpha1.Org, namespace string) []corev1.En
 	}
 }
 
+func workloadEnrollmentEnv(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	workloadName string,
+	component string,
+	csrHosts []string,
+) []corev1.EnvVar {
+	enrollmentSecretName := identityEnrollmentSecretName(workloadName)
+
+	return []corev1.EnvVar{
+		{Name: envCAAddress, Value: serviceDNS(sanitizeName(org.Organization.Name+"-ca"), namespace, caPort)},
+		{
+			Name: envCABootstrapUserPass,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: caBootstrapSecretName(org)},
+					Key:                  caBootstrapUserPassKey,
+				},
+			},
+		},
+		{
+			Name: envWorkloadUsername,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: enrollmentSecretName},
+					Key:                  caBootstrapUsernameKey,
+				},
+			},
+		},
+		{
+			Name: envWorkloadPassword,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: enrollmentSecretName},
+					Key:                  caBootstrapPasswordKey,
+				},
+			},
+		},
+		{Name: envWorkloadName, Value: workloadName},
+		{Name: envWorkloadType, Value: component},
+		{Name: envWorkloadCSRHosts, Value: strings.Join(csrHosts, ",")},
+		{Name: envTLSEnabled, Value: boolString(net.Spec.Global.TLS)},
+	}
+}
+
 func publishAdminIdentityEnv(net *fabricopsv1alpha1.FabricNetwork, org fabricopsv1alpha1.Org) []corev1.EnvVar {
 	adminName := adminIdentityName(org)
 
@@ -306,6 +583,23 @@ func publishAdminIdentityEnv(net *fabricopsv1alpha1.FabricNetwork, org fabricops
 		{Name: envAdminName, Value: adminName},
 		{Name: envAdminMSPSecret, Value: identitySecretName(adminName, secretKindMSP)},
 		{Name: envAdminTLSSecret, Value: identitySecretName(adminName, secretKindTLS)},
+		{Name: envTLSEnabled, Value: boolString(net.Spec.Global.TLS)},
+		{
+			Name: envPodNamespace,
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.namespace",
+				},
+			},
+		},
+	}
+}
+
+func publishWorkloadIdentityEnv(net *fabricopsv1alpha1.FabricNetwork, workloadName string) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: envWorkloadName, Value: workloadName},
+		{Name: envWorkloadMSPSecret, Value: identitySecretName(workloadName, secretKindMSP)},
+		{Name: envWorkloadTLSSecret, Value: identitySecretName(workloadName, secretKindTLS)},
 		{Name: envTLSEnabled, Value: boolString(net.Spec.Global.TLS)},
 		{
 			Name: envPodNamespace,
@@ -411,6 +705,113 @@ if [ "$FABRICOPS_TLS_ENABLED" = "true" ]; then
     fabricops.my.domain/identity-kind=admin-tls \
     fabricops.my.domain/identity-source=fabric-ca \
     fabricops.my.domain/workload="$FABRICOPS_ADMIN_NAME" \
+    --overwrite
+fi
+`
+}
+
+func workloadEnrollmentScript() string {
+	return `set -eu
+
+copy_first() {
+  src_dir="$1"
+  dest="$2"
+  file="$(find "$src_dir" -type f | head -n 1)"
+  test -n "$file"
+  cp "$file" "$dest"
+}
+
+bootstrap_home="` + enrollmentWorkDir + `/bootstrap"
+workload_msp_home="` + enrollmentWorkDir + `/workload-msp"
+workload_tls_home="` + enrollmentWorkDir + `/workload-tls"
+output_dir="` + enrollmentWorkDir + `/output"
+
+mkdir -p "$bootstrap_home" "$workload_msp_home" "$output_dir/msp"
+
+if [ "$FABRICOPS_TLS_ENABLED" = "true" ]; then
+  mkdir -p "$workload_tls_home" "$output_dir/tls"
+fi
+
+fabric-ca-client enroll \
+  -u "http://${FABRICOPS_CA_BOOTSTRAP_USER_PASS}@${FABRICOPS_CA_ADDRESS}" \
+  --mspdir "$bootstrap_home/msp"
+
+if ! fabric-ca-client register \
+  --id.name "$FABRICOPS_WORKLOAD_USERNAME" \
+  --id.secret "$FABRICOPS_WORKLOAD_PASSWORD" \
+  --id.type "$FABRICOPS_WORKLOAD_TYPE" \
+  --url "http://${FABRICOPS_CA_ADDRESS}" \
+  --mspdir "$bootstrap_home/msp"; then
+  echo "Workload identity may already be registered; continuing to enrollment"
+fi
+
+fabric-ca-client enroll \
+  -u "http://${FABRICOPS_WORKLOAD_USERNAME}:${FABRICOPS_WORKLOAD_PASSWORD}@${FABRICOPS_CA_ADDRESS}" \
+  --mspdir "$workload_msp_home/msp"
+
+cat > "$output_dir/msp/config.yaml" <<'FABRICOPS_MSP_CONFIG'
+` + mspConfigYAML() + `FABRICOPS_MSP_CONFIG
+
+copy_first "$workload_msp_home/msp/cacerts" "$output_dir/msp/cacert.pem"
+copy_first "$workload_msp_home/msp/signcerts" "$output_dir/msp/signcert.pem"
+copy_first "$workload_msp_home/msp/keystore" "$output_dir/msp/keystore.pem"
+
+if [ "$FABRICOPS_TLS_ENABLED" = "true" ]; then
+  fabric-ca-client enroll \
+    -u "http://${FABRICOPS_WORKLOAD_USERNAME}:${FABRICOPS_WORKLOAD_PASSWORD}@${FABRICOPS_CA_ADDRESS}" \
+    --enrollment.profile tls \
+    --csr.hosts "$FABRICOPS_WORKLOAD_CSR_HOSTS" \
+    --mspdir "$workload_tls_home/tls"
+
+  copy_first "$workload_tls_home/tls/tlscacerts" "$output_dir/msp/tlscacert.pem"
+  copy_first "$workload_tls_home/tls/tlscacerts" "$output_dir/tls/ca.crt"
+  copy_first "$workload_tls_home/tls/signcerts" "$output_dir/tls/server.crt"
+  copy_first "$workload_tls_home/tls/keystore" "$output_dir/tls/server.key"
+fi
+
+chmod -R a+rX "$output_dir"
+`
+}
+
+func publishWorkloadIdentityScript() string {
+	return `set -eu
+
+output_dir="` + enrollmentWorkDir + `/output"
+
+if [ "$FABRICOPS_TLS_ENABLED" = "true" ]; then
+  kubectl -n "$POD_NAMESPACE" create secret generic "$FABRICOPS_WORKLOAD_MSP_SECRET" \
+    --from-file=config.yaml="$output_dir/msp/config.yaml" \
+    --from-file=cacert.pem="$output_dir/msp/cacert.pem" \
+    --from-file=tlscacert.pem="$output_dir/msp/tlscacert.pem" \
+    --from-file=signcert.pem="$output_dir/msp/signcert.pem" \
+    --from-file=keystore.pem="$output_dir/msp/keystore.pem" \
+    --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
+else
+  kubectl -n "$POD_NAMESPACE" create secret generic "$FABRICOPS_WORKLOAD_MSP_SECRET" \
+    --from-file=config.yaml="$output_dir/msp/config.yaml" \
+    --from-file=cacert.pem="$output_dir/msp/cacert.pem" \
+    --from-file=signcert.pem="$output_dir/msp/signcert.pem" \
+    --from-file=keystore.pem="$output_dir/msp/keystore.pem" \
+    --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
+fi
+
+kubectl -n "$POD_NAMESPACE" label secret "$FABRICOPS_WORKLOAD_MSP_SECRET" \
+  fabricops.my.domain/identity-kind=msp \
+  fabricops.my.domain/identity-source=fabric-ca \
+  fabricops.my.domain/workload="$FABRICOPS_WORKLOAD_NAME" \
+  --overwrite
+
+if [ "$FABRICOPS_TLS_ENABLED" = "true" ]; then
+  kubectl -n "$POD_NAMESPACE" create secret generic "$FABRICOPS_WORKLOAD_TLS_SECRET" \
+    --from-file=ca.crt="$output_dir/tls/ca.crt" \
+    --from-file=server.crt="$output_dir/tls/server.crt" \
+    --from-file=server.key="$output_dir/tls/server.key" \
+    --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
+
+  kubectl -n "$POD_NAMESPACE" label secret "$FABRICOPS_WORKLOAD_TLS_SECRET" \
+    fabricops.my.domain/identity-kind=tls \
+    fabricops.my.domain/identity-source=fabric-ca \
+    fabricops.my.domain/workload="$FABRICOPS_WORKLOAD_NAME" \
     --overwrite
 fi
 `
