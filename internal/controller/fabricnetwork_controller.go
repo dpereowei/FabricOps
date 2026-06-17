@@ -141,9 +141,6 @@ func (r *FabricNetworkReconciler) reconcileOrg(
 		if err := r.reconcileWorkloadEnrollments(ctx, net, org, namespace); err != nil {
 			return status, err
 		}
-		if _, err := r.reconcileGeneratedIdentityFallbackIfNeeded(ctx, net, org, namespace); err != nil {
-			return status, err
-		}
 	}
 
 	identityReady, identityError, err := r.identityMaterialStatus(ctx, net, org, namespace)

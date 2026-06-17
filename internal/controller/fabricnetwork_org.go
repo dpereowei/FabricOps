@@ -71,8 +71,7 @@ const (
 	secretKindMSP = "msp"
 	secretKindTLS = "tls"
 
-	identitySourceFabricCA     = "fabric-ca"
-	identitySourceDevGenerated = "dev-generated"
+	identitySourceFabricCA = "fabric-ca"
 
 	mspConfigKey    = "config.yaml"
 	mspCACertKey    = "cacert.pem"

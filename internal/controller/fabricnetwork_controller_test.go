@@ -18,7 +18,15 @@ package controller
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -215,7 +223,6 @@ var _ = Describe("FabricNetwork Controller", func() {
 			expectIdentitySecret(ctx, ordererNamespace, caBootstrapSecretName(network.Spec.Orgs[0]), secretKindCABootstrap, true)
 			expectIdentitySecret(ctx, ordererNamespace, adminEnrollmentSecretName(network.Spec.Orgs[0]), secretKindAdminEnroll, true)
 			expectIdentitySecret(ctx, ordererNamespace, "orderer0-enrollment", secretKindWorkloadEnroll, true)
-			expectSecretNotFound(ctx, ordererNamespace, orgIdentitySecretName(network.Spec.Orgs[0]))
 			expectSecretNotFound(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindMSP))
 			expectSecretNotFound(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindTLS))
 			expectSecretNotFound(ctx, ordererNamespace, "orderer0-msp")
@@ -223,14 +230,13 @@ var _ = Describe("FabricNetwork Controller", func() {
 			expectIdentitySecret(ctx, bankNamespace, caBootstrapSecretName(network.Spec.Orgs[1]), secretKindCABootstrap, true)
 			expectIdentitySecret(ctx, bankNamespace, adminEnrollmentSecretName(network.Spec.Orgs[1]), secretKindAdminEnroll, true)
 			expectIdentitySecret(ctx, bankNamespace, "peer0-enrollment", secretKindWorkloadEnroll, true)
-			expectSecretNotFound(ctx, bankNamespace, orgIdentitySecretName(network.Spec.Orgs[1]))
 			expectSecretNotFound(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindMSP))
 			expectSecretNotFound(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindTLS))
 			expectSecretNotFound(ctx, bankNamespace, "peer0-msp")
 			expectSecretNotFound(ctx, bankNamespace, "peer0-tls")
 		})
 
-		It("should create and repair generated fallback identity secrets after enrollment failure", func() {
+		It("should not generate fallback identity secrets after enrollment failure", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &FabricNetworkReconciler{
 				Client: k8sClient,
@@ -256,8 +262,10 @@ var _ = Describe("FabricNetwork Controller", func() {
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
 
-			By("Marking workload enrollment jobs as failed")
+			By("Marking enrollment jobs as failed")
+			markJobFailed(ctx, ordererNamespace, adminEnrollmentJobName(network.Spec.Orgs[0]))
 			markJobFailed(ctx, ordererNamespace, workloadEnrollmentJobName("orderer0"))
+			markJobFailed(ctx, bankNamespace, adminEnrollmentJobName(network.Spec.Orgs[1]))
 			markJobFailed(ctx, bankNamespace, workloadEnrollmentJobName("peer0"))
 
 			By("Reconciling after enrollment failures")
@@ -266,81 +274,24 @@ var _ = Describe("FabricNetwork Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			expectIdentitySecret(ctx, ordererNamespace, orgIdentitySecretName(network.Spec.Orgs[0]), secretKindOrgCA, true)
-			expectIdentitySecret(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindMSP), secretKindAdminMSP, true)
-			expectIdentitySecret(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindTLS), secretKindAdminTLS, true)
-			expectIdentitySecretSource(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true, identitySourceDevGenerated)
-			expectIdentitySecretSource(ctx, ordererNamespace, "orderer0-tls", secretKindTLS, true, identitySourceDevGenerated)
-			expectIdentitySecret(ctx, bankNamespace, orgIdentitySecretName(network.Spec.Orgs[1]), secretKindOrgCA, true)
-			expectIdentitySecret(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindMSP), secretKindAdminMSP, true)
-			expectIdentitySecret(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindTLS), secretKindAdminTLS, true)
-			expectIdentitySecretSource(ctx, bankNamespace, "peer0-msp", secretKindMSP, true, identitySourceDevGenerated)
-			expectIdentitySecretSource(ctx, bankNamespace, "peer0-tls", secretKindTLS, true, identitySourceDevGenerated)
-
-			By("Deleting one generated secret and corrupting another")
-			var peerTLS corev1.Secret
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Namespace: bankNamespace,
-				Name:      "peer0-tls",
-			}, &peerTLS)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, &peerTLS)).To(Succeed())
-
-			var ordererMSP corev1.Secret
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Namespace: ordererNamespace,
-				Name:      "orderer0-msp",
-			}, &ordererMSP)).To(Succeed())
-			ordererMSP.Data[mspSignCertKey] = []byte("not a pem certificate")
-			Expect(k8sClient.Update(ctx, &ordererMSP)).To(Succeed())
-
-			var ordererAdminTLS corev1.Secret
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Namespace: ordererNamespace,
-				Name:      "orderer-admin-tls",
-			}, &ordererAdminTLS)).To(Succeed())
-			ordererAdminTLS.Data[tlsClientCertKey] = []byte("not a pem certificate")
-			Expect(k8sClient.Update(ctx, &ordererAdminTLS)).To(Succeed())
-
-			var bankCABootstrap corev1.Secret
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Namespace: bankNamespace,
-				Name:      "banka-ca-bootstrap",
-			}, &bankCABootstrap)).To(Succeed())
-			bankCABootstrap.Data[caBootstrapUserPassKey] = []byte("admin:not-the-current-password")
-			Expect(k8sClient.Update(ctx, &bankCABootstrap)).To(Succeed())
-
-			var bankAdminEnrollment corev1.Secret
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Namespace: bankNamespace,
-				Name:      "banka-admin-enrollment",
-			}, &bankAdminEnrollment)).To(Succeed())
-			bankAdminEnrollment.Data[caBootstrapUserPassKey] = []byte("banka-admin:not-the-current-password")
-			Expect(k8sClient.Update(ctx, &bankAdminEnrollment)).To(Succeed())
-
-			var bankPeerEnrollment corev1.Secret
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Namespace: bankNamespace,
-				Name:      "peer0-enrollment",
-			}, &bankPeerEnrollment)).To(Succeed())
-			bankPeerEnrollment.Data[caBootstrapUserPassKey] = []byte("peer0:not-the-current-password")
-			Expect(k8sClient.Update(ctx, &bankPeerEnrollment)).To(Succeed())
-
-			By("Reconciling again")
-			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-
-			expectIdentitySecretSource(ctx, bankNamespace, "peer0-tls", secretKindTLS, true, identitySourceDevGenerated)
-			expectIdentitySecretSource(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true, identitySourceDevGenerated)
-			expectIdentitySecretSource(ctx, ordererNamespace, "orderer-admin-tls", secretKindAdminTLS, true, identitySourceDevGenerated)
-			expectIdentitySecret(ctx, bankNamespace, "banka-ca-bootstrap", secretKindCABootstrap, true)
-			expectIdentitySecret(ctx, bankNamespace, "banka-admin-enrollment", secretKindAdminEnroll, true)
-			expectIdentitySecret(ctx, bankNamespace, "peer0-enrollment", secretKindWorkloadEnroll, true)
+			expectSecretNotFound(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindMSP))
+			expectSecretNotFound(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindTLS))
+			expectSecretNotFound(ctx, ordererNamespace, "orderer0-msp")
+			expectSecretNotFound(ctx, ordererNamespace, "orderer0-tls")
+			expectSecretNotFound(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindMSP))
+			expectSecretNotFound(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindTLS))
+			expectSecretNotFound(ctx, bankNamespace, "peer0-msp")
+			expectSecretNotFound(ctx, bankNamespace, "peer0-tls")
+			expectDeploymentNotFound(ctx, ordererNamespace, "orderer0")
+			expectDeploymentNotFound(ctx, bankNamespace, "peer0")
 
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
-			Expect(network.Status.OrgStatus[0].IdentityReady).To(BeTrue())
-			Expect(network.Status.OrgStatus[1].IdentityReady).To(BeTrue())
+			Expect(network.Status.OrgStatus[0].IdentityReady).To(BeFalse())
+			Expect(network.Status.OrgStatus[0].IdentityError).To(ContainSubstring("orderer-admin-msp"))
+			Expect(network.Status.OrgStatus[0].IdentityError).To(ContainSubstring("orderer0-msp"))
+			Expect(network.Status.OrgStatus[1].IdentityReady).To(BeFalse())
+			Expect(network.Status.OrgStatus[1].IdentityError).To(ContainSubstring("banka-admin-msp"))
+			Expect(network.Status.OrgStatus[1].IdentityError).To(ContainSubstring("peer0-msp"))
 		})
 
 		It("should create admin enrollment resources after org CAs are ready", func() {
@@ -777,18 +728,17 @@ func writeEnrolledOrgIdentitySecrets(
 	org fabricopsv1alpha1.Org,
 	namespace string,
 ) {
-	authority, err := generateIdentityAuthority(org)
+	authority, err := generateTestIdentityAuthority(org)
 	Expect(err).NotTo(HaveOccurred())
 
 	adminName := adminIdentityName(org)
-	adminMSP, err := buildWorkloadMSPSecret(net, org, namespace, adminName, componentAdmin, authority)
+	adminMSP, err := buildTestMSPSecret(net, org, namespace, adminName, componentAdmin, secretKindAdminMSP, authority)
 	Expect(err).NotTo(HaveOccurred())
-	adminMSP.Labels[labelIdentityKind] = secretKindAdminMSP
 	adminMSP.Labels[labelIdentitySource] = identitySourceFabricCA
 	upsertSecret(ctx, adminMSP)
 
 	if net.Spec.Global.TLS {
-		adminTLS, err := buildAdminTLSSecret(net, org, namespace, adminName, authority)
+		adminTLS, err := buildTestAdminTLSSecret(net, org, namespace, adminName, authority)
 		Expect(err).NotTo(HaveOccurred())
 		adminTLS.Labels[labelIdentitySource] = identitySourceFabricCA
 		upsertSecret(ctx, adminTLS)
@@ -818,9 +768,9 @@ func writeEnrolledWorkloadIdentitySecrets(
 	namespace string,
 	workloadName string,
 	component string,
-	authority *identityAuthority,
+	authority *testIdentityAuthority,
 ) {
-	msp, err := buildWorkloadMSPSecret(net, org, namespace, workloadName, component, authority)
+	msp, err := buildTestMSPSecret(net, org, namespace, workloadName, component, secretKindMSP, authority)
 	Expect(err).NotTo(HaveOccurred())
 	msp.Labels[labelIdentitySource] = identitySourceFabricCA
 	upsertSecret(ctx, msp)
@@ -829,10 +779,252 @@ func writeEnrolledWorkloadIdentitySecrets(
 		return
 	}
 
-	tls, err := buildWorkloadTLSSecret(net, org, namespace, workloadName, component, workloadDNSNames(workloadName, namespace), authority)
+	tls, err := buildTestWorkloadTLSSecret(net, org, namespace, workloadName, component, workloadDNSNames(workloadName, namespace), authority)
 	Expect(err).NotTo(HaveOccurred())
 	tls.Labels[labelIdentitySource] = identitySourceFabricCA
 	upsertSecret(ctx, tls)
+}
+
+type testIdentityAuthority struct {
+	mspCACertPEM []byte
+	mspCAKey     *ecdsa.PrivateKey
+	tlsCACertPEM []byte
+	tlsCAKey     *ecdsa.PrivateKey
+}
+
+func generateTestIdentityAuthority(org fabricopsv1alpha1.Org) (*testIdentityAuthority, error) {
+	mspCert, mspKey, err := generateTestCA("ca."+org.Organization.Domain, org.Organization.MSPName)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsCert, tlsKey, err := generateTestCA("tlsca."+org.Organization.Domain, org.Organization.MSPName)
+	if err != nil {
+		return nil, err
+	}
+
+	return &testIdentityAuthority{
+		mspCACertPEM: mspCert,
+		mspCAKey:     mspKey,
+		tlsCACertPEM: tlsCert,
+		tlsCAKey:     tlsKey,
+	}, nil
+}
+
+func buildTestMSPSecret(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	workloadName string,
+	component string,
+	kind string,
+	authority *testIdentityAuthority,
+) (*corev1.Secret, error) {
+	certPEM, keyPEM, err := issueTestCertificate(
+		workloadName,
+		component,
+		nil,
+		authority.mspCACertPEM,
+		authority.mspCAKey,
+		x509.KeyUsageDigitalSignature,
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	data := map[string][]byte{
+		mspConfigKey:   []byte(mspConfigYAML()),
+		mspCACertKey:   authority.mspCACertPEM,
+		mspSignCertKey: certPEM,
+		mspKeyStoreKey: keyPEM,
+	}
+	if net.Spec.Global.TLS {
+		data[mspTLSCACertKey] = authority.tlsCACertPEM
+	}
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      identitySecretName(workloadName, secretKindMSP),
+			Namespace: namespace,
+			Labels: identityLabels(net, org, component, workloadName, map[string]string{
+				labelIdentityKind: kind,
+				labelWorkload:     workloadName,
+			}),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: data,
+	}, nil
+}
+
+func buildTestAdminTLSSecret(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	adminName string,
+	authority *testIdentityAuthority,
+) (*corev1.Secret, error) {
+	certPEM, keyPEM, err := issueTestCertificate(
+		adminName,
+		componentAdmin,
+		nil,
+		authority.tlsCACertPEM,
+		authority.tlsCAKey,
+		x509.KeyUsageDigitalSignature,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      identitySecretName(adminName, secretKindTLS),
+			Namespace: namespace,
+			Labels: identityLabels(net, org, componentAdmin, adminName, map[string]string{
+				labelIdentityKind: secretKindAdminTLS,
+				labelWorkload:     adminName,
+			}),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			tlsCACertKey:     authority.tlsCACertPEM,
+			tlsClientCertKey: certPEM,
+			tlsClientKeyKey:  keyPEM,
+		},
+	}, nil
+}
+
+func buildTestWorkloadTLSSecret(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	workloadName string,
+	component string,
+	dnsNames []string,
+	authority *testIdentityAuthority,
+) (*corev1.Secret, error) {
+	certPEM, keyPEM, err := issueTestCertificate(
+		workloadName,
+		component,
+		dnsNames,
+		authority.tlsCACertPEM,
+		authority.tlsCAKey,
+		x509.KeyUsageDigitalSignature|x509.KeyUsageKeyEncipherment,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      identitySecretName(workloadName, secretKindTLS),
+			Namespace: namespace,
+			Labels: identityLabels(net, org, component, workloadName, map[string]string{
+				labelIdentityKind: secretKindTLS,
+				labelWorkload:     workloadName,
+			}),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			tlsCACertKey:     authority.tlsCACertPEM,
+			tlsServerCertKey: certPEM,
+			tlsServerKeyKey:  keyPEM,
+		},
+	}, nil
+}
+
+func generateTestCA(commonName, organization string) ([]byte, *ecdsa.PrivateKey, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	serial, err := randomTestSerial()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName:   commonName,
+			Organization: []string{organization},
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().AddDate(10, 0, 0),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return pemEncodeTestCertificate(certDER), key, nil
+}
+
+func issueTestCertificate(
+	commonName string,
+	organizationalUnit string,
+	dnsNames []string,
+	caCertPEM []byte,
+	caKey *ecdsa.PrivateKey,
+	keyUsage x509.KeyUsage,
+	usages []x509.ExtKeyUsage,
+) ([]byte, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	caCert, err := parsePEMCertificate(caCertPEM)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	serial, err := randomTestSerial()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName:         commonName,
+			OrganizationalUnit: []string{organizationalUnit},
+		},
+		DNSNames:              dnsNames,
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().AddDate(1, 0, 0),
+		KeyUsage:              keyUsage,
+		ExtKeyUsage:           usages,
+		BasicConstraintsValid: true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return pemEncodeTestCertificate(certDER), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), nil
+}
+
+func randomTestSerial() (*big.Int, error) {
+	limit := new(big.Int).Lsh(big.NewInt(1), 128)
+	return rand.Int(rand.Reader, limit)
+}
+
+func pemEncodeTestCertificate(der []byte) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
 func upsertSecret(ctx context.Context, desired *corev1.Secret) {
@@ -925,11 +1117,6 @@ func expectIdentitySecret(ctx context.Context, namespace, name, kind string, tls
 		Namespace: namespace,
 		Name:      name,
 	}, secret)).To(Succeed())
-
-	if kind == secretKindOrgCA {
-		Expect(orgIdentitySecretValidationError(*secret)).To(BeEmpty())
-		return
-	}
 
 	Expect(identitySecretValidationError(*secret, kind, tlsEnabled)).To(BeEmpty())
 	Expect(secret.Labels[labelIdentityKind]).To(Equal(kind))
