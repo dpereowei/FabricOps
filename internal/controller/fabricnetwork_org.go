@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"reflect"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -59,6 +60,8 @@ const (
 	peerPort          int32 = 7051
 	peerChaincodePort int32 = 7052
 
+	caBootstrapEnvVar = "FABRIC_CA_SERVER_BOOTSTRAP_USER_PASS"
+
 	ordererMSPPath = "/var/hyperledger/orderer/msp"
 	ordererTLSPath = "/var/hyperledger/orderer/tls"
 	peerMSPPath    = "/etc/hyperledger/fabric/peer/msp"
@@ -72,6 +75,10 @@ const (
 	mspTLSCACertKey = "tlscacert.pem"
 	mspSignCertKey  = "signcert.pem"
 	mspKeyStoreKey  = "keystore.pem"
+
+	caBootstrapUsernameKey = "username"
+	caBootstrapPasswordKey = "password"
+	caBootstrapUserPassKey = "user-pass"
 
 	tlsCACertKey     = "ca.crt"
 	tlsServerCertKey = "server.crt"
@@ -260,6 +267,14 @@ func adminTLSSecretKeys() []string {
 	}
 }
 
+func caBootstrapSecretKeys() []string {
+	return []string{
+		caBootstrapUsernameKey,
+		caBootstrapPasswordKey,
+		caBootstrapUserPassKey,
+	}
+}
+
 func requiredIdentitySecrets(
 	net *fabricopsv1alpha1.FabricNetwork,
 	org fabricopsv1alpha1.Org,
@@ -268,6 +283,13 @@ func requiredIdentitySecrets(
 	tlsEnabled := net.Spec.Global.TLS
 	requirements := []identitySecretRequirement{}
 	adminName := adminIdentityName(org)
+
+	requirements = append(requirements, identitySecretRequirement{
+		namespace: namespace,
+		name:      caBootstrapSecretName(org),
+		kind:      secretKindCABootstrap,
+		keys:      caBootstrapSecretKeys(),
+	})
 
 	requirements = append(requirements, identitySecretRequirement{
 		namespace: namespace,
@@ -413,7 +435,40 @@ func (r *FabricNetworkReconciler) ensureDeployment(
 
 	err := r.Get(ctx, key, &existing)
 	if err == nil {
-		return nil
+		changed := false
+		if existing.Labels == nil {
+			existing.Labels = map[string]string{}
+			changed = true
+		}
+		for key, value := range desired.Labels {
+			if existing.Labels[key] != value {
+				existing.Labels[key] = value
+				changed = true
+			}
+		}
+		if !reflect.DeepEqual(existing.Spec.Replicas, desired.Spec.Replicas) {
+			existing.Spec.Replicas = desired.Spec.Replicas
+			changed = true
+		}
+		if !reflect.DeepEqual(existing.Spec.Template.Labels, desired.Spec.Template.Labels) {
+			existing.Spec.Template.Labels = desired.Spec.Template.Labels
+			changed = true
+		}
+		if !reflect.DeepEqual(existing.Spec.Template.Spec.Containers, desired.Spec.Template.Spec.Containers) {
+			existing.Spec.Template.Spec.Containers = desired.Spec.Template.Spec.Containers
+			changed = true
+		}
+		if !reflect.DeepEqual(existing.Spec.Template.Spec.Volumes, desired.Spec.Template.Spec.Volumes) {
+			existing.Spec.Template.Spec.Volumes = desired.Spec.Template.Spec.Volumes
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
+
+		log := logf.FromContext(ctx)
+		log.Info("Updating Deployment", "name", desired.Name, "namespace", desired.Namespace)
+		return r.Update(ctx, &existing)
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
@@ -508,10 +563,21 @@ func buildCADeployment(
 								{Name: "FABRIC_CA_HOME", Value: "/etc/hyperledger/fabric-ca-server"},
 								{Name: "FABRIC_CA_SERVER_CA_NAME", Value: sanitizeName(org.Organization.Name)},
 								{Name: "FABRIC_CA_SERVER_PORT", Value: fmt.Sprintf("%d", caPort)},
+								{
+									Name: caBootstrapEnvVar,
+									ValueFrom: &corev1.EnvVarSource{
+										SecretKeyRef: &corev1.SecretKeySelector{
+											LocalObjectReference: corev1.LocalObjectReference{
+												Name: caBootstrapSecretName(org),
+											},
+											Key: caBootstrapUserPassKey,
+										},
+									},
+								},
 							},
 							Command: []string{
 								"sh", "-c",
-								"fabric-ca-server start -b admin:adminpw -d",
+								"fabric-ca-server start -b \"$" + caBootstrapEnvVar + "\" -d",
 							},
 							Ports: []corev1.ContainerPort{
 								{ContainerPort: caPort, Name: "ca"},

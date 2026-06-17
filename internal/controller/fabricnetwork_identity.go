@@ -40,14 +40,18 @@ import (
 )
 
 const (
-	secretKindOrgCA    = "org-ca"
-	secretKindAdminMSP = "admin-msp"
-	secretKindAdminTLS = "admin-tls"
+	secretKindOrgCA       = "org-ca"
+	secretKindCABootstrap = "ca-bootstrap"
+	secretKindAdminMSP    = "admin-msp"
+	secretKindAdminTLS    = "admin-tls"
 
 	orgMSPCACertKey = "msp-ca.crt"
 	orgMSPCAKeyKey  = "msp-ca.key"
 	orgTLSCACertKey = "tls-ca.crt"
 	orgTLSCAKeyKey  = "tls-ca.key"
+
+	caBootstrapUsername     = "admin"
+	bootstrapPasswordLength = 32
 )
 
 type identityAuthority struct {
@@ -63,6 +67,10 @@ func (r *FabricNetworkReconciler) reconcileIdentityMaterial(
 	org fabricopsv1alpha1.Org,
 	namespace string,
 ) error {
+	if err := r.ensureCABootstrapSecret(ctx, net, org, namespace); err != nil {
+		return err
+	}
+
 	authority, err := r.ensureOrgIdentityAuthority(ctx, net, org, namespace)
 	if err != nil {
 		return err
@@ -117,8 +125,59 @@ func orgIdentitySecretName(org fabricopsv1alpha1.Org) string {
 	return sanitizeName(org.Organization.Name + "-identity-ca")
 }
 
+func caBootstrapSecretName(org fabricopsv1alpha1.Org) string {
+	return sanitizeName(org.Organization.Name + "-ca-bootstrap")
+}
+
 func adminIdentityName(org fabricopsv1alpha1.Org) string {
 	return sanitizeName(org.Organization.Name + "-admin")
+}
+
+func (r *FabricNetworkReconciler) ensureCABootstrapSecret(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) error {
+	desired, err := buildCABootstrapSecret(net, org, namespace)
+	if err != nil {
+		return err
+	}
+
+	_, err = r.ensureSecret(ctx, desired, func(secret corev1.Secret) string {
+		return identitySecretValidationError(secret, secretKindCABootstrap, net.Spec.Global.TLS)
+	})
+	return err
+}
+
+func buildCABootstrapSecret(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) (*corev1.Secret, error) {
+	password, err := generateBootstrapPassword()
+	if err != nil {
+		return nil, err
+	}
+
+	name := caBootstrapSecretName(org)
+	userPass := caBootstrapUsername + ":" + password
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: identityLabels(net, org, componentCA, name, map[string]string{
+				labelIdentityKind: secretKindCABootstrap,
+			}),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			caBootstrapUsernameKey: []byte(caBootstrapUsername),
+			caBootstrapPasswordKey: []byte(password),
+			caBootstrapUserPassKey: []byte(userPass),
+		},
+	}, nil
 }
 
 func (r *FabricNetworkReconciler) ensureOrgIdentityAuthority(
@@ -516,6 +575,19 @@ func randomSerial() (*big.Int, error) {
 	return rand.Int(rand.Reader, limit)
 }
 
+func generateBootstrapPassword() (string, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	out := make([]byte, bootstrapPasswordLength)
+	for i := range out {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		out[i] = alphabet[n.Int64()]
+	}
+	return string(out), nil
+}
+
 func workloadDNSNames(name, namespace string) []string {
 	return []string{
 		name,
@@ -605,6 +677,8 @@ func orgIdentitySecretValidationError(secret corev1.Secret) string {
 
 func identitySecretValidationError(secret corev1.Secret, kind string, tlsEnabled bool) string {
 	switch kind {
+	case secretKindCABootstrap:
+		return caBootstrapSecretValidationError(secret)
 	case secretKindMSP:
 		return mspIdentitySecretValidationError(secret, tlsEnabled)
 	case secretKindTLS:
@@ -616,6 +690,28 @@ func identitySecretValidationError(secret corev1.Secret, kind string, tlsEnabled
 	default:
 		return ""
 	}
+}
+
+func caBootstrapSecretValidationError(secret corev1.Secret) string {
+	missing := missingSecretKeys(secret, caBootstrapSecretKeys())
+	if len(missing) > 0 {
+		return "missing keys: " + strings.Join(missing, ",")
+	}
+
+	username := strings.TrimSpace(string(secret.Data[caBootstrapUsernameKey]))
+	password := strings.TrimSpace(string(secret.Data[caBootstrapPasswordKey]))
+	userPass := strings.TrimSpace(string(secret.Data[caBootstrapUserPassKey]))
+	if username == "" {
+		return "empty bootstrap username"
+	}
+	if password == "" {
+		return "empty bootstrap password"
+	}
+	if userPass != username+":"+password {
+		return "bootstrap user-pass does not match username/password"
+	}
+
+	return ""
 }
 
 func mspIdentitySecretValidationError(secret corev1.Secret, tlsEnabled bool) string {

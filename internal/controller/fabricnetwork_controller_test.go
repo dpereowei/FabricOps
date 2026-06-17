@@ -179,6 +179,16 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Namespace: bankNamespace,
 				Name:      "banka-ca",
 			}, &caDeploy)).To(Succeed())
+			caContainer := caDeploy.Spec.Template.Spec.Containers[0]
+			caEnv := envMap(caContainer)
+			Expect(caEnv["FABRIC_CA_HOME"]).To(Equal("/etc/hyperledger/fabric-ca-server"))
+			Expect(caEnv["FABRIC_CA_SERVER_CA_NAME"]).To(Equal("banka"))
+			Expect(caEnv["FABRIC_CA_SERVER_PORT"]).To(Equal("7054"))
+			Expect(envSecretRefs(caContainer)).To(HaveKeyWithValue(caBootstrapEnvVar, "banka-ca-bootstrap/user-pass"))
+			Expect(caContainer.Command).To(Equal([]string{
+				"sh", "-c",
+				"fabric-ca-server start -b \"$FABRIC_CA_SERVER_BOOTSTRAP_USER_PASS\" -d",
+			}))
 
 			var caSvc corev1.Service
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -261,11 +271,13 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(identity.Status).To(Equal(metav1.ConditionTrue))
 			Expect(identity.Reason).To(Equal("IdentityMaterialPresent"))
 
+			expectIdentitySecret(ctx, ordererNamespace, caBootstrapSecretName(network.Spec.Orgs[0]), secretKindCABootstrap, true)
 			expectIdentitySecret(ctx, ordererNamespace, orgIdentitySecretName(network.Spec.Orgs[0]), secretKindOrgCA, true)
 			expectIdentitySecret(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindMSP), secretKindAdminMSP, true)
 			expectIdentitySecret(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindTLS), secretKindAdminTLS, true)
 			expectIdentitySecret(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true)
 			expectIdentitySecret(ctx, ordererNamespace, "orderer0-tls", secretKindTLS, true)
+			expectIdentitySecret(ctx, bankNamespace, caBootstrapSecretName(network.Spec.Orgs[1]), secretKindCABootstrap, true)
 			expectIdentitySecret(ctx, bankNamespace, orgIdentitySecretName(network.Spec.Orgs[1]), secretKindOrgCA, true)
 			expectIdentitySecret(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindMSP), secretKindAdminMSP, true)
 			expectIdentitySecret(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindTLS), secretKindAdminTLS, true)
@@ -312,6 +324,14 @@ var _ = Describe("FabricNetwork Controller", func() {
 			ordererAdminTLS.Data[tlsClientCertKey] = []byte("not a pem certificate")
 			Expect(k8sClient.Update(ctx, &ordererAdminTLS)).To(Succeed())
 
+			var bankCABootstrap corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "banka-ca-bootstrap",
+			}, &bankCABootstrap)).To(Succeed())
+			bankCABootstrap.Data[caBootstrapUserPassKey] = []byte("admin:not-the-current-password")
+			Expect(k8sClient.Update(ctx, &bankCABootstrap)).To(Succeed())
+
 			By("Reconciling again")
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -321,6 +341,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			expectIdentitySecret(ctx, bankNamespace, "peer0-tls", secretKindTLS, true)
 			expectIdentitySecret(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true)
 			expectIdentitySecret(ctx, ordererNamespace, "orderer-admin-tls", secretKindAdminTLS, true)
+			expectIdentitySecret(ctx, bankNamespace, "banka-ca-bootstrap", secretKindCABootstrap, true)
 
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
@@ -457,6 +478,17 @@ func envMap(container corev1.Container) map[string]string {
 	env := map[string]string{}
 	for _, item := range container.Env {
 		env[item.Name] = item.Value
+	}
+	return env
+}
+
+func envSecretRefs(container corev1.Container) map[string]string {
+	env := map[string]string{}
+	for _, item := range container.Env {
+		if item.ValueFrom == nil || item.ValueFrom.SecretKeyRef == nil {
+			continue
+		}
+		env[item.Name] = item.ValueFrom.SecretKeyRef.Name + "/" + item.ValueFrom.SecretKeyRef.Key
 	}
 	return env
 }
