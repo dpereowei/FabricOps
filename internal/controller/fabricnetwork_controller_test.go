@@ -22,7 +22,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -272,12 +274,14 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(identity.Reason).To(Equal("IdentityMaterialPresent"))
 
 			expectIdentitySecret(ctx, ordererNamespace, caBootstrapSecretName(network.Spec.Orgs[0]), secretKindCABootstrap, true)
+			expectIdentitySecret(ctx, ordererNamespace, adminEnrollmentSecretName(network.Spec.Orgs[0]), secretKindAdminEnroll, true)
 			expectIdentitySecret(ctx, ordererNamespace, orgIdentitySecretName(network.Spec.Orgs[0]), secretKindOrgCA, true)
 			expectIdentitySecret(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindMSP), secretKindAdminMSP, true)
 			expectIdentitySecret(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindTLS), secretKindAdminTLS, true)
 			expectIdentitySecret(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true)
 			expectIdentitySecret(ctx, ordererNamespace, "orderer0-tls", secretKindTLS, true)
 			expectIdentitySecret(ctx, bankNamespace, caBootstrapSecretName(network.Spec.Orgs[1]), secretKindCABootstrap, true)
+			expectIdentitySecret(ctx, bankNamespace, adminEnrollmentSecretName(network.Spec.Orgs[1]), secretKindAdminEnroll, true)
 			expectIdentitySecret(ctx, bankNamespace, orgIdentitySecretName(network.Spec.Orgs[1]), secretKindOrgCA, true)
 			expectIdentitySecret(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindMSP), secretKindAdminMSP, true)
 			expectIdentitySecret(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindTLS), secretKindAdminTLS, true)
@@ -332,6 +336,14 @@ var _ = Describe("FabricNetwork Controller", func() {
 			bankCABootstrap.Data[caBootstrapUserPassKey] = []byte("admin:not-the-current-password")
 			Expect(k8sClient.Update(ctx, &bankCABootstrap)).To(Succeed())
 
+			var bankAdminEnrollment corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "banka-admin-enrollment",
+			}, &bankAdminEnrollment)).To(Succeed())
+			bankAdminEnrollment.Data[caBootstrapUserPassKey] = []byte("banka-admin:not-the-current-password")
+			Expect(k8sClient.Update(ctx, &bankAdminEnrollment)).To(Succeed())
+
 			By("Reconciling again")
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -342,11 +354,99 @@ var _ = Describe("FabricNetwork Controller", func() {
 			expectIdentitySecret(ctx, ordererNamespace, "orderer0-msp", secretKindMSP, true)
 			expectIdentitySecret(ctx, ordererNamespace, "orderer-admin-tls", secretKindAdminTLS, true)
 			expectIdentitySecret(ctx, bankNamespace, "banka-ca-bootstrap", secretKindCABootstrap, true)
+			expectIdentitySecret(ctx, bankNamespace, "banka-admin-enrollment", secretKindAdminEnroll, true)
 
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
 			Expect(network.Status.OrgStatus[0].IdentityReady).To(BeTrue())
 			Expect(network.Status.OrgStatus[1].IdentityReady).To(BeTrue())
+		})
+
+		It("should create admin enrollment resources after org CAs are ready", func() {
+			By("Reconciling the created resource")
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			ordererNamespace := "fo-test-orderer"
+			bankNamespace := "fo-test-banka"
+			markDeploymentReady(ctx, ordererNamespace, "orderer-ca")
+			markDeploymentReady(ctx, bankNamespace, "banka-ca")
+
+			By("Reconciling after CAs report readiness")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			bankOrg := network.Spec.Orgs[1]
+
+			var serviceAccount corev1.ServiceAccount
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      enrollmentServiceAccountName(bankOrg),
+			}, &serviceAccount)).To(Succeed())
+
+			var role rbacv1.Role
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      enrollmentServiceAccountName(bankOrg),
+			}, &role)).To(Succeed())
+			Expect(role.Rules).To(ContainElement(rbacv1.PolicyRule{
+				APIGroups: []string{""},
+				Resources: []string{"secrets"},
+				Verbs:     []string{"get", "create", "update", "patch"},
+			}))
+
+			var roleBinding rbacv1.RoleBinding
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      enrollmentServiceAccountName(bankOrg),
+			}, &roleBinding)).To(Succeed())
+			Expect(roleBinding.RoleRef.Name).To(Equal(enrollmentServiceAccountName(bankOrg)))
+			Expect(roleBinding.Subjects).To(ContainElement(rbacv1.Subject{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      enrollmentServiceAccountName(bankOrg),
+				Namespace: bankNamespace,
+			}))
+
+			var job batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      adminEnrollmentJobName(bankOrg),
+			}, &job)).To(Succeed())
+			Expect(job.Spec.Template.Spec.ServiceAccountName).To(Equal(enrollmentServiceAccountName(bankOrg)))
+			Expect(job.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(job.Spec.Template.Spec.InitContainers).To(HaveLen(1))
+			Expect(job.Spec.Template.Spec.Containers).To(HaveLen(1))
+
+			enrollContainer := job.Spec.Template.Spec.InitContainers[0]
+			Expect(enrollContainer.Name).To(Equal(enrollAdminContainerName))
+			Expect(enrollContainer.Image).To(Equal(caImage()))
+			Expect(envMap(enrollContainer)[envCAAddress]).To(Equal("banka-ca.fo-test-banka.svc.cluster.local:7054"))
+			Expect(envMap(enrollContainer)[envAdminName]).To(Equal("banka-admin"))
+			Expect(envSecretRefs(enrollContainer)).To(HaveKeyWithValue(envCABootstrapUserPass, "banka-ca-bootstrap/user-pass"))
+			Expect(envSecretRefs(enrollContainer)).To(HaveKeyWithValue(envAdminUsername, "banka-admin-enrollment/username"))
+			Expect(envSecretRefs(enrollContainer)).To(HaveKeyWithValue(envAdminPassword, "banka-admin-enrollment/password"))
+			Expect(enrollContainer.Command[2]).To(ContainSubstring("fabric-ca-client register"))
+			Expect(enrollContainer.Command[2]).To(ContainSubstring("fabric-ca-client enroll"))
+
+			publishContainer := job.Spec.Template.Spec.Containers[0]
+			Expect(publishContainer.Name).To(Equal(publishAdminContainerName))
+			Expect(publishContainer.Image).To(Equal(kubectlImage()))
+			Expect(envMap(publishContainer)[envAdminMSPSecret]).To(Equal("banka-admin-msp"))
+			Expect(envMap(publishContainer)[envAdminTLSSecret]).To(Equal("banka-admin-tls"))
+			Expect(envMap(publishContainer)[envTLSEnabled]).To(Equal("true"))
+			Expect(publishContainer.Command[2]).To(ContainSubstring("kubectl -n \"$POD_NAMESPACE\" create secret generic"))
+			Expect(publishContainer.Command[2]).To(ContainSubstring(labelIdentitySource + "=" + identitySourceFabricCA))
 		})
 
 		It("should mark the network ready only after all org workloads are ready", func() {
@@ -415,9 +515,26 @@ func deleteFabricNetworkIfExists(ctx context.Context, name types.NamespacedName)
 }
 
 func cleanupOrgNamespaceResources(ctx context.Context, namespace string) {
+	deleteAllJobs(ctx, namespace)
 	deleteAllDeployments(ctx, namespace)
 	deleteAllServices(ctx, namespace)
 	deleteAllSecrets(ctx, namespace)
+	deleteAllRoleBindings(ctx, namespace)
+	deleteAllRoles(ctx, namespace)
+	deleteAllServiceAccounts(ctx, namespace)
+}
+
+func deleteAllJobs(ctx context.Context, namespace string) {
+	var jobs batchv1.JobList
+	err := k8sClient.List(ctx, &jobs, client.InNamespace(namespace))
+	if errors.IsNotFound(err) {
+		return
+	}
+	Expect(err).NotTo(HaveOccurred())
+
+	for i := range jobs.Items {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &jobs.Items[i]))).To(Succeed())
+	}
 }
 
 func deleteAllDeployments(ctx context.Context, namespace string) {
@@ -456,6 +573,45 @@ func deleteAllSecrets(ctx context.Context, namespace string) {
 
 	for i := range secrets.Items {
 		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &secrets.Items[i]))).To(Succeed())
+	}
+}
+
+func deleteAllServiceAccounts(ctx context.Context, namespace string) {
+	var serviceAccounts corev1.ServiceAccountList
+	err := k8sClient.List(ctx, &serviceAccounts, client.InNamespace(namespace))
+	if errors.IsNotFound(err) {
+		return
+	}
+	Expect(err).NotTo(HaveOccurred())
+
+	for i := range serviceAccounts.Items {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &serviceAccounts.Items[i]))).To(Succeed())
+	}
+}
+
+func deleteAllRoles(ctx context.Context, namespace string) {
+	var roles rbacv1.RoleList
+	err := k8sClient.List(ctx, &roles, client.InNamespace(namespace))
+	if errors.IsNotFound(err) {
+		return
+	}
+	Expect(err).NotTo(HaveOccurred())
+
+	for i := range roles.Items {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &roles.Items[i]))).To(Succeed())
+	}
+}
+
+func deleteAllRoleBindings(ctx context.Context, namespace string) {
+	var roleBindings rbacv1.RoleBindingList
+	err := k8sClient.List(ctx, &roleBindings, client.InNamespace(namespace))
+	if errors.IsNotFound(err) {
+		return
+	}
+	Expect(err).NotTo(HaveOccurred())
+
+	for i := range roleBindings.Items {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &roleBindings.Items[i]))).To(Succeed())
 	}
 }
 

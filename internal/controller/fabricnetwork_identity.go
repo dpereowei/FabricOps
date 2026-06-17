@@ -42,6 +42,7 @@ import (
 const (
 	secretKindOrgCA       = "org-ca"
 	secretKindCABootstrap = "ca-bootstrap"
+	secretKindAdminEnroll = "admin-enrollment"
 	secretKindAdminMSP    = "admin-msp"
 	secretKindAdminTLS    = "admin-tls"
 
@@ -68,6 +69,9 @@ func (r *FabricNetworkReconciler) reconcileIdentityMaterial(
 	namespace string,
 ) error {
 	if err := r.ensureCABootstrapSecret(ctx, net, org, namespace); err != nil {
+		return err
+	}
+	if err := r.ensureAdminEnrollmentSecret(ctx, net, org, namespace); err != nil {
 		return err
 	}
 
@@ -133,6 +137,10 @@ func adminIdentityName(org fabricopsv1alpha1.Org) string {
 	return sanitizeName(org.Organization.Name + "-admin")
 }
 
+func adminEnrollmentSecretName(org fabricopsv1alpha1.Org) string {
+	return sanitizeName(adminIdentityName(org) + "-enrollment")
+}
+
 func (r *FabricNetworkReconciler) ensureCABootstrapSecret(
 	ctx context.Context,
 	net *fabricopsv1alpha1.FabricNetwork,
@@ -174,6 +182,54 @@ func buildCABootstrapSecret(
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			caBootstrapUsernameKey: []byte(caBootstrapUsername),
+			caBootstrapPasswordKey: []byte(password),
+			caBootstrapUserPassKey: []byte(userPass),
+		},
+	}, nil
+}
+
+func (r *FabricNetworkReconciler) ensureAdminEnrollmentSecret(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) error {
+	desired, err := buildAdminEnrollmentSecret(net, org, namespace)
+	if err != nil {
+		return err
+	}
+
+	_, err = r.ensureSecret(ctx, desired, func(secret corev1.Secret) string {
+		return identitySecretValidationError(secret, secretKindAdminEnroll, net.Spec.Global.TLS)
+	})
+	return err
+}
+
+func buildAdminEnrollmentSecret(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) (*corev1.Secret, error) {
+	password, err := generateBootstrapPassword()
+	if err != nil {
+		return nil, err
+	}
+
+	name := adminEnrollmentSecretName(org)
+	username := adminIdentityName(org)
+	userPass := username + ":" + password
+
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: identityLabels(net, org, componentAdmin, username, map[string]string{
+				labelIdentityKind: secretKindAdminEnroll,
+			}),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			caBootstrapUsernameKey: []byte(username),
 			caBootstrapPasswordKey: []byte(password),
 			caBootstrapUserPassKey: []byte(userPass),
 		},
@@ -679,6 +735,8 @@ func identitySecretValidationError(secret corev1.Secret, kind string, tlsEnabled
 	switch kind {
 	case secretKindCABootstrap:
 		return caBootstrapSecretValidationError(secret)
+	case secretKindAdminEnroll:
+		return enrollmentCredentialSecretValidationError(secret)
 	case secretKindMSP:
 		return mspIdentitySecretValidationError(secret, tlsEnabled)
 	case secretKindTLS:
@@ -693,6 +751,10 @@ func identitySecretValidationError(secret corev1.Secret, kind string, tlsEnabled
 }
 
 func caBootstrapSecretValidationError(secret corev1.Secret) string {
+	return enrollmentCredentialSecretValidationError(secret)
+}
+
+func enrollmentCredentialSecretValidationError(secret corev1.Secret) string {
 	missing := missingSecretKeys(secret, caBootstrapSecretKeys())
 	if len(missing) > 0 {
 		return "missing keys: " + strings.Join(missing, ",")
@@ -702,13 +764,13 @@ func caBootstrapSecretValidationError(secret corev1.Secret) string {
 	password := strings.TrimSpace(string(secret.Data[caBootstrapPasswordKey]))
 	userPass := strings.TrimSpace(string(secret.Data[caBootstrapUserPassKey]))
 	if username == "" {
-		return "empty bootstrap username"
+		return "empty enrollment username"
 	}
 	if password == "" {
-		return "empty bootstrap password"
+		return "empty enrollment password"
 	}
 	if userPass != username+":"+password {
-		return "bootstrap user-pass does not match username/password"
+		return "enrollment user-pass does not match username/password"
 	}
 
 	return ""

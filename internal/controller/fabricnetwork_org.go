@@ -44,6 +44,7 @@ const (
 	labelOrdererGroup           = "fabricops.my.domain/orderer-group"
 	labelInstance               = "fabricops.my.domain/instance"
 	labelIdentityKind           = "fabricops.my.domain/identity-kind"
+	labelIdentitySource         = "fabricops.my.domain/identity-source"
 	labelWorkload               = "fabricops.my.domain/workload"
 
 	componentCA      = "ca"
@@ -69,6 +70,8 @@ const (
 
 	secretKindMSP = "msp"
 	secretKindTLS = "tls"
+
+	identitySourceFabricCA = "fabric-ca"
 
 	mspConfigKey    = "config.yaml"
 	mspCACertKey    = "cacert.pem"
@@ -290,6 +293,12 @@ func requiredIdentitySecrets(
 		kind:      secretKindCABootstrap,
 		keys:      caBootstrapSecretKeys(),
 	})
+	requirements = append(requirements, identitySecretRequirement{
+		namespace: namespace,
+		name:      adminEnrollmentSecretName(org),
+		kind:      secretKindAdminEnroll,
+		keys:      caBootstrapSecretKeys(),
+	})
 
 	requirements = append(requirements, identitySecretRequirement{
 		namespace: namespace,
@@ -454,8 +463,8 @@ func (r *FabricNetworkReconciler) ensureDeployment(
 			existing.Spec.Template.Labels = desired.Spec.Template.Labels
 			changed = true
 		}
-		if !reflect.DeepEqual(existing.Spec.Template.Spec.Containers, desired.Spec.Template.Spec.Containers) {
-			existing.Spec.Template.Spec.Containers = desired.Spec.Template.Spec.Containers
+		if containers, containerChanged := syncManagedContainers(existing.Spec.Template.Spec.Containers, desired.Spec.Template.Spec.Containers); containerChanged {
+			existing.Spec.Template.Spec.Containers = containers
 			changed = true
 		}
 		if !reflect.DeepEqual(existing.Spec.Template.Spec.Volumes, desired.Spec.Template.Spec.Volumes) {
@@ -477,6 +486,49 @@ func (r *FabricNetworkReconciler) ensureDeployment(
 	log := logf.FromContext(ctx)
 	log.Info("Creating Deployment", "name", desired.Name, "namespace", desired.Namespace)
 	return r.Create(ctx, desired)
+}
+
+func syncManagedContainers(existing []corev1.Container, desired []corev1.Container) ([]corev1.Container, bool) {
+	if len(existing) != len(desired) {
+		return desired, true
+	}
+
+	changed := false
+	containers := append([]corev1.Container(nil), existing...)
+	for i := range desired {
+		if containers[i].Name != desired[i].Name {
+			containers[i] = desired[i]
+			changed = true
+			continue
+		}
+
+		if containers[i].Image != desired[i].Image {
+			containers[i].Image = desired[i].Image
+			changed = true
+		}
+		if !reflect.DeepEqual(containers[i].Command, desired[i].Command) {
+			containers[i].Command = desired[i].Command
+			changed = true
+		}
+		if !reflect.DeepEqual(containers[i].Args, desired[i].Args) {
+			containers[i].Args = desired[i].Args
+			changed = true
+		}
+		if !reflect.DeepEqual(containers[i].Env, desired[i].Env) {
+			containers[i].Env = desired[i].Env
+			changed = true
+		}
+		if !reflect.DeepEqual(containers[i].Ports, desired[i].Ports) {
+			containers[i].Ports = desired[i].Ports
+			changed = true
+		}
+		if !reflect.DeepEqual(containers[i].VolumeMounts, desired[i].VolumeMounts) {
+			containers[i].VolumeMounts = desired[i].VolumeMounts
+			changed = true
+		}
+	}
+
+	return containers, changed
 }
 
 func (r *FabricNetworkReconciler) ensureService(
