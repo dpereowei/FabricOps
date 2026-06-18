@@ -85,6 +85,51 @@ spec:
                 properties:
                   fabricVersion:
                     type: string
+                  storage:
+                    properties:
+                      ca:
+                        properties:
+                          size:
+                            description: Size is the persistent volume request for
+                              each component instance.
+                            type: string
+                          storageClassName:
+                            description: |-
+                              StorageClassName selects the Kubernetes StorageClass for component PVCs.
+                              Omit this field to use the cluster default StorageClass. Set it to an
+                              empty string to disable dynamic provisioning for clusters that rely on
+                              pre-bound persistent volumes.
+                            type: string
+                        type: object
+                      orderer:
+                        properties:
+                          size:
+                            description: Size is the persistent volume request for
+                              each component instance.
+                            type: string
+                          storageClassName:
+                            description: |-
+                              StorageClassName selects the Kubernetes StorageClass for component PVCs.
+                              Omit this field to use the cluster default StorageClass. Set it to an
+                              empty string to disable dynamic provisioning for clusters that rely on
+                              pre-bound persistent volumes.
+                            type: string
+                        type: object
+                      peer:
+                        properties:
+                          size:
+                            description: Size is the persistent volume request for
+                              each component instance.
+                            type: string
+                          storageClassName:
+                            description: |-
+                              StorageClassName selects the Kubernetes StorageClass for component PVCs.
+                              Omit this field to use the cluster default StorageClass. Set it to an
+                              empty string to disable dynamic provisioning for clusters that rely on
+                              pre-bound persistent volumes.
+                            type: string
+                        type: object
+                    type: object
                   tls:
                     type: boolean
                 required:

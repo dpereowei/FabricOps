@@ -36,6 +36,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -73,6 +74,20 @@ var _ = Describe("FabricNetwork Controller", func() {
 					Global: fabricopsv1alpha1.GlobalConfig{
 						FabricVersion: "3.1.0",
 						TLS:           true,
+						Storage: &fabricopsv1alpha1.StorageConfig{
+							CA: &fabricopsv1alpha1.ComponentStorageConfig{
+								Size:             "2Gi",
+								StorageClassName: stringPtr("fabricops-ca"),
+							},
+							Orderer: &fabricopsv1alpha1.ComponentStorageConfig{
+								Size:             "8Gi",
+								StorageClassName: stringPtr("fabricops-orderer"),
+							},
+							Peer: &fabricopsv1alpha1.ComponentStorageConfig{
+								Size:             "12Gi",
+								StorageClassName: stringPtr("fabricops-peer"),
+							},
+						},
 					},
 					Orgs: []fabricopsv1alpha1.Org{
 						{
@@ -160,7 +175,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			}, &caDeploy)).To(Succeed())
 			caContainer := caDeploy.Spec.Template.Spec.Containers[0]
 			caEnv := envMap(caContainer)
-			Expect(caEnv["FABRIC_CA_HOME"]).To(Equal("/etc/hyperledger/fabric-ca-server"))
+			Expect(caEnv["FABRIC_CA_HOME"]).To(Equal(caHomePath))
 			Expect(caEnv["FABRIC_CA_SERVER_CA_NAME"]).To(Equal("banka"))
 			Expect(caEnv["FABRIC_CA_SERVER_PORT"]).To(Equal("7054"))
 			Expect(envSecretRefs(caContainer)).To(HaveKeyWithValue(caBootstrapEnvVar, "banka-ca-bootstrap/user-pass"))
@@ -168,6 +183,11 @@ var _ = Describe("FabricNetwork Controller", func() {
 				"sh", "-c",
 				"fabric-ca-server start -b \"$FABRIC_CA_SERVER_BOOTSTRAP_USER_PASS\" -d",
 			}))
+			Expect(pvcVolumeNames(caDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(dataVolumeName, "banka-ca-data"))
+			Expect(volumeMountPaths(caContainer)).To(HaveKeyWithValue(dataVolumeName, caHomePath))
+
+			expectPersistentVolumeClaim(ctx, ordererNamespace, "orderer-ca-data", "2Gi", "fabricops-ca")
+			expectPersistentVolumeClaim(ctx, bankNamespace, "banka-ca-data", "2Gi", "fabricops-ca")
 
 			var caSvc corev1.Service
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -485,10 +505,13 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(containerPorts(ordererContainer)).To(ContainElements(int32(7050)))
 			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "orderer0-msp"))
 			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "orderer0-tls"))
+			Expect(pvcVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(dataVolumeName, "orderer0-data"))
 			Expect(secretVolumeItemKeys(ordererDeploy.Spec.Template.Spec, secretKindMSP)).To(ContainElements(mspConfigKey, mspCACertKey, mspTLSCACertKey, mspSignCertKey, mspKeyStoreKey))
 			Expect(secretVolumeItemKeys(ordererDeploy.Spec.Template.Spec, secretKindTLS)).To(ContainElements(tlsCACertKey, tlsServerCertKey, tlsServerKeyKey))
 			Expect(volumeMountPaths(ordererContainer)).To(HaveKeyWithValue(secretKindMSP, ordererMSPPath))
 			Expect(volumeMountPaths(ordererContainer)).To(HaveKeyWithValue(secretKindTLS, ordererTLSPath))
+			Expect(volumeMountPaths(ordererContainer)).To(HaveKeyWithValue(dataVolumeName, fabricProductionPath))
+			expectPersistentVolumeClaim(ctx, ordererNamespace, "orderer0-data", "8Gi", "fabricops-orderer")
 
 			var ordererSvc corev1.Service
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -520,10 +543,13 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(containerPorts(peerContainer)).To(ContainElements(int32(7051), int32(7052)))
 			Expect(secretVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "peer0-msp"))
 			Expect(secretVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "peer0-tls"))
+			Expect(pvcVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(dataVolumeName, "peer0-data"))
 			Expect(secretVolumeItemKeys(peerDeploy.Spec.Template.Spec, secretKindMSP)).To(ContainElements(mspConfigKey, mspCACertKey, mspTLSCACertKey, mspSignCertKey, mspKeyStoreKey))
 			Expect(secretVolumeItemKeys(peerDeploy.Spec.Template.Spec, secretKindTLS)).To(ContainElements(tlsCACertKey, tlsServerCertKey, tlsServerKeyKey))
 			Expect(volumeMountPaths(peerContainer)).To(HaveKeyWithValue(secretKindMSP, peerMSPPath))
 			Expect(volumeMountPaths(peerContainer)).To(HaveKeyWithValue(secretKindTLS, peerTLSPath))
+			Expect(volumeMountPaths(peerContainer)).To(HaveKeyWithValue(dataVolumeName, fabricProductionPath))
+			expectPersistentVolumeClaim(ctx, bankNamespace, "peer0-data", "12Gi", "fabricops-peer")
 
 			var peerSvc corev1.Service
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -582,6 +608,7 @@ func deleteFabricNetworkIfExists(ctx context.Context, name types.NamespacedName)
 func cleanupOrgNamespaceResources(ctx context.Context, namespace string) {
 	deleteAllJobs(ctx, namespace)
 	deleteAllDeployments(ctx, namespace)
+	deleteAllPersistentVolumeClaims(ctx, namespace)
 	deleteAllServices(ctx, namespace)
 	deleteAllSecrets(ctx, namespace)
 	deleteAllRoleBindings(ctx, namespace)
@@ -612,6 +639,19 @@ func deleteAllDeployments(ctx context.Context, namespace string) {
 
 	for i := range deployments.Items {
 		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &deployments.Items[i]))).To(Succeed())
+	}
+}
+
+func deleteAllPersistentVolumeClaims(ctx context.Context, namespace string) {
+	var persistentVolumeClaims corev1.PersistentVolumeClaimList
+	err := k8sClient.List(ctx, &persistentVolumeClaims, client.InNamespace(namespace))
+	if errors.IsNotFound(err) {
+		return
+	}
+	Expect(err).NotTo(HaveOccurred())
+
+	for i := range persistentVolumeClaims.Items {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &persistentVolumeClaims.Items[i]))).To(Succeed())
 	}
 }
 
@@ -1075,6 +1115,17 @@ func secretVolumeNames(podSpec corev1.PodSpec) map[string]string {
 	return secrets
 }
 
+func pvcVolumeNames(podSpec corev1.PodSpec) map[string]string {
+	persistentVolumeClaims := map[string]string{}
+	for _, volume := range podSpec.Volumes {
+		if volume.PersistentVolumeClaim == nil {
+			continue
+		}
+		persistentVolumeClaims[volume.Name] = volume.PersistentVolumeClaim.ClaimName
+	}
+	return persistentVolumeClaims
+}
+
 func secretVolumeItemKeys(podSpec corev1.PodSpec, volumeName string) []string {
 	for _, volume := range podSpec.Volumes {
 		if volume.Name != volumeName || volume.Secret == nil {
@@ -1104,6 +1155,20 @@ func containerPorts(container corev1.Container) []int32 {
 		ports = append(ports, port.ContainerPort)
 	}
 	return ports
+}
+
+func expectPersistentVolumeClaim(ctx context.Context, namespace, name, size, storageClassName string) {
+	var persistentVolumeClaim corev1.PersistentVolumeClaim
+	Expect(k8sClient.Get(ctx, types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}, &persistentVolumeClaim)).To(Succeed())
+
+	Expect(persistentVolumeClaim.Spec.AccessModes).To(ContainElement(corev1.ReadWriteOnce))
+	request := persistentVolumeClaim.Spec.Resources.Requests[corev1.ResourceStorage]
+	Expect(request.Cmp(resource.MustParse(size))).To(Equal(0))
+	Expect(persistentVolumeClaim.Spec.StorageClassName).NotTo(BeNil())
+	Expect(*persistentVolumeClaim.Spec.StorageClassName).To(Equal(storageClassName))
 }
 
 func expectIdentitySecret(ctx context.Context, namespace, name, kind string, tlsEnabled bool) {
@@ -1166,4 +1231,8 @@ func servicePorts(service corev1.Service) []int32 {
 		ports = append(ports, port.Port)
 	}
 	return ports
+}
+
+func stringPtr(value string) *string {
+	return &value
 }

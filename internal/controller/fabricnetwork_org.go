@@ -26,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -67,6 +68,13 @@ const (
 	ordererTLSPath = "/var/hyperledger/orderer/tls"
 	peerMSPPath    = "/etc/hyperledger/fabric/peer/msp"
 	peerTLSPath    = "/etc/hyperledger/fabric/peer/tls"
+
+	dataVolumeName        = "data"
+	caHomePath            = "/etc/hyperledger/fabric-ca-server"
+	fabricProductionPath  = "/var/hyperledger/production"
+	defaultCAStorage      = "1Gi"
+	defaultOrdererStorage = "5Gi"
+	defaultPeerStorage    = "10Gi"
 
 	secretKindMSP = "msp"
 	secretKindTLS = "tls"
@@ -230,6 +238,86 @@ func identityVolumeMounts(mspPath, tlsPath string, tlsEnabled bool) []corev1.Vol
 	}
 
 	return mounts
+}
+
+func dataPVCName(workloadName string) string {
+	return sanitizeName(workloadName + "-data")
+}
+
+func dataVolume(workloadName string) corev1.Volume {
+	return corev1.Volume{
+		Name: dataVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: dataPVCName(workloadName),
+			},
+		},
+	}
+}
+
+func dataVolumeMount(path string) corev1.VolumeMount {
+	return corev1.VolumeMount{
+		Name:      dataVolumeName,
+		MountPath: path,
+	}
+}
+
+type storageSettings struct {
+	size             string
+	storageClassName *string
+}
+
+func storageSettingsForComponent(
+	net *fabricopsv1alpha1.FabricNetwork,
+	component string,
+) storageSettings {
+	settings := storageSettings{
+		size: defaultStorageSize(component),
+	}
+
+	if net.Spec.Global.Storage == nil {
+		return settings
+	}
+
+	config := storageConfigForComponent(net.Spec.Global.Storage, component)
+	if config == nil {
+		return settings
+	}
+	if config.Size != "" {
+		settings.size = config.Size
+	}
+	settings.storageClassName = config.StorageClassName
+
+	return settings
+}
+
+func defaultStorageSize(component string) string {
+	switch component {
+	case componentCA:
+		return defaultCAStorage
+	case componentOrderer:
+		return defaultOrdererStorage
+	case componentPeer:
+		return defaultPeerStorage
+	default:
+		return defaultPeerStorage
+	}
+}
+
+func storageConfigForComponent(
+	config *fabricopsv1alpha1.StorageConfig,
+	component string,
+) *fabricopsv1alpha1.ComponentStorageConfig {
+	switch component {
+	case componentCA:
+		return config.CA
+	case componentOrderer:
+		return config.Orderer
+	case componentPeer:
+		return config.Peer
+	default:
+		return nil
+	}
 }
 
 type identitySecretRequirement struct {
@@ -543,6 +631,79 @@ func syncManagedContainers(existing []corev1.Container, desired []corev1.Contain
 	return containers, changed
 }
 
+func buildDataPVC(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	workloadName string,
+	component string,
+) (*corev1.PersistentVolumeClaim, error) {
+	settings := storageSettingsForComponent(net, component)
+	quantity, err := resource.ParseQuantity(settings.size)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s storage size %q: %w", component, settings.size, err)
+	}
+
+	labels := orgLabels(net, org, component)
+	labels[labelWorkload] = workloadName
+
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dataPVCName(workloadName),
+			Namespace: namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.ReadWriteOnce,
+			},
+			StorageClassName: settings.storageClassName,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: quantity,
+				},
+			},
+		},
+	}, nil
+}
+
+func (r *FabricNetworkReconciler) ensurePersistentVolumeClaim(
+	ctx context.Context,
+	desired *corev1.PersistentVolumeClaim,
+) error {
+	var existing corev1.PersistentVolumeClaim
+	key := client.ObjectKeyFromObject(desired)
+
+	err := r.Get(ctx, key, &existing)
+	if err == nil {
+		changed := false
+		if existing.Labels == nil {
+			existing.Labels = map[string]string{}
+			changed = true
+		}
+		for key, value := range desired.Labels {
+			if existing.Labels[key] != value {
+				existing.Labels[key] = value
+				changed = true
+			}
+		}
+		if !changed {
+			return nil
+		}
+
+		log := logf.FromContext(ctx)
+		log.Info("Updating PersistentVolumeClaim", "name", desired.Name, "namespace", desired.Namespace)
+		return r.Update(ctx, &existing)
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	log := logf.FromContext(ctx)
+	log.Info("Creating PersistentVolumeClaim", "name", desired.Name, "namespace", desired.Namespace)
+	return r.Create(ctx, desired)
+}
+
 func (r *FabricNetworkReconciler) ensureService(
 	ctx context.Context,
 	desired *corev1.Service,
@@ -619,12 +780,15 @@ func buildCADeployment(
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
+					Volumes: []corev1.Volume{
+						dataVolume(name),
+					},
 					Containers: []corev1.Container{
 						{
 							Name:  containerCA,
 							Image: caImage(),
 							Env: []corev1.EnvVar{
-								{Name: "FABRIC_CA_HOME", Value: "/etc/hyperledger/fabric-ca-server"},
+								{Name: "FABRIC_CA_HOME", Value: caHomePath},
 								{Name: "FABRIC_CA_SERVER_CA_NAME", Value: sanitizeName(org.Organization.Name)},
 								{Name: "FABRIC_CA_SERVER_PORT", Value: fmt.Sprintf("%d", caPort)},
 								{
@@ -645,6 +809,9 @@ func buildCADeployment(
 							},
 							Ports: []corev1.ContainerPort{
 								{ContainerPort: caPort, Name: "ca"},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								dataVolumeMount(caHomePath),
 							},
 						},
 					},
@@ -742,7 +909,7 @@ func buildOrdererDeployment(
 					},
 				},
 				Spec: corev1.PodSpec{
-					Volumes: identityVolumes(name, net.Spec.Global.TLS),
+					Volumes: append(identityVolumes(name, net.Spec.Global.TLS), dataVolume(name)),
 					Containers: []corev1.Container{
 						{
 							Name:  containerOrderer,
@@ -751,7 +918,10 @@ func buildOrdererDeployment(
 							Ports: []corev1.ContainerPort{
 								{ContainerPort: ordererPort, Name: "orderer"},
 							},
-							VolumeMounts: identityVolumeMounts(ordererMSPPath, ordererTLSPath, tlsEnabled),
+							VolumeMounts: append(
+								identityVolumeMounts(ordererMSPPath, ordererTLSPath, tlsEnabled),
+								dataVolumeMount(fabricProductionPath),
+							),
 						},
 					},
 				},
@@ -851,7 +1021,7 @@ func buildPeerDeployment(
 					Labels: selector,
 				},
 				Spec: corev1.PodSpec{
-					Volumes: identityVolumes(name, net.Spec.Global.TLS),
+					Volumes: append(identityVolumes(name, net.Spec.Global.TLS), dataVolume(name)),
 					Containers: []corev1.Container{
 						{
 							Name:  containerPeer,
@@ -861,7 +1031,10 @@ func buildPeerDeployment(
 								{ContainerPort: peerPort, Name: "peer"},
 								{ContainerPort: peerChaincodePort, Name: "chaincode"},
 							},
-							VolumeMounts: identityVolumeMounts(peerMSPPath, peerTLSPath, tlsEnabled),
+							VolumeMounts: append(
+								identityVolumeMounts(peerMSPPath, peerTLSPath, tlsEnabled),
+								dataVolumeMount(fabricProductionPath),
+							),
 						},
 					},
 				},
@@ -915,6 +1088,15 @@ func (r *FabricNetworkReconciler) reconcileCA(
 	org fabricopsv1alpha1.Org,
 	namespace string,
 ) (bool, error) {
+	name := sanitizeName(org.Organization.Name + "-ca")
+	pvc, err := buildDataPVC(net, org, namespace, name, componentCA)
+	if err != nil {
+		return false, err
+	}
+	if err := r.ensurePersistentVolumeClaim(ctx, pvc); err != nil {
+		return false, err
+	}
+
 	deploy := buildCADeployment(net, org, namespace)
 	if err := r.ensureDeployment(ctx, deploy); err != nil {
 		return false, err
@@ -944,6 +1126,14 @@ func (r *FabricNetworkReconciler) reconcileOrderers(
 	for _, group := range org.Orderers {
 		for i := 0; i < group.Instances; i++ {
 			deploy := buildOrdererDeployment(net, org, group, i, namespace)
+			pvc, err := buildDataPVC(net, org, namespace, deploy.Name, componentOrderer)
+			if err != nil {
+				return status, err
+			}
+			if err := r.ensurePersistentVolumeClaim(ctx, pvc); err != nil {
+				return status, err
+			}
+
 			if err := r.ensureDeployment(ctx, deploy); err != nil {
 				return status, err
 			}
@@ -979,6 +1169,14 @@ func (r *FabricNetworkReconciler) reconcilePeers(
 
 	for i := 0; i < org.Peer.Instances; i++ {
 		deploy := buildPeerDeployment(net, org, i, namespace)
+		pvc, err := buildDataPVC(net, org, namespace, deploy.Name, componentPeer)
+		if err != nil {
+			return status, err
+		}
+		if err := r.ensurePersistentVolumeClaim(ctx, pvc); err != nil {
+			return status, err
+		}
+
 		if err := r.ensureDeployment(ctx, deploy); err != nil {
 			return status, err
 		}

@@ -35,6 +35,29 @@ type FabricNetworkSpec struct {
 type GlobalConfig struct {
 	FabricVersion string `json:"fabricVersion"`
 	TLS           bool   `json:"tls"`
+	// +optional
+	Storage *StorageConfig `json:"storage,omitempty"`
+}
+
+type StorageConfig struct {
+	// +optional
+	CA *ComponentStorageConfig `json:"ca,omitempty"`
+	// +optional
+	Orderer *ComponentStorageConfig `json:"orderer,omitempty"`
+	// +optional
+	Peer *ComponentStorageConfig `json:"peer,omitempty"`
+}
+
+type ComponentStorageConfig struct {
+	// Size is the persistent volume request for each component instance.
+	// +optional
+	Size string `json:"size,omitempty"`
+	// StorageClassName selects the Kubernetes StorageClass for component PVCs.
+	// Omit this field to use the cluster default StorageClass. Set it to an
+	// empty string to disable dynamic provisioning for clusters that rely on
+	// pre-bound persistent volumes.
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
 }
 
 type Org struct {
