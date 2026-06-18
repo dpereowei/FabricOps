@@ -159,11 +159,21 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(ns.Labels[labelFabricNetwork]).To(Equal(resourceName))
 			Expect(ns.Labels[labelFabricNetworkNamespace]).To(Equal(resourceNamespace))
 			Expect(ns.Labels[labelOrg]).To(Equal("orderer"))
+			Expect(ns.Labels[labelAppName]).To(Equal(appName))
+			Expect(ns.Labels[labelAppComponent]).To(Equal("namespace"))
+			Expect(ns.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
+			Expect(ns.Annotations[annotationOrg]).To(Equal("Orderer"))
+			Expect(ns.Annotations[annotationFabricNetworkUID]).NotTo(BeEmpty())
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: bankNamespace}, &ns)).To(Succeed())
 			Expect(ns.Labels[labelFabricNetwork]).To(Equal(resourceName))
 			Expect(ns.Labels[labelFabricNetworkNamespace]).To(Equal(resourceNamespace))
 			Expect(ns.Labels[labelOrg]).To(Equal("banka"))
+			Expect(ns.Labels[labelAppName]).To(Equal(appName))
+			Expect(ns.Labels[labelAppComponent]).To(Equal("namespace"))
+			Expect(ns.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
+			Expect(ns.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(ns.Annotations[annotationFabricNetworkUID]).NotTo(BeEmpty())
 
 			expectDeploymentNotFound(ctx, ordererNamespace, "orderer0")
 			expectServiceNotFound(ctx, ordererNamespace, "orderer0")
@@ -173,6 +183,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Namespace: bankNamespace,
 				Name:      "banka-ca",
 			}, &caDeploy)).To(Succeed())
+			Expect(caDeploy.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
 			caContainer := caDeploy.Spec.Template.Spec.Containers[0]
 			caEnv := envMap(caContainer)
 			Expect(caEnv["FABRIC_CA_HOME"]).To(Equal(caHomePath))
@@ -183,8 +194,12 @@ var _ = Describe("FabricNetwork Controller", func() {
 				"sh", "-c",
 				"fabric-ca-server start -b \"$FABRIC_CA_SERVER_BOOTSTRAP_USER_PASS\" -d",
 			}))
+			expectContainerResources(caContainer, defaultCARequestCPU, defaultCARequestMemory, defaultCALimitCPU, defaultCALimitMemory)
 			Expect(pvcVolumeNames(caDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(dataVolumeName, "banka-ca-data"))
 			Expect(volumeMountPaths(caContainer)).To(HaveKeyWithValue(dataVolumeName, caHomePath))
+			Expect(caDeploy.Labels[labelAppComponent]).To(Equal(componentCA))
+			Expect(caDeploy.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(caDeploy.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
 
 			expectPersistentVolumeClaim(ctx, ordererNamespace, "orderer-ca-data", "2Gi", "fabricops-ca")
 			expectPersistentVolumeClaim(ctx, bankNamespace, "banka-ca-data", "2Gi", "fabricops-ca")
@@ -194,12 +209,16 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Namespace: bankNamespace,
 				Name:      "banka-ca",
 			}, &caSvc)).To(Succeed())
+			Expect(caSvc.Labels[labelAppComponent]).To(Equal(componentCA))
+			Expect(caSvc.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(caSvc.Spec.Selector[labelComponent]).To(Equal(componentCA))
 
 			expectDeploymentNotFound(ctx, bankNamespace, "peer0")
 			expectServiceNotFound(ctx, bankNamespace, "peer0")
 
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Finalizers).To(ContainElement(fabricNetworkFinalizer))
 			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseCreating))
 			Expect(network.Status.Message).To(Equal("Waiting for required Fabric identity material"))
 			Expect(network.Status.OrgStatus).To(HaveLen(2))
@@ -346,12 +365,15 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Namespace: bankNamespace,
 				Name:      enrollmentServiceAccountName(bankOrg),
 			}, &serviceAccount)).To(Succeed())
+			Expect(serviceAccount.Labels[labelAppComponent]).To(Equal(componentAdmin))
+			Expect(serviceAccount.Annotations[annotationOrg]).To(Equal("BankA"))
 
 			var role rbacv1.Role
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Namespace: bankNamespace,
 				Name:      enrollmentServiceAccountName(bankOrg),
 			}, &role)).To(Succeed())
+			Expect(role.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
 			Expect(role.Rules).To(ContainElement(rbacv1.PolicyRule{
 				APIGroups: []string{""},
 				Resources: []string{"secrets"},
@@ -375,6 +397,9 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Namespace: bankNamespace,
 				Name:      adminEnrollmentJobName(bankOrg),
 			}, &job)).To(Succeed())
+			Expect(job.Labels[labelAppComponent]).To(Equal(componentAdmin))
+			Expect(job.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(job.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
 			Expect(job.Spec.Template.Spec.ServiceAccountName).To(Equal(enrollmentServiceAccountName(bankOrg)))
 			Expect(job.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
 			Expect(job.Spec.Template.Spec.InitContainers).To(HaveLen(1))
@@ -390,6 +415,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(envSecretRefs(enrollContainer)).To(HaveKeyWithValue(envAdminPassword, "banka-admin-enrollment/password"))
 			Expect(enrollContainer.Command[2]).To(ContainSubstring("fabric-ca-client register"))
 			Expect(enrollContainer.Command[2]).To(ContainSubstring("fabric-ca-client enroll"))
+			expectContainerResources(enrollContainer, defaultCARequestCPU, defaultCARequestMemory, defaultCALimitCPU, defaultCALimitMemory)
 
 			publishContainer := job.Spec.Template.Spec.Containers[0]
 			Expect(publishContainer.Name).To(Equal(publishAdminContainerName))
@@ -399,6 +425,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(envMap(publishContainer)[envTLSEnabled]).To(Equal("true"))
 			Expect(publishContainer.Command[2]).To(ContainSubstring("kubectl -n \"$POD_NAMESPACE\" create secret generic"))
 			Expect(publishContainer.Command[2]).To(ContainSubstring(labelIdentitySource + "=" + identitySourceFabricCA))
+			expectContainerResources(publishContainer, defaultKubectlRequestCPU, defaultKubectlRequestMem, defaultKubectlLimitCPU, defaultKubectlLimitMem)
 
 			var ordererJob batchv1.Job
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -411,12 +438,15 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(envMap(ordererEnrollContainer)[envWorkloadType]).To(Equal(componentOrderer))
 			Expect(envSecretRefs(ordererEnrollContainer)).To(HaveKeyWithValue(envWorkloadUsername, "orderer0-enrollment/username"))
 			Expect(envSecretRefs(ordererEnrollContainer)).To(HaveKeyWithValue(envWorkloadPassword, "orderer0-enrollment/password"))
+			expectContainerResources(ordererEnrollContainer, defaultCARequestCPU, defaultCARequestMemory, defaultCALimitCPU, defaultCALimitMemory)
 
 			var peerJob batchv1.Job
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Namespace: bankNamespace,
 				Name:      workloadEnrollmentJobName("peer0"),
 			}, &peerJob)).To(Succeed())
+			Expect(peerJob.Labels[labelWorkload]).To(Equal("peer0"))
+			Expect(peerJob.Spec.Template.Annotations[annotationOrg]).To(Equal("BankA"))
 			Expect(peerJob.Spec.Template.Spec.ServiceAccountName).To(Equal(enrollmentServiceAccountName(bankOrg)))
 			Expect(peerJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
 			Expect(peerJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
@@ -436,6 +466,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(workloadEnrollContainer.Command[2]).To(ContainSubstring("fabric-ca-client register"))
 			Expect(workloadEnrollContainer.Command[2]).To(ContainSubstring("--id.type \"$FABRICOPS_WORKLOAD_TYPE\""))
 			Expect(workloadEnrollContainer.Command[2]).To(ContainSubstring("fabric-ca-client enroll"))
+			expectContainerResources(workloadEnrollContainer, defaultCARequestCPU, defaultCARequestMemory, defaultCALimitCPU, defaultCALimitMemory)
 
 			workloadPublishContainer := peerJob.Spec.Template.Spec.Containers[0]
 			Expect(workloadPublishContainer.Name).To(Equal(publishWorkloadContainerName))
@@ -445,6 +476,146 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(envMap(workloadPublishContainer)[envTLSEnabled]).To(Equal("true"))
 			Expect(workloadPublishContainer.Command[2]).To(ContainSubstring("kubectl -n \"$POD_NAMESPACE\" create secret generic"))
 			Expect(workloadPublishContainer.Command[2]).To(ContainSubstring(labelIdentitySource + "=" + identitySourceFabricCA))
+			expectContainerResources(workloadPublishContainer, defaultKubectlRequestCPU, defaultKubectlRequestMem, defaultKubectlLimitCPU, defaultKubectlLimitMem)
+		})
+
+		It("should repair mutable fields on managed resources", func() {
+			By("Reconciling the created resource")
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			bankNamespace := "fo-test-banka"
+
+			var caDeploy appsv1.Deployment
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "banka-ca",
+			}, &caDeploy)).To(Succeed())
+			caDeploy.Labels = map[string]string{}
+			caDeploy.Annotations = map[string]string{}
+			caDeploy.Spec.Strategy.Type = appsv1.RollingUpdateDeploymentStrategyType
+			caDeploy.Spec.Template.Annotations = map[string]string{}
+			caDeploy.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
+			Expect(k8sClient.Update(ctx, &caDeploy)).To(Succeed())
+
+			var caSvc corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "banka-ca",
+			}, &caSvc)).To(Succeed())
+			caSvc.Labels = map[string]string{}
+			caSvc.Annotations = map[string]string{}
+			caSvc.Spec.Selector = map[string]string{labelComponent: "wrong"}
+			caSvc.Spec.Ports[0].Port = 9999
+			Expect(k8sClient.Update(ctx, &caSvc)).To(Succeed())
+
+			By("Reconciling after managed fields were changed")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "banka-ca",
+			}, &caDeploy)).To(Succeed())
+			Expect(caDeploy.Labels[labelAppComponent]).To(Equal(componentCA))
+			Expect(caDeploy.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(caDeploy.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
+			Expect(caDeploy.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
+			expectContainerResources(caDeploy.Spec.Template.Spec.Containers[0], defaultCARequestCPU, defaultCARequestMemory, defaultCALimitCPU, defaultCALimitMemory)
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "banka-ca",
+			}, &caSvc)).To(Succeed())
+			Expect(caSvc.Labels[labelAppComponent]).To(Equal(componentCA))
+			Expect(caSvc.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(caSvc.Spec.Selector[labelComponent]).To(Equal(componentCA))
+			Expect(servicePorts(caSvc)).To(ContainElements(caPort))
+		})
+
+		It("should remove generated org namespaces when the FabricNetwork is deleted", func() {
+			deleteNamespacedName := types.NamespacedName{
+				Name:      "fabricnetwork-delete-test",
+				Namespace: resourceNamespace,
+			}
+			deleteResource := &fabricopsv1alpha1.FabricNetwork{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      deleteNamespacedName.Name,
+					Namespace: deleteNamespacedName.Namespace,
+				},
+				Spec: fabricopsv1alpha1.FabricNetworkSpec{
+					Global: fabricopsv1alpha1.GlobalConfig{
+						FabricVersion: "3.1.0",
+						TLS:           true,
+					},
+					Orgs: []fabricopsv1alpha1.Org{
+						{
+							Organization: fabricopsv1alpha1.OrgMeta{
+								Name:    "DeleteOrderer",
+								Domain:  "delete-orderer.example.com",
+								MSPName: "DeleteOrdererMSP",
+							},
+							CA: fabricopsv1alpha1.CAConfig{DB: "sqlite"},
+						},
+						{
+							Organization: fabricopsv1alpha1.OrgMeta{
+								Name:    "DeleteBank",
+								Domain:  "delete-bank.example.com",
+								MSPName: "DeleteBankMSP",
+							},
+							CA: fabricopsv1alpha1.CAConfig{DB: "sqlite"},
+						},
+					},
+					Channels:   []fabricopsv1alpha1.Channel{},
+					Chaincodes: []fabricopsv1alpha1.Chaincode{},
+				},
+			}
+			Expect(k8sClient.Create(ctx, deleteResource)).To(Succeed())
+
+			By("Reconciling the created resource")
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: deleteNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, deleteNamespacedName, &network)).To(Succeed())
+			Expect(network.Finalizers).To(ContainElement(fabricNetworkFinalizer))
+			Expect(k8sClient.Delete(ctx, &network)).To(Succeed())
+
+			By("Reconciling deletion")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: deleteNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func() bool {
+				var deleted fabricopsv1alpha1.FabricNetwork
+				err := k8sClient.Get(ctx, deleteNamespacedName, &deleted)
+				return errors.IsNotFound(err)
+			}).Should(BeTrue())
+
+			for _, namespaceName := range []string{"fo-delete-test-deleteorderer", "fo-delete-test-deletebank"} {
+				Eventually(func() bool {
+					var namespace corev1.Namespace
+					err := k8sClient.Get(ctx, types.NamespacedName{Name: namespaceName}, &namespace)
+					return errors.IsNotFound(err) || !namespace.DeletionTimestamp.IsZero()
+				}).Should(BeTrue())
+			}
 		})
 
 		It("should mark the network ready only after all org workloads are ready", func() {
@@ -487,6 +658,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Namespace: ordererNamespace,
 				Name:      "orderer0",
 			}, &ordererDeploy)).To(Succeed())
+			Expect(ordererDeploy.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
 			ordererContainer := ordererDeploy.Spec.Template.Spec.Containers[0]
 			ordererEnv := envMap(ordererContainer)
 			Expect(ordererEnv["ORDERER_GENERAL_LISTENADDRESS"]).To(Equal("0.0.0.0"))
@@ -502,7 +674,11 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(ordererEnv["ORDERER_GENERAL_CLUSTER_CLIENTCERTIFICATE"]).To(Equal(ordererTLSPath + "/server.crt"))
 			Expect(ordererEnv["ORDERER_GENERAL_CLUSTER_CLIENTPRIVATEKEY"]).To(Equal(ordererTLSPath + "/server.key"))
 			Expect(ordererEnv["ORDERER_GENERAL_CLUSTER_ROOTCAS"]).To(Equal("[" + ordererTLSPath + "/ca.crt]"))
+			Expect(ordererDeploy.Labels[labelWorkload]).To(Equal("orderer0"))
+			Expect(ordererDeploy.Annotations[annotationOrg]).To(Equal("Orderer"))
+			Expect(ordererDeploy.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
 			Expect(containerPorts(ordererContainer)).To(ContainElements(int32(7050)))
+			expectContainerResources(ordererContainer, defaultOrdererRequestCPU, defaultOrdererRequestMem, defaultOrdererLimitCPU, defaultOrdererLimitMem)
 			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "orderer0-msp"))
 			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "orderer0-tls"))
 			Expect(pvcVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(dataVolumeName, "orderer0-data"))
@@ -525,6 +701,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Namespace: bankNamespace,
 				Name:      "peer0",
 			}, &peerDeploy)).To(Succeed())
+			Expect(peerDeploy.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
 			peerContainer := peerDeploy.Spec.Template.Spec.Containers[0]
 			peerEnv := envMap(peerContainer)
 			Expect(peerEnv["CORE_PEER_ID"]).To(Equal("peer0"))
@@ -540,7 +717,11 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(peerEnv["CORE_PEER_TLS_CERT_FILE"]).To(Equal(peerTLSPath + "/server.crt"))
 			Expect(peerEnv["CORE_PEER_TLS_KEY_FILE"]).To(Equal(peerTLSPath + "/server.key"))
 			Expect(peerEnv["CORE_PEER_TLS_ROOTCERT_FILE"]).To(Equal(peerTLSPath + "/ca.crt"))
+			Expect(peerDeploy.Labels[labelWorkload]).To(Equal("peer0"))
+			Expect(peerDeploy.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(peerDeploy.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
 			Expect(containerPorts(peerContainer)).To(ContainElements(int32(7051), int32(7052)))
+			expectContainerResources(peerContainer, defaultPeerRequestCPU, defaultPeerRequestMem, defaultPeerLimitCPU, defaultPeerLimitMem)
 			Expect(secretVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "peer0-msp"))
 			Expect(secretVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "peer0-tls"))
 			Expect(pvcVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(dataVolumeName, "peer0-data"))
@@ -602,7 +783,17 @@ func deleteFabricNetworkIfExists(ctx context.Context, name types.NamespacedName)
 		return
 	}
 	Expect(err).NotTo(HaveOccurred())
-	Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+
+	if len(resource.Finalizers) > 0 {
+		resource.Finalizers = nil
+		Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+	}
+
+	Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, resource))).To(Succeed())
+	Eventually(func() bool {
+		err := k8sClient.Get(ctx, name, resource)
+		return errors.IsNotFound(err)
+	}).Should(BeTrue())
 }
 
 func cleanupOrgNamespaceResources(ctx context.Context, namespace string) {
@@ -1157,6 +1348,18 @@ func containerPorts(container corev1.Container) []int32 {
 	return ports
 }
 
+func expectContainerResources(container corev1.Container, requestCPU, requestMemory, limitCPU, limitMemory string) {
+	requestedCPU := container.Resources.Requests[corev1.ResourceCPU]
+	requestedMemory := container.Resources.Requests[corev1.ResourceMemory]
+	limitedCPU := container.Resources.Limits[corev1.ResourceCPU]
+	limitedMemory := container.Resources.Limits[corev1.ResourceMemory]
+
+	Expect(requestedCPU.Cmp(resource.MustParse(requestCPU))).To(Equal(0))
+	Expect(requestedMemory.Cmp(resource.MustParse(requestMemory))).To(Equal(0))
+	Expect(limitedCPU.Cmp(resource.MustParse(limitCPU))).To(Equal(0))
+	Expect(limitedMemory.Cmp(resource.MustParse(limitMemory))).To(Equal(0))
+}
+
 func expectPersistentVolumeClaim(ctx context.Context, namespace, name, size, storageClassName string) {
 	var persistentVolumeClaim corev1.PersistentVolumeClaim
 	Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -1169,6 +1372,8 @@ func expectPersistentVolumeClaim(ctx context.Context, namespace, name, size, sto
 	Expect(request.Cmp(resource.MustParse(size))).To(Equal(0))
 	Expect(persistentVolumeClaim.Spec.StorageClassName).NotTo(BeNil())
 	Expect(*persistentVolumeClaim.Spec.StorageClassName).To(Equal(storageClassName))
+	Expect(persistentVolumeClaim.Labels[labelAppManagedBy]).To(Equal(managedByValue))
+	Expect(persistentVolumeClaim.Annotations[annotationManagedBy]).To(Equal(controllerName))
 }
 
 func expectIdentitySecret(ctx context.Context, namespace, name, kind string, tlsEnabled bool) {

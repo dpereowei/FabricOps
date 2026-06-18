@@ -236,9 +236,10 @@ func buildEnrollmentServiceAccount(
 ) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      enrollmentServiceAccountName(org),
-			Namespace: namespace,
-			Labels:    orgLabels(net, org, componentAdmin),
+			Name:        enrollmentServiceAccountName(org),
+			Namespace:   namespace,
+			Labels:      orgLabels(net, org, componentAdmin),
+			Annotations: resourceAnnotations(net, org),
 		},
 	}
 }
@@ -250,9 +251,10 @@ func buildEnrollmentRole(
 ) *rbacv1.Role {
 	return &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      enrollmentServiceAccountName(org),
-			Namespace: namespace,
-			Labels:    orgLabels(net, org, componentAdmin),
+			Name:        enrollmentServiceAccountName(org),
+			Namespace:   namespace,
+			Labels:      orgLabels(net, org, componentAdmin),
+			Annotations: resourceAnnotations(net, org),
 		},
 		Rules: []rbacv1.PolicyRule{
 			{
@@ -273,9 +275,10 @@ func buildEnrollmentRoleBinding(
 
 	return &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    orgLabels(net, org, componentAdmin),
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      orgLabels(net, org, componentAdmin),
+			Annotations: resourceAnnotations(net, org),
 		},
 		Subjects: []rbacv1.Subject{
 			{
@@ -305,15 +308,17 @@ func buildAdminEnrollmentJob(
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      adminEnrollmentJobName(org),
-			Namespace: namespace,
-			Labels:    labels,
+			Name:        adminEnrollmentJobName(org),
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: resourceAnnotations(net, org),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
+					Labels:      labels,
+					Annotations: resourceAnnotations(net, org),
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: enrollmentServiceAccountName(org),
@@ -328,10 +333,11 @@ func buildAdminEnrollmentJob(
 					},
 					InitContainers: []corev1.Container{
 						{
-							Name:    enrollAdminContainerName,
-							Image:   caImage(),
-							Command: []string{"sh", "-ec", adminEnrollmentScript()},
-							Env:     adminEnrollmentEnv(org, namespace),
+							Name:      enrollAdminContainerName,
+							Image:     caImage(),
+							Command:   []string{"sh", "-ec", adminEnrollmentScript()},
+							Env:       adminEnrollmentEnv(org, namespace),
+							Resources: componentResourceRequirements(componentCA),
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      enrollmentVolumeName,
@@ -342,10 +348,11 @@ func buildAdminEnrollmentJob(
 					},
 					Containers: []corev1.Container{
 						{
-							Name:    publishAdminContainerName,
-							Image:   kubectlImage(),
-							Command: []string{"sh", "-ec", publishAdminIdentityScript()},
-							Env:     publishAdminIdentityEnv(net, org),
+							Name:      publishAdminContainerName,
+							Image:     kubectlImage(),
+							Command:   []string{"sh", "-ec", publishAdminIdentityScript()},
+							Env:       publishAdminIdentityEnv(net, org),
+							Resources: componentResourceRequirements(componentKubectl),
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      enrollmentVolumeName,
@@ -375,15 +382,17 @@ func buildWorkloadEnrollmentJob(
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      workloadEnrollmentJobName(workloadName),
-			Namespace: namespace,
-			Labels:    labels,
+			Name:        workloadEnrollmentJobName(workloadName),
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: resourceAnnotations(net, org),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
+					Labels:      labels,
+					Annotations: resourceAnnotations(net, org),
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: enrollmentServiceAccountName(org),
@@ -398,10 +407,11 @@ func buildWorkloadEnrollmentJob(
 					},
 					InitContainers: []corev1.Container{
 						{
-							Name:    enrollWorkloadContainerName,
-							Image:   caImage(),
-							Command: []string{"sh", "-ec", workloadEnrollmentScript()},
-							Env:     workloadEnrollmentEnv(net, org, namespace, workloadName, component, csrHosts),
+							Name:      enrollWorkloadContainerName,
+							Image:     caImage(),
+							Command:   []string{"sh", "-ec", workloadEnrollmentScript()},
+							Env:       workloadEnrollmentEnv(net, org, namespace, workloadName, component, csrHosts),
+							Resources: componentResourceRequirements(componentCA),
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      enrollmentVolumeName,
@@ -412,10 +422,11 @@ func buildWorkloadEnrollmentJob(
 					},
 					Containers: []corev1.Container{
 						{
-							Name:    publishWorkloadContainerName,
-							Image:   kubectlImage(),
-							Command: []string{"sh", "-ec", publishWorkloadIdentityScript()},
-							Env:     publishWorkloadIdentityEnv(net, workloadName),
+							Name:      publishWorkloadContainerName,
+							Image:     kubectlImage(),
+							Command:   []string{"sh", "-ec", publishWorkloadIdentityScript()},
+							Env:       publishWorkloadIdentityEnv(net, workloadName),
+							Resources: componentResourceRequirements(componentKubectl),
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      enrollmentVolumeName,
@@ -767,7 +778,11 @@ func (r *FabricNetworkReconciler) ensureServiceAccount(ctx context.Context, desi
 		return err
 	}
 
-	if !mergeLabels(&existing.Labels, desired.Labels) {
+	changed := mergeLabels(&existing.Labels, desired.Labels)
+	if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+		changed = true
+	}
+	if !changed {
 		return nil
 	}
 
@@ -791,6 +806,9 @@ func (r *FabricNetworkReconciler) ensureRole(ctx context.Context, desired *rbacv
 	}
 
 	changed := mergeLabels(&existing.Labels, desired.Labels)
+	if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+		changed = true
+	}
 	if !reflect.DeepEqual(existing.Rules, desired.Rules) {
 		existing.Rules = desired.Rules
 		changed = true
@@ -819,6 +837,9 @@ func (r *FabricNetworkReconciler) ensureRoleBinding(ctx context.Context, desired
 	}
 
 	changed := mergeLabels(&existing.Labels, desired.Labels)
+	if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+		changed = true
+	}
 	if !reflect.DeepEqual(existing.Subjects, desired.Subjects) {
 		existing.Subjects = desired.Subjects
 		changed = true
@@ -846,10 +867,32 @@ func (r *FabricNetworkReconciler) ensureJob(ctx context.Context, desired *batchv
 		log.Info("Creating Job", "name", desired.Name, "namespace", desired.Namespace)
 		return r.Create(ctx, desired)
 	}
-	return client.IgnoreNotFound(err)
+	if err != nil {
+		return err
+	}
+
+	changed := mergeLabels(&existing.Labels, desired.Labels)
+	if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+
+	log := logf.FromContext(ctx)
+	log.Info("Updating Job metadata", "name", desired.Name, "namespace", desired.Namespace)
+	return r.Update(ctx, &existing)
 }
 
 func mergeLabels(existing *map[string]string, desired map[string]string) bool {
+	return mergeStringMap(existing, desired)
+}
+
+func mergeAnnotations(existing *map[string]string, desired map[string]string) bool {
+	return mergeStringMap(existing, desired)
+}
+
+func mergeStringMap(existing *map[string]string, desired map[string]string) bool {
 	changed := false
 	if *existing == nil {
 		*existing = map[string]string{}

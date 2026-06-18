@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	fabricopsv1alpha1 "github.com/dpereowei/fabricops/api/v1alpha1"
@@ -43,6 +44,7 @@ type FabricNetworkReconciler struct {
 const (
 	conditionReady                 = "Ready"
 	conditionIdentityMaterialReady = "IdentityMaterialReady"
+	fabricNetworkFinalizer         = "fabricops.my.domain/finalizer"
 )
 
 func orgNamespaceName(net *fabricopsv1alpha1.FabricNetwork, org fabricopsv1alpha1.Org) string {
@@ -54,13 +56,9 @@ func buildOrgNamespace(net *fabricopsv1alpha1.FabricNetwork, org fabricopsv1alph
 
 	return &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-			Labels: map[string]string{
-				labelFabricNetwork:             sanitizeName(net.Name),
-				labelFabricNetworkNamespace:    sanitizeName(net.Namespace),
-				labelOrg:                       sanitizeName(org.Organization.Name),
-				"app.kubernetes.io/managed-by": "fabricops",
-			},
+			Name:        name,
+			Labels:      orgLabels(net, org, "namespace"),
+			Annotations: resourceAnnotations(net, org),
 		},
 	}
 }
@@ -82,10 +80,13 @@ func (r *FabricNetworkReconciler) ensureNamespace(ctx context.Context, desired *
 				changed = true
 			}
 		}
+		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+			changed = true
+		}
 
 		if changed {
 			log := logf.FromContext(ctx)
-			log.Info("Updating Namespace labels", "namespace", desired.Name)
+			log.Info("Updating Namespace metadata", "namespace", desired.Name)
 			return r.Update(ctx, &existing)
 		}
 
@@ -99,6 +100,48 @@ func (r *FabricNetworkReconciler) ensureNamespace(ctx context.Context, desired *
 	log := logf.FromContext(ctx)
 	log.Info("Creating Namespace", "namespace", desired.Name)
 	return r.Create(ctx, desired)
+}
+
+func (r *FabricNetworkReconciler) cleanupFabricNetwork(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+) error {
+	log := logf.FromContext(ctx)
+
+	for _, org := range net.Spec.Orgs {
+		namespaceName := orgNamespaceName(net, org)
+		var namespace corev1.Namespace
+		err := r.Get(ctx, client.ObjectKey{Name: namespaceName}, &namespace)
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+
+		if !namespaceOwnedByFabricNetwork(namespace, net, org) {
+			log.Info("Skipping Namespace cleanup because labels do not match", "namespace", namespaceName)
+			continue
+		}
+
+		log.Info("Deleting Namespace", "namespace", namespaceName)
+		if err := r.Delete(ctx, &namespace); client.IgnoreNotFound(err) != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func namespaceOwnedByFabricNetwork(
+	namespace corev1.Namespace,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+) bool {
+	return namespace.Labels[labelFabricNetwork] == sanitizeName(net.Name) &&
+		namespace.Labels[labelFabricNetworkNamespace] == sanitizeName(net.Namespace) &&
+		namespace.Labels[labelOrg] == sanitizeName(org.Organization.Name) &&
+		namespace.Labels[labelAppManagedBy] == managedByValue
 }
 
 func (r *FabricNetworkReconciler) reconcileOrg(
@@ -333,7 +376,7 @@ func (r *FabricNetworkReconciler) updateStatus(
 // +kubebuilder:rbac:groups=fabricops.my.domain,resources=fabricnetworks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=fabricops.my.domain,resources=fabricnetworks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=fabricops.my.domain,resources=fabricnetworks/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch
@@ -357,6 +400,27 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if err := r.Get(ctx, req.NamespacedName, &network); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if !network.ObjectMeta.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&network, fabricNetworkFinalizer) {
+			if err := r.cleanupFabricNetwork(ctx, &network); err != nil {
+				return ctrl.Result{}, err
+			}
+			controllerutil.RemoveFinalizer(&network, fabricNetworkFinalizer)
+			if err := r.Update(ctx, &network); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+
+		return ctrl.Result{}, nil
+	}
+
+	if !controllerutil.ContainsFinalizer(&network, fabricNetworkFinalizer) {
+		controllerutil.AddFinalizer(&network, fabricNetworkFinalizer)
+		if err := r.Update(ctx, &network); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	orgStatuses, err := r.reconcileOrgs(ctx, &network)

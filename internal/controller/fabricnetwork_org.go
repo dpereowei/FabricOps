@@ -48,10 +48,27 @@ const (
 	labelIdentitySource         = "fabricops.my.domain/identity-source"
 	labelWorkload               = "fabricops.my.domain/workload"
 
+	labelAppName      = "app.kubernetes.io/name"
+	labelAppManagedBy = "app.kubernetes.io/managed-by"
+	labelAppPartOf    = "app.kubernetes.io/part-of"
+	labelAppComponent = "app.kubernetes.io/component"
+
+	annotationManagedBy              = "fabricops.my.domain/managed-by"
+	annotationFabricNetwork          = "fabricops.my.domain/fabricnetwork"
+	annotationFabricNetworkNamespace = "fabricops.my.domain/fabricnetwork-namespace"
+	annotationFabricNetworkUID       = "fabricops.my.domain/fabricnetwork-uid"
+	annotationOrg                    = "fabricops.my.domain/org"
+
+	appName         = "fabricops"
+	managedByValue  = "fabricops"
+	controllerName  = "fabricops-controller"
+	resourceProfile = "resource-profile"
+
 	componentCA      = "ca"
 	componentAdmin   = "admin"
 	componentOrderer = "orderer"
 	componentPeer    = "peer"
+	componentKubectl = "kubectl"
 
 	containerCA      = "fabric-ca"
 	containerOrderer = "orderer"
@@ -75,6 +92,23 @@ const (
 	defaultCAStorage      = "1Gi"
 	defaultOrdererStorage = "5Gi"
 	defaultPeerStorage    = "10Gi"
+
+	defaultCARequestCPU      = "100m"
+	defaultCARequestMemory   = "128Mi"
+	defaultCALimitCPU        = "500m"
+	defaultCALimitMemory     = "512Mi"
+	defaultOrdererRequestCPU = "250m"
+	defaultOrdererRequestMem = "256Mi"
+	defaultOrdererLimitCPU   = "1"
+	defaultOrdererLimitMem   = "1Gi"
+	defaultPeerRequestCPU    = "250m"
+	defaultPeerRequestMem    = "512Mi"
+	defaultPeerLimitCPU      = "1"
+	defaultPeerLimitMem      = "1Gi"
+	defaultKubectlRequestCPU = "50m"
+	defaultKubectlRequestMem = "64Mi"
+	defaultKubectlLimitCPU   = "250m"
+	defaultKubectlLimitMem   = "128Mi"
 
 	secretKindMSP = "msp"
 	secretKindTLS = "tls"
@@ -164,6 +198,73 @@ func serviceDNS(name, namespace string, port int32) string {
 
 func identitySecretName(workloadName, kind string) string {
 	return sanitizeName(fmt.Sprintf("%s-%s", workloadName, kind))
+}
+
+func baseLabels(net *fabricopsv1alpha1.FabricNetwork) map[string]string {
+	return map[string]string{
+		labelFabricNetwork:          sanitizeName(net.Name),
+		labelFabricNetworkNamespace: sanitizeName(net.Namespace),
+		labelAppName:                appName,
+		labelAppManagedBy:           managedByValue,
+		labelAppPartOf:              sanitizeName(net.Name),
+	}
+}
+
+func resourceAnnotations(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+) map[string]string {
+	annotations := map[string]string{
+		annotationManagedBy:              controllerName,
+		annotationFabricNetwork:          net.Name,
+		annotationFabricNetworkNamespace: net.Namespace,
+		annotationOrg:                    org.Organization.Name,
+	}
+
+	if net.UID != "" {
+		annotations[annotationFabricNetworkUID] = string(net.UID)
+	}
+
+	return annotations
+}
+
+func mergeMap(base map[string]string, extra map[string]string) map[string]string {
+	out := map[string]string{}
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range extra {
+		out[key] = value
+	}
+	return out
+}
+
+func componentResourceRequirements(component string) corev1.ResourceRequirements {
+	switch component {
+	case componentCA:
+		return resourceRequirements(defaultCARequestCPU, defaultCARequestMemory, defaultCALimitCPU, defaultCALimitMemory)
+	case componentOrderer:
+		return resourceRequirements(defaultOrdererRequestCPU, defaultOrdererRequestMem, defaultOrdererLimitCPU, defaultOrdererLimitMem)
+	case componentPeer:
+		return resourceRequirements(defaultPeerRequestCPU, defaultPeerRequestMem, defaultPeerLimitCPU, defaultPeerLimitMem)
+	case componentKubectl:
+		return resourceRequirements(defaultKubectlRequestCPU, defaultKubectlRequestMem, defaultKubectlLimitCPU, defaultKubectlLimitMem)
+	default:
+		return resourceRequirements(defaultCARequestCPU, defaultCARequestMemory, defaultCALimitCPU, defaultCALimitMemory)
+	}
+}
+
+func resourceRequirements(requestCPU, requestMemory, limitCPU, limitMemory string) corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(requestCPU),
+			corev1.ResourceMemory: resource.MustParse(requestMemory),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(limitCPU),
+			corev1.ResourceMemory: resource.MustParse(limitMemory),
+		},
+	}
 }
 
 func mspSecretItems(tlsEnabled bool) []corev1.KeyToPath {
@@ -515,13 +616,11 @@ func (r *FabricNetworkReconciler) identityMaterialStatus(
 }
 
 func orgLabels(net *fabricopsv1alpha1.FabricNetwork, org fabricopsv1alpha1.Org, component string) map[string]string {
-	return map[string]string{
-		labelFabricNetwork:             sanitizeName(net.Name),
-		labelFabricNetworkNamespace:    sanitizeName(net.Namespace),
-		labelOrg:                       sanitizeName(org.Organization.Name),
-		labelComponent:                 component,
-		"app.kubernetes.io/managed-by": "fabricops",
-	}
+	labels := baseLabels(net)
+	labels[labelOrg] = sanitizeName(org.Organization.Name)
+	labels[labelComponent] = component
+	labels[labelAppComponent] = component
+	return labels
 }
 
 func caImage() string {
@@ -555,12 +654,23 @@ func (r *FabricNetworkReconciler) ensureDeployment(
 				changed = true
 			}
 		}
+		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+			changed = true
+		}
 		if !reflect.DeepEqual(existing.Spec.Replicas, desired.Spec.Replicas) {
 			existing.Spec.Replicas = desired.Spec.Replicas
 			changed = true
 		}
+		if !reflect.DeepEqual(existing.Spec.Strategy, desired.Spec.Strategy) {
+			existing.Spec.Strategy = desired.Spec.Strategy
+			changed = true
+		}
 		if !reflect.DeepEqual(existing.Spec.Template.Labels, desired.Spec.Template.Labels) {
 			existing.Spec.Template.Labels = desired.Spec.Template.Labels
+			changed = true
+		}
+		if !reflect.DeepEqual(existing.Spec.Template.Annotations, desired.Spec.Template.Annotations) {
+			existing.Spec.Template.Annotations = desired.Spec.Template.Annotations
 			changed = true
 		}
 		if containers, containerChanged := syncManagedContainers(existing.Spec.Template.Spec.Containers, desired.Spec.Template.Spec.Containers); containerChanged {
@@ -626,6 +736,10 @@ func syncManagedContainers(existing []corev1.Container, desired []corev1.Contain
 			containers[i].VolumeMounts = desired[i].VolumeMounts
 			changed = true
 		}
+		if !reflect.DeepEqual(containers[i].Resources, desired[i].Resources) {
+			containers[i].Resources = desired[i].Resources
+			changed = true
+		}
 	}
 
 	return containers, changed
@@ -649,9 +763,10 @@ func buildDataPVC(
 
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      dataPVCName(workloadName),
-			Namespace: namespace,
-			Labels:    labels,
+			Name:        dataPVCName(workloadName),
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: resourceAnnotations(net, org),
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{
@@ -687,6 +802,9 @@ func (r *FabricNetworkReconciler) ensurePersistentVolumeClaim(
 				changed = true
 			}
 		}
+		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+			changed = true
+		}
 		if !changed {
 			return nil
 		}
@@ -713,7 +831,25 @@ func (r *FabricNetworkReconciler) ensureService(
 
 	err := r.Get(ctx, key, &existing)
 	if err == nil {
-		return nil
+		changed := mergeLabels(&existing.Labels, desired.Labels)
+		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+			changed = true
+		}
+		if !reflect.DeepEqual(existing.Spec.Selector, desired.Spec.Selector) {
+			existing.Spec.Selector = desired.Spec.Selector
+			changed = true
+		}
+		if !reflect.DeepEqual(existing.Spec.Ports, desired.Spec.Ports) {
+			existing.Spec.Ports = desired.Spec.Ports
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
+
+		log := logf.FromContext(ctx)
+		log.Info("Updating Service", "name", desired.Name, "namespace", desired.Namespace)
+		return r.Update(ctx, &existing)
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
@@ -766,18 +902,23 @@ func buildCADeployment(
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    labels,
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: resourceAnnotations(net, org),
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RecreateDeploymentStrategyType,
+			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
+					Labels:      labels,
+					Annotations: resourceAnnotations(net, org),
 				},
 				Spec: corev1.PodSpec{
 					Volumes: []corev1.Volume{
@@ -808,8 +949,9 @@ func buildCADeployment(
 								"fabric-ca-server start -b \"$" + caBootstrapEnvVar + "\" -d",
 							},
 							Ports: []corev1.ContainerPort{
-								{ContainerPort: caPort, Name: "ca"},
+								{ContainerPort: caPort, Name: "ca", Protocol: corev1.ProtocolTCP},
 							},
+							Resources: componentResourceRequirements(componentCA),
 							VolumeMounts: []corev1.VolumeMount{
 								dataVolumeMount(caHomePath),
 							},
@@ -831,9 +973,10 @@ func buildCAService(
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    labels,
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: resourceAnnotations(net, org),
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: labels,
@@ -841,6 +984,7 @@ func buildCAService(
 				{
 					Name:       "ca",
 					Port:       caPort,
+					Protocol:   corev1.ProtocolTCP,
 					TargetPort: intstr.FromInt32(caPort),
 				},
 			},
@@ -857,8 +1001,19 @@ func buildOrdererDeployment(
 ) *appsv1.Deployment {
 	name := sanitizeName(fmt.Sprintf("%s%d", group.Prefix, instance))
 	replicas := int32(1)
-	labels := orgLabels(net, org, componentOrderer)
-	labels[labelOrdererGroup] = sanitizeName(group.GroupName)
+	selector := map[string]string{
+		labelFabricNetwork:          sanitizeName(net.Name),
+		labelFabricNetworkNamespace: sanitizeName(net.Namespace),
+		labelOrg:                    sanitizeName(org.Organization.Name),
+		labelComponent:              componentOrderer,
+		labelOrdererGroup:           sanitizeName(group.GroupName),
+		labelInstance:               fmt.Sprintf("%d", instance),
+	}
+	labels := mergeMap(orgLabels(net, org, componentOrderer), map[string]string{
+		labelOrdererGroup: sanitizeName(group.GroupName),
+		labelInstance:     fmt.Sprintf("%d", instance),
+		labelWorkload:     name,
+	})
 	tlsEnabled := net.Spec.Global.TLS
 	env := []corev1.EnvVar{
 		{Name: "ORDERER_GENERAL_LISTENADDRESS", Value: "0.0.0.0"},
@@ -881,32 +1036,23 @@ func buildOrdererDeployment(
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    labels,
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: resourceAnnotations(net, org),
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RecreateDeploymentStrategyType,
+			},
 			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					labelFabricNetwork:          sanitizeName(net.Name),
-					labelFabricNetworkNamespace: sanitizeName(net.Namespace),
-					labelOrg:                    sanitizeName(org.Organization.Name),
-					labelComponent:              componentOrderer,
-					labelOrdererGroup:           sanitizeName(group.GroupName),
-					labelInstance:               fmt.Sprintf("%d", instance),
-				},
+				MatchLabels: selector,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						labelFabricNetwork:          sanitizeName(net.Name),
-						labelFabricNetworkNamespace: sanitizeName(net.Namespace),
-						labelOrg:                    sanitizeName(org.Organization.Name),
-						labelComponent:              componentOrderer,
-						labelOrdererGroup:           sanitizeName(group.GroupName),
-						labelInstance:               fmt.Sprintf("%d", instance),
-					},
+					Labels:      labels,
+					Annotations: resourceAnnotations(net, org),
 				},
 				Spec: corev1.PodSpec{
 					Volumes: append(identityVolumes(name, net.Spec.Global.TLS), dataVolume(name)),
@@ -916,8 +1062,9 @@ func buildOrdererDeployment(
 							Image: fabricComponentImage("orderer", net.Spec.Global.FabricVersion),
 							Env:   env,
 							Ports: []corev1.ContainerPort{
-								{ContainerPort: ordererPort, Name: "orderer"},
+								{ContainerPort: ordererPort, Name: "orderer", Protocol: corev1.ProtocolTCP},
 							},
+							Resources: componentResourceRequirements(componentOrderer),
 							VolumeMounts: append(
 								identityVolumeMounts(ordererMSPPath, ordererTLSPath, tlsEnabled),
 								dataVolumeMount(fabricProductionPath),
@@ -949,9 +1096,10 @@ func buildOrdererService(
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    selector,
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      mergeMap(orgLabels(net, org, componentOrderer), selector),
+			Annotations: resourceAnnotations(net, org),
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: selector,
@@ -959,6 +1107,7 @@ func buildOrdererService(
 				{
 					Name:       "orderer",
 					Port:       ordererPort,
+					Protocol:   corev1.ProtocolTCP,
 					TargetPort: intstr.FromInt32(ordererPort),
 				},
 			},
@@ -984,6 +1133,10 @@ func buildPeerDeployment(
 		labelComponent:              componentPeer,
 		labelInstance:               fmt.Sprintf("%d", instance),
 	}
+	labels := mergeMap(orgLabels(net, org, componentPeer), map[string]string{
+		labelInstance: fmt.Sprintf("%d", instance),
+		labelWorkload: name,
+	})
 	env := []corev1.EnvVar{
 		{Name: "CORE_PEER_ID", Value: name},
 		{Name: "CORE_PEER_ADDRESS", Value: peerAddress},
@@ -1007,18 +1160,23 @@ func buildPeerDeployment(
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    selector,
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: resourceAnnotations(net, org),
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RecreateDeploymentStrategyType,
+			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: selector,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: selector,
+					Labels:      labels,
+					Annotations: resourceAnnotations(net, org),
 				},
 				Spec: corev1.PodSpec{
 					Volumes: append(identityVolumes(name, net.Spec.Global.TLS), dataVolume(name)),
@@ -1028,9 +1186,10 @@ func buildPeerDeployment(
 							Image: fabricComponentImage("peer", net.Spec.Global.FabricVersion),
 							Env:   env,
 							Ports: []corev1.ContainerPort{
-								{ContainerPort: peerPort, Name: "peer"},
-								{ContainerPort: peerChaincodePort, Name: "chaincode"},
+								{ContainerPort: peerPort, Name: "peer", Protocol: corev1.ProtocolTCP},
+								{ContainerPort: peerChaincodePort, Name: "chaincode", Protocol: corev1.ProtocolTCP},
 							},
+							Resources: componentResourceRequirements(componentPeer),
 							VolumeMounts: append(
 								identityVolumeMounts(peerMSPPath, peerTLSPath, tlsEnabled),
 								dataVolumeMount(fabricProductionPath),
@@ -1060,9 +1219,10 @@ func buildPeerService(
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels:    selector,
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      mergeMap(orgLabels(net, org, componentPeer), selector),
+			Annotations: resourceAnnotations(net, org),
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: selector,
@@ -1070,11 +1230,13 @@ func buildPeerService(
 				{
 					Name:       "peer",
 					Port:       peerPort,
+					Protocol:   corev1.ProtocolTCP,
 					TargetPort: intstr.FromInt32(peerPort),
 				},
 				{
 					Name:       "chaincode",
 					Port:       peerChaincodePort,
+					Protocol:   corev1.ProtocolTCP,
 					TargetPort: intstr.FromInt32(peerChaincodePort),
 				},
 			},

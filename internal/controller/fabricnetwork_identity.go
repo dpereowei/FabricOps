@@ -134,6 +134,7 @@ func buildCABootstrapSecret(
 			Labels: identityLabels(net, org, componentCA, name, map[string]string{
 				labelIdentityKind: secretKindCABootstrap,
 			}),
+			Annotations: resourceAnnotations(net, org),
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
@@ -196,6 +197,7 @@ func buildEnrollmentCredentialSecret(
 			Labels: identityLabels(net, org, component, identityName, map[string]string{
 				labelIdentityKind: kind,
 			}),
+			Annotations: resourceAnnotations(net, org),
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
@@ -234,6 +236,9 @@ func (r *FabricNetworkReconciler) ensureSecret(
 			existing.Labels[key] = value
 			changed = true
 		}
+	}
+	if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+		changed = true
 	}
 
 	if validationError != nil {
