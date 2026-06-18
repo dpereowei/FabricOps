@@ -44,6 +44,7 @@ type FabricNetworkReconciler struct {
 const (
 	conditionReady                 = "Ready"
 	conditionIdentityMaterialReady = "IdentityMaterialReady"
+	conditionChannelsReady         = "ChannelsReady"
 	fabricNetworkFinalizer         = "fabricops.my.domain/finalizer"
 )
 
@@ -339,17 +340,38 @@ func identityMaterialCondition(
 	return conditions
 }
 
+func channelsReadyCondition(
+	net *fabricopsv1alpha1.FabricNetwork,
+	conditions []metav1.Condition,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) []metav1.Condition {
+	conditions = append([]metav1.Condition(nil), conditions...)
+	apiMeta.SetStatusCondition(&conditions, metav1.Condition{
+		Type:               conditionChannelsReady,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: net.Generation,
+	})
+
+	return conditions
+}
+
 func (r *FabricNetworkReconciler) updateStatus(
 	ctx context.Context,
 	net *fabricopsv1alpha1.FabricNetwork,
 	newPhase fabricopsv1alpha1.Phase,
 	newMessage string,
 	orgStatus []fabricopsv1alpha1.OrgStatus,
+	channelStatus []fabricopsv1alpha1.ChannelStatus,
 	conditions []metav1.Condition,
 ) error {
 	if net.Status.Phase == newPhase &&
 		net.Status.Message == newMessage &&
 		orgStatusesEqual(net.Status.OrgStatus, orgStatus) &&
+		channelStatusesEqual(net.Status.ChannelStatus, channelStatus) &&
 		reflect.DeepEqual(net.Status.Conditions, conditions) {
 		return nil
 	}
@@ -358,6 +380,7 @@ func (r *FabricNetworkReconciler) updateStatus(
 	base.Status.Phase = newPhase
 	base.Status.Message = newMessage
 	base.Status.OrgStatus = orgStatus
+	base.Status.ChannelStatus = channelStatus
 	base.Status.Conditions = conditions
 
 	log := logf.FromContext(ctx)
@@ -379,6 +402,7 @@ func (r *FabricNetworkReconciler) updateStatus(
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
@@ -433,12 +457,48 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			fabricopsv1alpha1.PhaseFailed,
 			"Failed to reconcile orgs: "+err.Error(),
 			orgStatuses,
-			identityMaterialCondition(
+			nil,
+			channelsReadyCondition(
 				&network,
-				readyCondition(&network, metav1.ConditionFalse, "ReconcileError", "Failed to reconcile orgs: "+err.Error()),
+				identityMaterialCondition(
+					&network,
+					readyCondition(&network, metav1.ConditionFalse, "ReconcileError", "Failed to reconcile orgs: "+err.Error()),
+					metav1.ConditionUnknown,
+					"ReconcileError",
+					"Failed to check identity material: "+err.Error(),
+				),
 				metav1.ConditionUnknown,
 				"ReconcileError",
-				"Failed to check identity material: "+err.Error(),
+				"Failed to check channels: "+err.Error(),
+			),
+		)
+
+		return ctrl.Result{}, err
+	}
+
+	channelStatuses, err := r.reconcileChannels(ctx, &network, orgStatuses)
+	if err != nil {
+		log.Error(err, "Failed to reconcile channels")
+
+		_ = r.updateStatus(
+			ctx,
+			&network,
+			fabricopsv1alpha1.PhaseFailed,
+			"Failed to reconcile channels: "+err.Error(),
+			orgStatuses,
+			channelStatuses,
+			channelsReadyCondition(
+				&network,
+				identityMaterialCondition(
+					&network,
+					readyCondition(&network, metav1.ConditionFalse, "ReconcileError", "Failed to reconcile channels: "+err.Error()),
+					metav1.ConditionUnknown,
+					"ReconcileError",
+					"Failed to check identity material: "+err.Error(),
+				),
+				metav1.ConditionUnknown,
+				"ReconcileError",
+				"Failed to reconcile channels: "+err.Error(),
 			),
 		)
 
@@ -453,20 +513,44 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		identityReason = "IdentityMaterialPresent"
 	}
 	identityMessage := identityMaterialMessage(orgStatuses)
+	channelsReady := allChannelsReady(channelStatuses)
+	channelsStatus := metav1.ConditionFalse
+	channelsReason := "ChannelBootstrapPending"
+	channelsMessage := channelStatusMessage(channelStatuses)
+	if len(channelStatuses) == 0 {
+		channelsStatus = metav1.ConditionTrue
+		channelsReason = "NoChannelsDeclared"
+	} else if channelsReady {
+		channelsStatus = metav1.ConditionTrue
+		channelsReason = "ChannelsReady"
+	}
 
-	if allOrgsReady(orgStatuses) {
+	if allOrgsReady(orgStatuses) && channelsReady {
+		readyReason := "ComponentsReady"
+		readyMessage := "All Fabric components are ready"
+		if len(channelStatuses) > 0 {
+			readyReason = "FabricNetworkReady"
+			readyMessage = "All Fabric components and channels are ready"
+		}
 		if err := r.updateStatus(
 			ctx,
 			&network,
 			fabricopsv1alpha1.PhaseReady,
-			"All Fabric components are ready",
+			readyMessage,
 			orgStatuses,
-			identityMaterialCondition(
+			channelStatuses,
+			channelsReadyCondition(
 				&network,
-				readyCondition(&network, metav1.ConditionTrue, "ComponentsReady", "All Fabric components are ready"),
-				identityStatus,
-				identityReason,
-				identityMessage,
+				identityMaterialCondition(
+					&network,
+					readyCondition(&network, metav1.ConditionTrue, readyReason, readyMessage),
+					identityStatus,
+					identityReason,
+					identityMessage,
+				),
+				channelsStatus,
+				channelsReason,
+				channelsMessage,
 			),
 		); err != nil {
 			return ctrl.Result{}, err
@@ -480,6 +564,9 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if !identityReady {
 		readyReason = "IdentityMaterialMissing"
 		readyMessage = "Waiting for required Fabric identity material"
+	} else if allOrgsReady(orgStatuses) && !channelsReady {
+		readyReason = "ChannelsNotReady"
+		readyMessage = "Waiting for Fabric channels to become ready"
 	}
 
 	if err := r.updateStatus(
@@ -488,12 +575,19 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		fabricopsv1alpha1.PhaseCreating,
 		readyMessage,
 		orgStatuses,
-		identityMaterialCondition(
+		channelStatuses,
+		channelsReadyCondition(
 			&network,
-			readyCondition(&network, metav1.ConditionFalse, readyReason, readyMessage),
-			identityStatus,
-			identityReason,
-			identityMessage,
+			identityMaterialCondition(
+				&network,
+				readyCondition(&network, metav1.ConditionFalse, readyReason, readyMessage),
+				identityStatus,
+				identityReason,
+				identityMessage,
+			),
+			channelsStatus,
+			channelsReason,
+			channelsMessage,
 		),
 	); err != nil {
 		return ctrl.Result{}, err

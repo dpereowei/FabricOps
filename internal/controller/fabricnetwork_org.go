@@ -47,6 +47,7 @@ const (
 	labelIdentityKind           = "fabricops.my.domain/identity-kind"
 	labelIdentitySource         = "fabricops.my.domain/identity-source"
 	labelWorkload               = "fabricops.my.domain/workload"
+	labelChannel                = "fabricops.my.domain/channel"
 
 	labelAppName      = "app.kubernetes.io/name"
 	labelAppManagedBy = "app.kubernetes.io/managed-by"
@@ -66,6 +67,7 @@ const (
 
 	componentCA      = "ca"
 	componentAdmin   = "admin"
+	componentChannel = "channel"
 	componentOrderer = "orderer"
 	componentPeer    = "peer"
 	componentKubectl = "kubectl"
@@ -76,6 +78,7 @@ const (
 
 	caPort            int32 = 7054
 	ordererPort       int32 = 7050
+	ordererAdminPort  int32 = 9443
 	peerPort          int32 = 7051
 	peerChaincodePort int32 = 7052
 
@@ -131,6 +134,11 @@ const (
 	tlsClientCertKey = "client.crt"
 	tlsClientKeyKey  = "client.key"
 )
+
+func secretVolumeDefaultMode() *int32 {
+	mode := int32(0644)
+	return &mode
+}
 
 func sanitizeName(name string) string {
 	var b strings.Builder
@@ -299,8 +307,9 @@ func identityVolumes(workloadName string, tlsEnabled bool) []corev1.Volume {
 			Name: secretKindMSP,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: identitySecretName(workloadName, secretKindMSP),
-					Items:      mspSecretItems(tlsEnabled),
+					SecretName:  identitySecretName(workloadName, secretKindMSP),
+					Items:       mspSecretItems(tlsEnabled),
+					DefaultMode: secretVolumeDefaultMode(),
 				},
 			},
 		},
@@ -311,8 +320,9 @@ func identityVolumes(workloadName string, tlsEnabled bool) []corev1.Volume {
 			Name: secretKindTLS,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: identitySecretName(workloadName, secretKindTLS),
-					Items:      tlsSecretItems(),
+					SecretName:  identitySecretName(workloadName, secretKindTLS),
+					Items:       tlsSecretItems(),
+					DefaultMode: secretVolumeDefaultMode(),
 				},
 			},
 		})
@@ -1018,8 +1028,11 @@ func buildOrdererDeployment(
 	env := []corev1.EnvVar{
 		{Name: "ORDERER_GENERAL_LISTENADDRESS", Value: "0.0.0.0"},
 		{Name: "ORDERER_GENERAL_LISTENPORT", Value: fmt.Sprintf("%d", ordererPort)},
+		{Name: "ORDERER_GENERAL_BOOTSTRAPMETHOD", Value: "none"},
 		{Name: "ORDERER_GENERAL_LOCALMSPID", Value: org.Organization.MSPName},
 		{Name: "ORDERER_GENERAL_LOCALMSPDIR", Value: ordererMSPPath},
+		{Name: "ORDERER_CHANNELPARTICIPATION_ENABLED", Value: "true"},
+		{Name: "ORDERER_ADMIN_LISTENADDRESS", Value: fmt.Sprintf("0.0.0.0:%d", ordererAdminPort)},
 	}
 
 	if tlsEnabled {
@@ -1031,6 +1044,12 @@ func buildOrdererDeployment(
 			corev1.EnvVar{Name: "ORDERER_GENERAL_CLUSTER_CLIENTCERTIFICATE", Value: ordererTLSPath + "/server.crt"},
 			corev1.EnvVar{Name: "ORDERER_GENERAL_CLUSTER_CLIENTPRIVATEKEY", Value: ordererTLSPath + "/server.key"},
 			corev1.EnvVar{Name: "ORDERER_GENERAL_CLUSTER_ROOTCAS", Value: "[" + ordererTLSPath + "/ca.crt]"},
+			corev1.EnvVar{Name: "ORDERER_ADMIN_TLS_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "ORDERER_ADMIN_TLS_PRIVATEKEY", Value: ordererTLSPath + "/server.key"},
+			corev1.EnvVar{Name: "ORDERER_ADMIN_TLS_CERTIFICATE", Value: ordererTLSPath + "/server.crt"},
+			corev1.EnvVar{Name: "ORDERER_ADMIN_TLS_ROOTCAS", Value: "[" + ordererTLSPath + "/ca.crt]"},
+			corev1.EnvVar{Name: "ORDERER_ADMIN_TLS_CLIENTAUTHREQUIRED", Value: "true"},
+			corev1.EnvVar{Name: "ORDERER_ADMIN_TLS_CLIENTROOTCAS", Value: "[" + ordererTLSPath + "/ca.crt]"},
 		)
 	}
 
@@ -1063,6 +1082,7 @@ func buildOrdererDeployment(
 							Env:   env,
 							Ports: []corev1.ContainerPort{
 								{ContainerPort: ordererPort, Name: "orderer", Protocol: corev1.ProtocolTCP},
+								{ContainerPort: ordererAdminPort, Name: "admin", Protocol: corev1.ProtocolTCP},
 							},
 							Resources: componentResourceRequirements(componentOrderer),
 							VolumeMounts: append(
@@ -1109,6 +1129,12 @@ func buildOrdererService(
 					Port:       ordererPort,
 					Protocol:   corev1.ProtocolTCP,
 					TargetPort: intstr.FromInt32(ordererPort),
+				},
+				{
+					Name:       "admin",
+					Port:       ordererAdminPort,
+					Protocol:   corev1.ProtocolTCP,
+					TargetPort: intstr.FromInt32(ordererAdminPort),
 				},
 			},
 		},

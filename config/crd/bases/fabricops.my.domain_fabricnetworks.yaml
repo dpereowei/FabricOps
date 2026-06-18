@@ -204,6 +204,88 @@ spec:
           status:
             description: status defines the observed state of FabricNetwork
             properties:
+              channelStatus:
+                items:
+                  properties:
+                    blockConfigMapName:
+                      type: string
+                    blockReady:
+                      type: boolean
+                    configMapName:
+                      type: string
+                    configReady:
+                      type: boolean
+                    message:
+                      type: string
+                    name:
+                      type: string
+                    orderers:
+                      properties:
+                        desired:
+                          format: int32
+                          type: integer
+                        ready:
+                          format: int32
+                          type: integer
+                      required:
+                      - desired
+                      - ready
+                      type: object
+                    orgs:
+                      items:
+                        properties:
+                          message:
+                            type: string
+                          mspName:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                          peerNames:
+                            items:
+                              type: string
+                            type: array
+                          peers:
+                            properties:
+                              desired:
+                                format: int32
+                                type: integer
+                              ready:
+                                format: int32
+                                type: integer
+                            required:
+                            - desired
+                            - ready
+                            type: object
+                          ready:
+                            type: boolean
+                        required:
+                        - name
+                        - ready
+                        type: object
+                      type: array
+                    peers:
+                      properties:
+                        desired:
+                          format: int32
+                          type: integer
+                        ready:
+                          format: int32
+                          type: integer
+                      required:
+                      - desired
+                      - ready
+                      type: object
+                    ready:
+                      type: boolean
+                  required:
+                  - blockReady
+                  - configReady
+                  - name
+                  - ready
+                  type: object
+                type: array
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current

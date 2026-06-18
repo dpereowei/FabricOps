@@ -126,12 +126,36 @@ type OrgStatus struct {
 	Ready         bool           `json:"ready"`
 }
 
+type ChannelOrgStatus struct {
+	Name      string         `json:"name"`
+	Namespace string         `json:"namespace,omitempty"`
+	MSPName   string         `json:"mspName,omitempty"`
+	PeerNames []string       `json:"peerNames,omitempty"`
+	Peers     WorkloadStatus `json:"peers,omitempty"`
+	Ready     bool           `json:"ready"`
+	Message   string         `json:"message,omitempty"`
+}
+
+type ChannelStatus struct {
+	Name               string             `json:"name"`
+	ConfigMapName      string             `json:"configMapName,omitempty"`
+	BlockConfigMapName string             `json:"blockConfigMapName,omitempty"`
+	ConfigReady        bool               `json:"configReady"`
+	BlockReady         bool               `json:"blockReady"`
+	Orderers           WorkloadStatus     `json:"orderers,omitempty"`
+	Peers              WorkloadStatus     `json:"peers,omitempty"`
+	Orgs               []ChannelOrgStatus `json:"orgs,omitempty"`
+	Ready              bool               `json:"ready"`
+	Message            string             `json:"message,omitempty"`
+}
+
 // FabricNetworkStatus defines the observed state of FabricNetwork.
 type FabricNetworkStatus struct {
 	// +optional
-	Phase     Phase       `json:"phase,omitempty"`
-	Message   string      `json:"message,omitempty"`
-	OrgStatus []OrgStatus `json:"orgStatus,omitempty"`
+	Phase         Phase           `json:"phase,omitempty"`
+	Message       string          `json:"message,omitempty"`
+	OrgStatus     []OrgStatus     `json:"orgStatus,omitempty"`
+	ChannelStatus []ChannelStatus `json:"channelStatus,omitempty"`
 
 	// +optional
 	// +patchMergeKey=type

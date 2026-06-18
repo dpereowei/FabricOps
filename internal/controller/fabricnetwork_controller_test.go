@@ -663,10 +663,13 @@ var _ = Describe("FabricNetwork Controller", func() {
 			ordererEnv := envMap(ordererContainer)
 			Expect(ordererEnv["ORDERER_GENERAL_LISTENADDRESS"]).To(Equal("0.0.0.0"))
 			Expect(ordererEnv["ORDERER_GENERAL_LISTENPORT"]).To(Equal("7050"))
+			Expect(ordererEnv["ORDERER_GENERAL_BOOTSTRAPMETHOD"]).To(Equal("none"))
 			Expect(ordererEnv).NotTo(HaveKey("ORDERER_GENERAL_CLUSTER_LISTENADDRESS"))
 			Expect(ordererEnv).NotTo(HaveKey("ORDERER_GENERAL_CLUSTER_LISTENPORT"))
 			Expect(ordererEnv["ORDERER_GENERAL_LOCALMSPID"]).To(Equal("OrdererMSP"))
 			Expect(ordererEnv["ORDERER_GENERAL_LOCALMSPDIR"]).To(Equal(ordererMSPPath))
+			Expect(ordererEnv["ORDERER_CHANNELPARTICIPATION_ENABLED"]).To(Equal("true"))
+			Expect(ordererEnv["ORDERER_ADMIN_LISTENADDRESS"]).To(Equal("0.0.0.0:9443"))
 			Expect(ordererEnv["ORDERER_GENERAL_TLS_ENABLED"]).To(Equal("true"))
 			Expect(ordererEnv["ORDERER_GENERAL_TLS_PRIVATEKEY"]).To(Equal(ordererTLSPath + "/server.key"))
 			Expect(ordererEnv["ORDERER_GENERAL_TLS_CERTIFICATE"]).To(Equal(ordererTLSPath + "/server.crt"))
@@ -674,10 +677,16 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(ordererEnv["ORDERER_GENERAL_CLUSTER_CLIENTCERTIFICATE"]).To(Equal(ordererTLSPath + "/server.crt"))
 			Expect(ordererEnv["ORDERER_GENERAL_CLUSTER_CLIENTPRIVATEKEY"]).To(Equal(ordererTLSPath + "/server.key"))
 			Expect(ordererEnv["ORDERER_GENERAL_CLUSTER_ROOTCAS"]).To(Equal("[" + ordererTLSPath + "/ca.crt]"))
+			Expect(ordererEnv["ORDERER_ADMIN_TLS_ENABLED"]).To(Equal("true"))
+			Expect(ordererEnv["ORDERER_ADMIN_TLS_PRIVATEKEY"]).To(Equal(ordererTLSPath + "/server.key"))
+			Expect(ordererEnv["ORDERER_ADMIN_TLS_CERTIFICATE"]).To(Equal(ordererTLSPath + "/server.crt"))
+			Expect(ordererEnv["ORDERER_ADMIN_TLS_ROOTCAS"]).To(Equal("[" + ordererTLSPath + "/ca.crt]"))
+			Expect(ordererEnv["ORDERER_ADMIN_TLS_CLIENTAUTHREQUIRED"]).To(Equal("true"))
+			Expect(ordererEnv["ORDERER_ADMIN_TLS_CLIENTROOTCAS"]).To(Equal("[" + ordererTLSPath + "/ca.crt]"))
 			Expect(ordererDeploy.Labels[labelWorkload]).To(Equal("orderer0"))
 			Expect(ordererDeploy.Annotations[annotationOrg]).To(Equal("Orderer"))
 			Expect(ordererDeploy.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
-			Expect(containerPorts(ordererContainer)).To(ContainElements(int32(7050)))
+			Expect(containerPorts(ordererContainer)).To(ContainElements(int32(7050), int32(9443)))
 			expectContainerResources(ordererContainer, defaultOrdererRequestCPU, defaultOrdererRequestMem, defaultOrdererLimitCPU, defaultOrdererLimitMem)
 			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "orderer0-msp"))
 			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "orderer0-tls"))
@@ -694,7 +703,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Namespace: ordererNamespace,
 				Name:      "orderer0",
 			}, &ordererSvc)).To(Succeed())
-			Expect(servicePorts(ordererSvc)).To(ContainElements(int32(7050)))
+			Expect(servicePorts(ordererSvc)).To(ContainElements(int32(7050), int32(9443)))
 
 			var peerDeploy appsv1.Deployment
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -772,6 +781,289 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(identity).NotTo(BeNil())
 			Expect(identity.Status).To(Equal(metav1.ConditionTrue))
 			Expect(identity.Reason).To(Equal("IdentityMaterialPresent"))
+
+			channels := apiMeta.FindStatusCondition(network.Status.Conditions, conditionChannelsReady)
+			Expect(channels).NotTo(BeNil())
+			Expect(channels.Status).To(Equal(metav1.ConditionTrue))
+			Expect(channels.Reason).To(Equal("NoChannelsDeclared"))
+		})
+
+		It("should map declared channel memberships into status", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Channels = []fabricopsv1alpha1.Channel{
+				{
+					Name: "settlement",
+					Orgs: []fabricopsv1alpha1.ChannelOrg{
+						{
+							Name:  "BankA",
+							Peers: []string{"peer0"},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Update(ctx, &network)).To(Succeed())
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.ChannelStatus).To(HaveLen(1))
+			channel := network.Status.ChannelStatus[0]
+			Expect(channel.Name).To(Equal("settlement"))
+			Expect(channel.Ready).To(BeFalse())
+			Expect(channel.ConfigReady).To(BeFalse())
+			Expect(channel.BlockReady).To(BeFalse())
+			Expect(channel.Message).To(Equal("Waiting for Fabric components before channel bootstrap"))
+			Expect(channel.ConfigMapName).To(Equal("settlement-configtx"))
+			Expect(channel.BlockConfigMapName).To(Equal("settlement-channel-block"))
+			Expect(channel.Orderers.Desired).To(Equal(int32(1)))
+			Expect(channel.Orderers.Ready).To(Equal(int32(0)))
+			Expect(channel.Peers.Desired).To(Equal(int32(1)))
+			Expect(channel.Peers.Ready).To(Equal(int32(0)))
+			Expect(channel.Orgs).To(HaveLen(1))
+			Expect(channel.Orgs[0].Name).To(Equal("BankA"))
+			Expect(channel.Orgs[0].Namespace).To(Equal("fo-test-banka"))
+			Expect(channel.Orgs[0].MSPName).To(Equal("BankAMSP"))
+			Expect(channel.Orgs[0].PeerNames).To(Equal([]string{"peer0"}))
+			Expect(channel.Orgs[0].Peers.Desired).To(Equal(int32(1)))
+			Expect(channel.Orgs[0].Peers.Ready).To(Equal(int32(0)))
+			Expect(channel.Orgs[0].Ready).To(BeFalse())
+
+			channels := apiMeta.FindStatusCondition(network.Status.Conditions, conditionChannelsReady)
+			Expect(channels).NotTo(BeNil())
+			Expect(channels.Status).To(Equal(metav1.ConditionFalse))
+			Expect(channels.Reason).To(Equal("ChannelBootstrapPending"))
+			Expect(channels.Message).To(Equal("settlement: Waiting for Fabric components before channel bootstrap"))
+		})
+
+		It("should generate channel config and a channel block Job after components are ready", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Channels = []fabricopsv1alpha1.Channel{
+				{
+					Name: "settlement",
+					Orgs: []fabricopsv1alpha1.ChannelOrg{
+						{
+							Name:  "BankA",
+							Peers: []string{"peer0"},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Update(ctx, &network)).To(Succeed())
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			ordererNamespace := "fo-test-orderer"
+			bankNamespace := "fo-test-banka"
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			markDeploymentReady(ctx, ordererNamespace, "orderer-ca")
+			markDeploymentReady(ctx, bankNamespace, "banka-ca")
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			writeEnrolledOrgIdentitySecrets(ctx, &network, network.Spec.Orgs[0], ordererNamespace)
+			writeEnrolledOrgIdentitySecrets(ctx, &network, network.Spec.Orgs[1], bankNamespace)
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			markDeploymentReady(ctx, ordererNamespace, "orderer0")
+			markDeploymentReady(ctx, bankNamespace, "peer0")
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var configtx corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "settlement-configtx",
+			}, &configtx)).To(Succeed())
+			Expect(configtx.Labels[labelAppComponent]).To(Equal(componentChannel))
+			Expect(configtx.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("Settlement:"))
+			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("V2_0: true"))
+			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("Name: OrdererMSP"))
+			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("Name: BankAMSP"))
+			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("MSPDir: /fabricops/channel/crypto/orgs/banka/msp"))
+			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("Host: orderer0.fo-test-orderer.svc.cluster.local"))
+			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("ClientTLSCert: /fabricops/channel/crypto/orderers/orderer0/tls/server.crt"))
+
+			var sourceBankAdminMSP corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "banka-admin-msp",
+			}, &sourceBankAdminMSP)).To(Succeed())
+
+			var channelBankAdminMSP corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "settlement-banka-admin-msp",
+			}, &channelBankAdminMSP)).To(Succeed())
+			Expect(channelBankAdminMSP.Labels[labelAppComponent]).To(Equal(componentChannel))
+			Expect(channelBankAdminMSP.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(channelBankAdminMSP.Data).To(Equal(sourceBankAdminMSP.Data))
+
+			var channelOrdererTLS corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "settlement-orderer0-tls",
+			}, &channelOrdererTLS)).To(Succeed())
+			Expect(channelOrdererTLS.Labels[labelAppComponent]).To(Equal(componentChannel))
+			Expect(channelOrdererTLS.Data).To(HaveKey(tlsServerCertKey))
+
+			var channelOrdererAdminTLS corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "settlement-orderer-admin-tls",
+			}, &channelOrdererAdminTLS)).To(Succeed())
+			Expect(channelOrdererAdminTLS.Labels[labelAppComponent]).To(Equal(componentChannel))
+			Expect(channelOrdererAdminTLS.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(channelOrdererAdminTLS.Data).To(HaveKey(tlsClientCertKey))
+			Expect(channelOrdererAdminTLS.Data).To(HaveKey(tlsClientKeyKey))
+
+			var serviceAccount corev1.ServiceAccount
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "settlement-channel-bootstrapper",
+			}, &serviceAccount)).To(Succeed())
+			Expect(serviceAccount.Labels[labelAppComponent]).To(Equal(componentChannel))
+
+			var role rbacv1.Role
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "settlement-channel-bootstrapper",
+			}, &role)).To(Succeed())
+			Expect(role.Rules).To(ContainElement(rbacv1.PolicyRule{
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get", "create", "update", "patch"},
+			}))
+
+			var job batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "settlement-channel-block",
+			}, &job)).To(Succeed())
+			Expect(job.Labels[labelAppComponent]).To(Equal(componentChannel))
+			Expect(job.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(job.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-channel-bootstrapper"))
+			Expect(job.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(job.Spec.Template.Spec.InitContainers).To(HaveLen(1))
+			Expect(job.Spec.Template.Spec.Containers).To(HaveLen(1))
+			Expect(configMapVolumeNames(job.Spec.Template.Spec)).To(HaveKeyWithValue(channelConfigVolumeName, "settlement-configtx"))
+			Expect(secretVolumeNames(job.Spec.Template.Spec)).To(HaveKeyWithValue("msp-orderer", "settlement-orderer-admin-msp"))
+			Expect(secretVolumeNames(job.Spec.Template.Spec)).To(HaveKeyWithValue("msp-banka", "settlement-banka-admin-msp"))
+			Expect(secretVolumeNames(job.Spec.Template.Spec)).To(HaveKeyWithValue("tls-orderer0", "settlement-orderer0-tls"))
+
+			generateContainer := job.Spec.Template.Spec.InitContainers[0]
+			Expect(generateContainer.Name).To(Equal(generateChannelBlockContainer))
+			Expect(generateContainer.Image).To(Equal("hyperledger/fabric-tools:2.5.14"))
+			Expect(generateContainer.Command[2]).To(ContainSubstring("configtxgen"))
+			Expect(generateContainer.Command[2]).To(ContainSubstring("-profile Settlement"))
+			Expect(generateContainer.Command[2]).To(ContainSubstring("-outputBlock /fabricops/channel/output/settlement.block"))
+			Expect(volumeMountPaths(generateContainer)).To(HaveKeyWithValue(channelConfigVolumeName, channelConfigDir))
+			Expect(volumeMountPaths(generateContainer)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
+			Expect(volumeMountPaths(generateContainer)).To(HaveKeyWithValue("msp-banka", "/fabricops/channel/crypto/orgs/banka/msp"))
+			Expect(volumeMountPaths(generateContainer)).To(HaveKeyWithValue("tls-orderer0", "/fabricops/channel/crypto/orderers/orderer0/tls"))
+
+			publishContainer := job.Spec.Template.Spec.Containers[0]
+			Expect(publishContainer.Name).To(Equal(publishChannelBlockContainer))
+			Expect(publishContainer.Image).To(Equal(kubectlImage()))
+			Expect(envMap(publishContainer)[envChannelBlockConfigMap]).To(Equal("settlement-channel-block"))
+			Expect(envMap(publishContainer)[envChannelBlockFile]).To(Equal("settlement.block"))
+			Expect(publishContainer.Command[2]).To(ContainSubstring("create configmap \"$FABRICOPS_CHANNEL_BLOCK_CONFIGMAP\""))
+			Expect(volumeMountPaths(publishContainer)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseCreating))
+			Expect(network.Status.ChannelStatus).To(HaveLen(1))
+			Expect(network.Status.ChannelStatus[0].ConfigReady).To(BeTrue())
+			Expect(network.Status.ChannelStatus[0].BlockReady).To(BeFalse())
+			Expect(network.Status.ChannelStatus[0].Message).To(Equal("Waiting for channel block generation Job"))
+
+			blockConfigMap := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "settlement-channel-block",
+					Namespace: ordererNamespace,
+				},
+				BinaryData: map[string][]byte{
+					"settlement.block": []byte("block"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, blockConfigMap)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.ChannelStatus[0].ConfigReady).To(BeTrue())
+			Expect(network.Status.ChannelStatus[0].BlockReady).To(BeTrue())
+			Expect(network.Status.ChannelStatus[0].Ready).To(BeFalse())
+			Expect(network.Status.ChannelStatus[0].Orderers.Ready).To(Equal(int32(0)))
+			Expect(network.Status.ChannelStatus[0].Message).To(Equal("Waiting for orderer join Jobs"))
+
+			var ordererJoinJob batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "settlement-orderer-orderer0-orderer-join",
+			}, &ordererJoinJob)).To(Succeed())
+			Expect(ordererJoinJob.Labels[labelAppComponent]).To(Equal(componentChannel))
+			Expect(ordererJoinJob.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(ordererJoinJob.Labels[labelWorkload]).To(Equal("orderer0"))
+			Expect(ordererJoinJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-channel-bootstrapper"))
+			Expect(ordererJoinJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(ordererJoinJob.Spec.Template.Spec.Containers).To(HaveLen(1))
+			Expect(configMapVolumeNames(ordererJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue(channelBlockVolumeName, "settlement-channel-block"))
+			Expect(secretVolumeNames(ordererJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue("admin-tls-orderer", "settlement-orderer-admin-tls"))
+
+			joinContainer := ordererJoinJob.Spec.Template.Spec.Containers[0]
+			Expect(joinContainer.Name).To(Equal(joinOrdererContainer))
+			Expect(joinContainer.Image).To(Equal("hyperledger/fabric-tools:2.5.14"))
+			Expect(joinContainer.Command[2]).To(ContainSubstring("osnadmin channel join"))
+			Expect(joinContainer.Command[2]).To(ContainSubstring("orderer0.fo-test-orderer.svc.cluster.local:9443"))
+			Expect(joinContainer.Command[2]).To(ContainSubstring("--client-cert \"$ADMIN_TLS_DIR/client.crt\""))
+			Expect(volumeMountPaths(joinContainer)).To(HaveKeyWithValue(channelBlockVolumeName, channelBlockDir))
+			Expect(volumeMountPaths(joinContainer)).To(HaveKeyWithValue("admin-tls-orderer", channelOrdererAdminTLSPath(network.Spec.Orgs[0])))
+
+			markJobComplete(ctx, ordererNamespace, "settlement-orderer-orderer0-orderer-join")
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.ChannelStatus[0].ConfigReady).To(BeTrue())
+			Expect(network.Status.ChannelStatus[0].BlockReady).To(BeTrue())
+			Expect(network.Status.ChannelStatus[0].Orderers.Ready).To(Equal(int32(1)))
+			Expect(network.Status.ChannelStatus[0].Ready).To(BeFalse())
+			Expect(network.Status.ChannelStatus[0].Message).To(Equal("Waiting for peer join Jobs"))
 		})
 	})
 })
@@ -798,6 +1090,7 @@ func deleteFabricNetworkIfExists(ctx context.Context, name types.NamespacedName)
 
 func cleanupOrgNamespaceResources(ctx context.Context, namespace string) {
 	deleteAllJobs(ctx, namespace)
+	deleteAllConfigMaps(ctx, namespace)
 	deleteAllDeployments(ctx, namespace)
 	deleteAllPersistentVolumeClaims(ctx, namespace)
 	deleteAllServices(ctx, namespace)
@@ -817,6 +1110,19 @@ func deleteAllJobs(ctx context.Context, namespace string) {
 
 	for i := range jobs.Items {
 		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &jobs.Items[i]))).To(Succeed())
+	}
+}
+
+func deleteAllConfigMaps(ctx context.Context, namespace string) {
+	var configMaps corev1.ConfigMapList
+	err := k8sClient.List(ctx, &configMaps, client.InNamespace(namespace))
+	if errors.IsNotFound(err) {
+		return
+	}
+	Expect(err).NotTo(HaveOccurred())
+
+	for i := range configMaps.Items {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &configMaps.Items[i]))).To(Succeed())
 	}
 }
 
@@ -947,6 +1253,34 @@ func markJobFailed(ctx context.Context, namespace, name string) {
 			Type:               batchv1.JobFailed,
 			Status:             corev1.ConditionTrue,
 			Reason:             "BackoffLimitExceeded",
+			LastTransitionTime: now,
+		},
+	)
+	Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
+}
+
+func markJobComplete(ctx context.Context, namespace, name string) {
+	var job batchv1.Job
+	Expect(k8sClient.Get(ctx, types.NamespacedName{
+		Namespace: namespace,
+		Name:      name,
+	}, &job)).To(Succeed())
+
+	now := metav1.Now()
+	job.Status.Succeeded = 1
+	job.Status.StartTime = &now
+	job.Status.CompletionTime = &now
+	job.Status.Conditions = append(job.Status.Conditions,
+		batchv1.JobCondition{
+			Type:               batchv1.JobSuccessCriteriaMet,
+			Status:             corev1.ConditionTrue,
+			Reason:             "CompletionsReached",
+			LastTransitionTime: now,
+		},
+		batchv1.JobCondition{
+			Type:               batchv1.JobComplete,
+			Status:             corev1.ConditionTrue,
+			Reason:             "Completed",
 			LastTransitionTime: now,
 		},
 	)
@@ -1304,6 +1638,17 @@ func secretVolumeNames(podSpec corev1.PodSpec) map[string]string {
 		secrets[volume.Name] = volume.Secret.SecretName
 	}
 	return secrets
+}
+
+func configMapVolumeNames(podSpec corev1.PodSpec) map[string]string {
+	configMaps := map[string]string{}
+	for _, volume := range podSpec.Volumes {
+		if volume.ConfigMap == nil {
+			continue
+		}
+		configMaps[volume.Name] = volume.ConfigMap.Name
+	}
+	return configMaps
 }
 
 func pvcVolumeNames(podSpec corev1.PodSpec) map[string]string {
