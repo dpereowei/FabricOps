@@ -910,6 +910,9 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("Name: BankAMSP"))
 			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("MSPDir: /fabricops/channel/crypto/orgs/banka/msp"))
 			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("Host: orderer0.fo-test-orderer.svc.cluster.local"))
+			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("AnchorPeers:"))
+			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("Host: peer0.fo-test-banka.svc.cluster.local"))
+			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("Port: 7051"))
 			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("ClientTLSCert: /fabricops/channel/crypto/orderers/orderer0/tls/server.crt"))
 
 			var sourceBankAdminMSP corev1.Secret
@@ -1064,6 +1067,136 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.ChannelStatus[0].Orderers.Ready).To(Equal(int32(1)))
 			Expect(network.Status.ChannelStatus[0].Ready).To(BeFalse())
 			Expect(network.Status.ChannelStatus[0].Message).To(Equal("Waiting for peer join Jobs"))
+
+			var peerBlockConfigMap corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-channel-block",
+			}, &peerBlockConfigMap)).To(Succeed())
+			Expect(peerBlockConfigMap.Labels[labelAppComponent]).To(Equal(componentChannel))
+			Expect(peerBlockConfigMap.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(peerBlockConfigMap.BinaryData).To(HaveKeyWithValue("settlement.block", []byte("block")))
+
+			var peerServiceAccount corev1.ServiceAccount
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-channel-bootstrapper",
+			}, &peerServiceAccount)).To(Succeed())
+			Expect(peerServiceAccount.Labels[labelAppComponent]).To(Equal(componentChannel))
+
+			var peerJoinJob batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-banka-peer0-peer-join",
+			}, &peerJoinJob)).To(Succeed())
+			Expect(peerJoinJob.Labels[labelAppComponent]).To(Equal(componentChannel))
+			Expect(peerJoinJob.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(peerJoinJob.Labels[labelWorkload]).To(Equal("peer0"))
+			Expect(peerJoinJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-channel-bootstrapper"))
+			Expect(peerJoinJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(peerJoinJob.Spec.Template.Spec.Containers).To(HaveLen(1))
+			Expect(configMapVolumeNames(peerJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue(channelBlockVolumeName, "settlement-channel-block"))
+			Expect(secretVolumeNames(peerJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue("msp-banka", "banka-admin-msp"))
+			Expect(secretVolumeNames(peerJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue("admin-tls-banka", "banka-admin-tls"))
+
+			peerJoinContainer := peerJoinJob.Spec.Template.Spec.Containers[0]
+			Expect(peerJoinContainer.Name).To(Equal(joinPeerContainer))
+			Expect(peerJoinContainer.Image).To(Equal("hyperledger/fabric-tools:2.5.14"))
+			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("peer channel join"))
+			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("CORE_PEER_LOCALMSPID=\"BankAMSP\""))
+			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("peer0.fo-test-banka.svc.cluster.local:7051"))
+			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("--cafile \"$CORE_PEER_TLS_ROOTCERT_FILE\""))
+			Expect(volumeMountPaths(peerJoinContainer)).To(HaveKeyWithValue(channelBlockVolumeName, channelBlockDir))
+			Expect(volumeMountPaths(peerJoinContainer)).To(HaveKeyWithValue("msp-banka", channelOrgMSPPath(network.Spec.Orgs[1])))
+			Expect(volumeMountPaths(peerJoinContainer)).To(HaveKeyWithValue("admin-tls-banka", channelOrdererAdminTLSPath(network.Spec.Orgs[1])))
+
+			markJobComplete(ctx, bankNamespace, "settlement-banka-peer0-peer-join")
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseCreating))
+			Expect(network.Status.ChannelStatus[0].ConfigReady).To(BeTrue())
+			Expect(network.Status.ChannelStatus[0].BlockReady).To(BeTrue())
+			Expect(network.Status.ChannelStatus[0].Orderers.Ready).To(Equal(int32(1)))
+			Expect(network.Status.ChannelStatus[0].Peers.Ready).To(Equal(int32(1)))
+			Expect(network.Status.ChannelStatus[0].Orgs[0].Ready).To(BeFalse())
+			Expect(network.Status.ChannelStatus[0].Orgs[0].Message).To(Equal("Waiting for anchor peer update Job"))
+			Expect(network.Status.ChannelStatus[0].Ready).To(BeFalse())
+			Expect(network.Status.ChannelStatus[0].Message).To(Equal("Waiting for anchor peer update Jobs"))
+
+			channels := apiMeta.FindStatusCondition(network.Status.Conditions, conditionChannelsReady)
+			Expect(channels).NotTo(BeNil())
+			Expect(channels.Status).To(Equal(metav1.ConditionFalse))
+			Expect(channels.Reason).To(Equal("ChannelBootstrapPending"))
+			Expect(channels.Message).To(Equal("settlement: Waiting for anchor peer update Jobs"))
+
+			var peerOrdererTLS corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-orderer0-tls",
+			}, &peerOrdererTLS)).To(Succeed())
+			Expect(peerOrdererTLS.Labels[labelAppComponent]).To(Equal(componentChannel))
+			Expect(peerOrdererTLS.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(peerOrdererTLS.Data).To(Equal(channelOrdererTLS.Data))
+
+			var anchorPeerJob batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-banka-anchor-peer-update",
+			}, &anchorPeerJob)).To(Succeed())
+			Expect(anchorPeerJob.Labels[labelAppComponent]).To(Equal(componentChannel))
+			Expect(anchorPeerJob.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(anchorPeerJob.Labels[labelWorkload]).To(Equal("peer0"))
+			Expect(anchorPeerJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-channel-bootstrapper"))
+			Expect(anchorPeerJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(anchorPeerJob.Spec.Template.Spec.Containers).To(HaveLen(1))
+			Expect(secretVolumeNames(anchorPeerJob.Spec.Template.Spec)).To(HaveKeyWithValue("msp-banka", "banka-admin-msp"))
+			Expect(secretVolumeNames(anchorPeerJob.Spec.Template.Spec)).To(HaveKeyWithValue("admin-tls-banka", "banka-admin-tls"))
+			Expect(secretVolumeNames(anchorPeerJob.Spec.Template.Spec)).To(HaveKeyWithValue("tls-orderer0", "settlement-orderer0-tls"))
+
+			anchorContainer := anchorPeerJob.Spec.Template.Spec.Containers[0]
+			Expect(anchorContainer.Name).To(Equal(updateAnchorPeerContainer))
+			Expect(anchorContainer.Image).To(Equal("hyperledger/fabric-tools:2.5.14"))
+			Expect(anchorContainer.Command[2]).To(ContainSubstring("MSP_ID=\"BankAMSP\""))
+			Expect(anchorContainer.Command[2]).To(ContainSubstring("ANCHOR_HOST=\"peer0.fo-test-banka.svc.cluster.local\""))
+			Expect(anchorContainer.Command[2]).To(ContainSubstring("ANCHOR_PORT=7051"))
+			Expect(anchorContainer.Command[2]).To(ContainSubstring("ORDERER_ADDRESS=\"orderer0.fo-test-orderer.svc.cluster.local:7050\""))
+			Expect(anchorContainer.Command[2]).To(ContainSubstring("peer channel fetch config"))
+			Expect(anchorContainer.Command[2]).To(ContainSubstring("configtxlator compute_update"))
+			Expect(anchorContainer.Command[2]).To(ContainSubstring("jq -n"))
+			Expect(anchorContainer.Command[2]).To(ContainSubstring("AnchorPeers"))
+			Expect(anchorContainer.Command[2]).To(ContainSubstring("peer channel update"))
+			Expect(anchorContainer.Command[2]).To(ContainSubstring("--cafile \"$ORDERER_TLS_DIR/ca.crt\""))
+			Expect(volumeMountPaths(anchorContainer)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
+			Expect(volumeMountPaths(anchorContainer)).To(HaveKeyWithValue("msp-banka", channelOrgMSPPath(network.Spec.Orgs[1])))
+			Expect(volumeMountPaths(anchorContainer)).To(HaveKeyWithValue("admin-tls-banka", channelOrdererAdminTLSPath(network.Spec.Orgs[1])))
+			Expect(volumeMountPaths(anchorContainer)).To(HaveKeyWithValue("tls-orderer0", channelOrdererTLSPath("orderer0")))
+
+			markJobComplete(ctx, bankNamespace, "settlement-banka-anchor-peer-update")
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseReady))
+			Expect(network.Status.ChannelStatus[0].ConfigReady).To(BeTrue())
+			Expect(network.Status.ChannelStatus[0].BlockReady).To(BeTrue())
+			Expect(network.Status.ChannelStatus[0].Orderers.Ready).To(Equal(int32(1)))
+			Expect(network.Status.ChannelStatus[0].Peers.Ready).To(Equal(int32(1)))
+			Expect(network.Status.ChannelStatus[0].Orgs[0].Ready).To(BeTrue())
+			Expect(network.Status.ChannelStatus[0].Ready).To(BeTrue())
+			Expect(network.Status.ChannelStatus[0].Message).To(BeEmpty())
+
+			channels = apiMeta.FindStatusCondition(network.Status.Conditions, conditionChannelsReady)
+			Expect(channels).NotTo(BeNil())
+			Expect(channels.Status).To(Equal(metav1.ConditionTrue))
+			Expect(channels.Reason).To(Equal("ChannelsReady"))
 		})
 	})
 })
