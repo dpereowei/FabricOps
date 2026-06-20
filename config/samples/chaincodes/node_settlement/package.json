@@ -1,0 +1,18 @@
+{
+  "name": "fabricops-node-settlement-chaincode",
+  "version": "0.1.0",
+  "description": "FabricOps sample settlement chaincode for Chaincode-as-a-Service",
+  "main": "index.js",
+  "scripts": {
+    "start": "fabric-chaincode-node start",
+    "start:ccaas": "echo CHAINCODE_ID=$CHAINCODE_ID && echo CHAINCODE_SERVER_ADDRESS=$CHAINCODE_SERVER_ADDRESS && fabric-chaincode-node server --chaincode-address $CHAINCODE_SERVER_ADDRESS --chaincode-id $CHAINCODE_ID",
+    "build": "node --check index.js"
+  },
+  "dependencies": {
+    "fabric-contract-api": "2.4.2",
+    "fabric-shim": "2.4.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
