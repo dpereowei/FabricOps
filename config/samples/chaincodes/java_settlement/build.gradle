@@ -1,0 +1,40 @@
+plugins {
+    id 'java'
+}
+
+group = 'io.fabricops.samples'
+version = '0.1.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+dependencies {
+    implementation 'org.hyperledger.fabric-chaincode-java:fabric-chaincode-shim:2.5.0'
+    implementation 'org.json:json:20220320'
+}
+
+tasks.register('shadowJar', Jar) {
+    archiveFileName.set('chaincode.jar')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from sourceSets.main.output
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
+
+    manifest {
+        attributes 'Main-Class': 'org.hyperledger.fabric.contract.ContractRouter'
+    }
+}
+
+tasks.named('build') {
+    dependsOn 'shadowJar'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += ['-parameters']
+}
