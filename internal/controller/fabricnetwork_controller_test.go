@@ -844,6 +844,83 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(channels.Message).To(Equal("settlement: Waiting for Fabric components before channel bootstrap"))
 		})
 
+		It("should generate CCaaS package metadata for declared chaincodes", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Channels = []fabricopsv1alpha1.Channel{
+				{
+					Name: "settlement",
+					Orgs: []fabricopsv1alpha1.ChannelOrg{
+						{
+							Name:  "BankA",
+							Peers: []string{"peer0"},
+						},
+					},
+				},
+			}
+			network.Spec.Chaincodes = []fabricopsv1alpha1.Chaincode{
+				{
+					Name:     "settlement",
+					Version:  "0.0.1",
+					Channel:  "settlement",
+					Image:    "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0",
+					Sequence: 1,
+					CCAAS: &fabricopsv1alpha1.ChaincodeAsAService{
+						ServicePort: 7052,
+						DialTimeout: "10s",
+					},
+				},
+			}
+			Expect(k8sClient.Update(ctx, &network)).To(Succeed())
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var packageConfig corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: "fo-test-banka",
+				Name:      "settlement-settlement-banka-peer0-package",
+			}, &packageConfig)).To(Succeed())
+			Expect(packageConfig.Labels[labelAppComponent]).To(Equal(componentChaincode))
+			Expect(packageConfig.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(packageConfig.Labels[labelChaincode]).To(Equal("settlement"))
+			Expect(packageConfig.Data[chaincodePackageLabelKey]).To(Equal("settlement_settlement_0.0.1"))
+			Expect(packageConfig.Data[chaincodePackageFileKey]).To(Equal("settlement_settlement_0.0.1.tar.gz"))
+			Expect(packageConfig.Data[chaincodeConnectionAddrKey]).To(Equal("settlement-settlement-banka-peer0-ccaas.fo-test-banka.svc.cluster.local:7052"))
+			Expect(packageConfig.Data[chaincodeMetadataKey]).To(ContainSubstring(`"type": "ccaas"`))
+			Expect(packageConfig.Data[chaincodeMetadataKey]).To(ContainSubstring(`"label": "settlement_settlement_0.0.1"`))
+			Expect(packageConfig.Data[chaincodeConnectionKey]).To(ContainSubstring(`"address": "settlement-settlement-banka-peer0-ccaas.fo-test-banka.svc.cluster.local:7052"`))
+			Expect(packageConfig.Data[chaincodeConnectionKey]).To(ContainSubstring(`"dial_timeout": "10s"`))
+			Expect(packageConfig.Data[chaincodeConnectionKey]).To(ContainSubstring(`"tls_required": false`))
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.ChaincodeStatus).To(HaveLen(1))
+			chaincode := network.Status.ChaincodeStatus[0]
+			Expect(chaincode.Name).To(Equal("settlement"))
+			Expect(chaincode.Channel).To(Equal("settlement"))
+			Expect(chaincode.Version).To(Equal("0.0.1"))
+			Expect(chaincode.PackageLabel).To(Equal("settlement_settlement_0.0.1"))
+			Expect(chaincode.Sequence).To(Equal(int32(1)))
+			Expect(chaincode.PackageMetadata.Desired).To(Equal(int32(1)))
+			Expect(chaincode.PackageMetadata.Ready).To(Equal(int32(1)))
+			Expect(chaincode.PackageMetadataReady).To(BeTrue())
+			Expect(chaincode.Message).To(Equal("Package metadata generated; waiting for channel bootstrap before lifecycle install"))
+			Expect(chaincode.Targets).To(HaveLen(1))
+			Expect(chaincode.Targets[0].OrgName).To(Equal("BankA"))
+			Expect(chaincode.Targets[0].Namespace).To(Equal("fo-test-banka"))
+			Expect(chaincode.Targets[0].PeerName).To(Equal("peer0"))
+			Expect(chaincode.Targets[0].ServiceName).To(Equal("settlement-settlement-banka-peer0-ccaas"))
+			Expect(chaincode.Targets[0].PackageConfigMapName).To(Equal("settlement-settlement-banka-peer0-package"))
+			Expect(chaincode.Targets[0].PackageMetadataReady).To(BeTrue())
+		})
+
 		It("should generate channel config and a channel block Job after components are ready", func() {
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())

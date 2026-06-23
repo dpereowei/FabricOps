@@ -48,6 +48,7 @@ const (
 	labelIdentitySource         = "fabricops.my.domain/identity-source"
 	labelWorkload               = "fabricops.my.domain/workload"
 	labelChannel                = "fabricops.my.domain/channel"
+	labelChaincode              = "fabricops.my.domain/chaincode"
 
 	labelAppName      = "app.kubernetes.io/name"
 	labelAppManagedBy = "app.kubernetes.io/managed-by"
@@ -65,12 +66,13 @@ const (
 	controllerName  = "fabricops-controller"
 	resourceProfile = "resource-profile"
 
-	componentCA      = "ca"
-	componentAdmin   = "admin"
-	componentChannel = "channel"
-	componentOrderer = "orderer"
-	componentPeer    = "peer"
-	componentKubectl = "kubectl"
+	componentCA        = "ca"
+	componentAdmin     = "admin"
+	componentChannel   = "channel"
+	componentChaincode = "chaincode"
+	componentOrderer   = "orderer"
+	componentPeer      = "peer"
+	componentKubectl   = "kubectl"
 
 	containerCA      = "fabric-ca"
 	containerOrderer = "orderer"

@@ -52,3 +52,10 @@ spec:
       version: "0.0.1"
       channel: settlement
       image: settlement-engine:latest
+      sequence: 1
+      ccaas:
+        replicas: 1
+        containerPort: 7052
+        servicePort: 7052
+        dialTimeout: 10s
+        imagePullPolicy: IfNotPresent

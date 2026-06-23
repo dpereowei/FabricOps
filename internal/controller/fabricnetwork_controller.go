@@ -366,12 +366,14 @@ func (r *FabricNetworkReconciler) updateStatus(
 	newMessage string,
 	orgStatus []fabricopsv1alpha1.OrgStatus,
 	channelStatus []fabricopsv1alpha1.ChannelStatus,
+	chaincodeStatus []fabricopsv1alpha1.ChaincodeStatus,
 	conditions []metav1.Condition,
 ) error {
 	if net.Status.Phase == newPhase &&
 		net.Status.Message == newMessage &&
 		orgStatusesEqual(net.Status.OrgStatus, orgStatus) &&
 		channelStatusesEqual(net.Status.ChannelStatus, channelStatus) &&
+		chaincodeStatusesEqual(net.Status.ChaincodeStatus, chaincodeStatus) &&
 		reflect.DeepEqual(net.Status.Conditions, conditions) {
 		return nil
 	}
@@ -381,6 +383,7 @@ func (r *FabricNetworkReconciler) updateStatus(
 	base.Status.Message = newMessage
 	base.Status.OrgStatus = orgStatus
 	base.Status.ChannelStatus = channelStatus
+	base.Status.ChaincodeStatus = chaincodeStatus
 	base.Status.Conditions = conditions
 
 	log := logf.FromContext(ctx)
@@ -458,6 +461,7 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			"Failed to reconcile orgs: "+err.Error(),
 			orgStatuses,
 			nil,
+			nil,
 			channelsReadyCondition(
 				&network,
 				identityMaterialCondition(
@@ -487,6 +491,7 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			"Failed to reconcile channels: "+err.Error(),
 			orgStatuses,
 			channelStatuses,
+			nil,
 			channelsReadyCondition(
 				&network,
 				identityMaterialCondition(
@@ -505,14 +510,6 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	identityReady := identityMaterialReady(orgStatuses)
-	identityStatus := metav1.ConditionFalse
-	identityReason := "IdentityMaterialMissing"
-	if identityReady {
-		identityStatus = metav1.ConditionTrue
-		identityReason = "IdentityMaterialPresent"
-	}
-	identityMessage := identityMaterialMessage(orgStatuses)
 	channelsReady := allChannelsReady(channelStatuses)
 	channelsStatus := metav1.ConditionFalse
 	channelsReason := "ChannelBootstrapPending"
@@ -524,6 +521,45 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		channelsStatus = metav1.ConditionTrue
 		channelsReason = "ChannelsReady"
 	}
+
+	chaincodeStatuses, err := r.reconcileChaincodes(ctx, &network, channelStatuses)
+	if err != nil {
+		log.Error(err, "Failed to reconcile chaincodes")
+
+		_ = r.updateStatus(
+			ctx,
+			&network,
+			fabricopsv1alpha1.PhaseFailed,
+			"Failed to reconcile chaincodes: "+err.Error(),
+			orgStatuses,
+			channelStatuses,
+			chaincodeStatuses,
+			channelsReadyCondition(
+				&network,
+				identityMaterialCondition(
+					&network,
+					readyCondition(&network, metav1.ConditionFalse, "ReconcileError", "Failed to reconcile chaincodes: "+err.Error()),
+					metav1.ConditionUnknown,
+					"ReconcileError",
+					"Failed to check identity material: "+err.Error(),
+				),
+				channelsStatus,
+				channelsReason,
+				channelsMessage,
+			),
+		)
+
+		return ctrl.Result{}, err
+	}
+
+	identityReady := identityMaterialReady(orgStatuses)
+	identityStatus := metav1.ConditionFalse
+	identityReason := "IdentityMaterialMissing"
+	if identityReady {
+		identityStatus = metav1.ConditionTrue
+		identityReason = "IdentityMaterialPresent"
+	}
+	identityMessage := identityMaterialMessage(orgStatuses)
 
 	if allOrgsReady(orgStatuses) && channelsReady {
 		readyReason := "ComponentsReady"
@@ -539,6 +575,7 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			readyMessage,
 			orgStatuses,
 			channelStatuses,
+			chaincodeStatuses,
 			channelsReadyCondition(
 				&network,
 				identityMaterialCondition(
@@ -576,6 +613,7 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		readyMessage,
 		orgStatuses,
 		channelStatuses,
+		chaincodeStatuses,
 		channelsReadyCondition(
 			&network,
 			identityMaterialCondition(
