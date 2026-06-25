@@ -673,6 +673,8 @@ var _ = Describe("FabricNetwork Controller", func() {
 			caDeploy.Spec.Strategy.Type = appsv1.RollingUpdateDeploymentStrategyType
 			caDeploy.Spec.Template.Annotations = map[string]string{}
 			caDeploy.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{}
+			caDeploy.Spec.Template.Spec.Containers[0].ReadinessProbe = nil
+			caDeploy.Spec.Template.Spec.Containers[0].LivenessProbe = nil
 			Expect(k8sClient.Update(ctx, &caDeploy)).To(Succeed())
 
 			var caSvc corev1.Service
@@ -748,7 +750,11 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(caDeploy.Annotations[annotationOrg]).To(Equal("BankA"))
 			Expect(caDeploy.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
 			Expect(caDeploy.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
-			expectContainerResources(caDeploy.Spec.Template.Spec.Containers[0], defaultCARequestCPU, defaultCARequestMemory, defaultCALimitCPU, defaultCALimitMemory)
+			caContainer := caDeploy.Spec.Template.Spec.Containers[0]
+			expectTCPProbe(caContainer.ReadinessProbe, caPort)
+			expectTCPProbe(caContainer.LivenessProbe, caPort)
+			expectContainerResources(caContainer, defaultCARequestCPU, defaultCARequestMemory, defaultCALimitCPU, defaultCALimitMemory)
+			repairedCAGeneration := caDeploy.Generation
 
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Namespace: bankNamespace,
@@ -797,6 +803,17 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Name:      enrollmentName,
 				Namespace: bankNamespace,
 			}))
+
+			By("Reconciling again after drift repair")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "banka-ca",
+			}, &caDeploy)).To(Succeed())
+			Expect(caDeploy.Generation).To(Equal(repairedCAGeneration))
 		})
 
 		It("should refuse to update generated resources owned by another FabricNetwork", func() {

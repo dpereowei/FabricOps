@@ -806,6 +806,7 @@ func tcpSocketProbe(
 		InitialDelaySeconds: initialDelaySeconds,
 		PeriodSeconds:       periodSeconds,
 		TimeoutSeconds:      timeoutSeconds,
+		SuccessThreshold:    1,
 		FailureThreshold:    failureThreshold,
 	}
 }
@@ -835,6 +836,7 @@ func operationsHealthProbe(
 		InitialDelaySeconds: initialDelaySeconds,
 		PeriodSeconds:       periodSeconds,
 		TimeoutSeconds:      timeoutSeconds,
+		SuccessThreshold:    1,
 		FailureThreshold:    failureThreshold,
 	}
 }
@@ -1012,6 +1014,14 @@ func syncManagedContainers(existing []corev1.Container, desired []corev1.Contain
 		}
 		if !reflect.DeepEqual(containers[i].Ports, desired[i].Ports) {
 			containers[i].Ports = desired[i].Ports
+			changed = true
+		}
+		if !reflect.DeepEqual(containers[i].ReadinessProbe, desired[i].ReadinessProbe) {
+			containers[i].ReadinessProbe = desired[i].ReadinessProbe
+			changed = true
+		}
+		if !reflect.DeepEqual(containers[i].LivenessProbe, desired[i].LivenessProbe) {
+			containers[i].LivenessProbe = desired[i].LivenessProbe
 			changed = true
 		}
 		if !reflect.DeepEqual(containers[i].VolumeMounts, desired[i].VolumeMounts) {

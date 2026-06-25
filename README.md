@@ -71,6 +71,32 @@ kubectl get pods -n fo-sample-orderer
 kubectl get pods -n fo-sample-banka
 ```
 
+## In-Cluster Install
+
+Build the manager image, render the install bundle, deploy the operator, and apply the sample network:
+
+```bash
+make docker-build IMG=controller:latest
+make build-installer IMG=controller:latest
+kubectl apply -f dist/install.yaml
+kubectl apply -k config/samples
+```
+
+The generated manager Deployment uses `imagePullPolicy: IfNotPresent` so local development clusters such as OrbStack can use the locally built `controller:latest` image. For kind, load the image into the target cluster before applying the bundle:
+
+```bash
+kind load docker-image controller:latest --name <cluster-name>
+```
+
+Inspect the installed manager and sample:
+
+```bash
+kubectl get deploy -n fabricops-system fabricops-controller-manager
+kubectl get fabricnetwork fabricnetwork-sample -n default
+kubectl get pods -n fo-sample-orderer
+kubectl get pods -n fo-sample-banka
+```
+
 ## Identity Secrets
 
 FabricOps uses Fabric CA enrollment as the identity material path. The deterministic Secret contract is:
