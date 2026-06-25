@@ -26,6 +26,7 @@ import (
 type FabricNetworkSpec struct {
 	Global GlobalConfig `json:"global"`
 
+	// +kubebuilder:validation:MinItems=1
 	Orgs []Org `json:"orgs"`
 
 	Channels []Channel `json:"channels"`
@@ -34,10 +35,17 @@ type FabricNetworkSpec struct {
 }
 
 type GlobalConfig struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9][A-Za-z0-9._-]*$"
 	FabricVersion string `json:"fabricVersion"`
 	TLS           bool   `json:"tls"`
 	// +optional
 	Storage *StorageConfig `json:"storage,omitempty"`
+	// +optional
+	Observability *ObservabilityConfig `json:"observability,omitempty"`
+	// +optional
+	NetworkPolicy *NetworkPolicyConfig `json:"networkPolicy,omitempty"`
 }
 
 type StorageConfig struct {
@@ -52,6 +60,9 @@ type StorageConfig struct {
 type ComponentStorageConfig struct {
 	// Size is the persistent volume request for each component instance.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern="^[0-9]+(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$"
 	Size string `json:"size,omitempty"`
 	// StorageClassName selects the Kubernetes StorageClass for component PVCs.
 	// Omit this field to use the cluster default StorageClass. Set it to an
@@ -59,6 +70,44 @@ type ComponentStorageConfig struct {
 	// pre-bound persistent volumes.
 	// +optional
 	StorageClassName *string `json:"storageClassName,omitempty"`
+}
+
+type ObservabilityConfig struct {
+	// ServiceMonitor controls optional Prometheus Operator ServiceMonitor
+	// output for Fabric operations endpoint Services.
+	// +optional
+	ServiceMonitor *ServiceMonitorConfig `json:"serviceMonitor,omitempty"`
+}
+
+type ServiceMonitorConfig struct {
+	// Enabled creates one ServiceMonitor per generated org namespace. The
+	// monitoring.coreos.com/v1 ServiceMonitor CRD must already exist.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// Interval configures how often Prometheus scrapes Fabric operations
+	// endpoints.
+	// +optional
+	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:Pattern="^([0-9]+(ms|s|m|h))+$"
+	Interval string `json:"interval,omitempty"`
+	// ScrapeTimeout configures the Prometheus scrape timeout.
+	// +optional
+	// +kubebuilder:default="10s"
+	// +kubebuilder:validation:Pattern="^([0-9]+(ms|s|m|h))+$"
+	ScrapeTimeout string `json:"scrapeTimeout,omitempty"`
+	// Labels adds metadata labels to generated ServiceMonitors. Use this for
+	// Prometheus release selectors such as release=<name>.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+}
+
+type NetworkPolicyConfig struct {
+	// Enabled creates org boundary NetworkPolicies for FabricOps-managed pods.
+	// The cluster CNI must support Kubernetes NetworkPolicy enforcement.
+	// +optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 type Org struct {
@@ -69,44 +118,93 @@ type Org struct {
 }
 
 type OrgMeta struct {
-	Name    string `json:"name"`
-	Domain  string `json:"domain"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$"
+	Name string `json:"name"`
+	// +kubebuilder:validation:MinLength=3
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern="^([a-z0-9]([-a-z0-9]*[a-z0-9])?\\.)+[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+	Domain string `json:"domain"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern="^[A-Za-z][A-Za-z0-9]*$"
 	MSPName string `json:"mspName"`
 }
 
 type CAConfig struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9_-]+$"
 	DB string `json:"db"`
 }
 
 type OrdererGroup struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$"
 	GroupName string `json:"groupName"`
-	Type      string `json:"type"`
-	Instances int    `json:"instances"`
-	Prefix    string `json:"prefix"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9_-]+$"
+	Type string `json:"type"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=50
+	Instances int `json:"instances"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=50
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+	Prefix string `json:"prefix"`
 }
 
 type PeerConfig struct {
-	Instances int    `json:"instances"`
-	DB        string `json:"db"`
-	Prefix    string `json:"prefix"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=50
+	Instances int `json:"instances"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9_-]+$"
+	DB string `json:"db"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=50
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+	Prefix string `json:"prefix"`
 }
 
 type Channel struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=249
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
 	Name string `json:"name"`
 
+	// +kubebuilder:validation:MinItems=1
 	Orgs []ChannelOrg `json:"orgs"`
 }
 
 type ChannelOrg struct {
-	Name  string   `json:"name"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$"
+	Name string `json:"name"`
+	// +kubebuilder:validation:MinItems=1
 	Peers []string `json:"peers"`
 }
 
 type Chaincode struct {
-	Name    string `json:"name"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$"
+	Name string `json:"name"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
 	Version string `json:"version"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=249
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
 	Channel string `json:"channel"`
-	Image   string `json:"image"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	Image string `json:"image"`
 	// Sequence is the Fabric lifecycle definition sequence to use when
 	// approving and committing the chaincode.
 	// +optional
@@ -116,10 +214,14 @@ type Chaincode struct {
 	// PackageLabel overrides the default lifecycle package label. When empty,
 	// the operator uses <channel>_<name>_<version>.
 	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$"
 	PackageLabel string `json:"packageLabel,omitempty"`
 	// EndorsementPolicy is passed as a Fabric signature policy during approve
 	// and commit. When empty, the operator will derive a channel-org policy.
 	// +optional
+	// +kubebuilder:validation:MaxLength=512
 	EndorsementPolicy string `json:"endorsementPolicy,omitempty"`
 	// InitRequired controls the Fabric lifecycle --init-required flag.
 	// +optional
@@ -151,6 +253,7 @@ type ChaincodeAsAService struct {
 	// DialTimeout is written into Fabric CCaaS connection.json.
 	// +optional
 	// +kubebuilder:default="10s"
+	// +kubebuilder:validation:Pattern="^([0-9]+(ms|s|m|h))+$"
 	DialTimeout string `json:"dialTimeout,omitempty"`
 	// ImagePullPolicy controls when Kubernetes pulls the chaincode image.
 	// +optional

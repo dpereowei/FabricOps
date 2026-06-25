@@ -58,6 +58,7 @@ spec:
                         dialTimeout:
                           default: 10s
                           description: DialTimeout is written into Fabric CCaaS connection.json.
+                          pattern: ^([0-9]+(ms|s|m|h))+$
                           type: string
                         env:
                           description: Env adds extra environment variables to the
@@ -305,24 +306,36 @@ spec:
                           type: integer
                       type: object
                     channel:
+                      maxLength: 249
+                      minLength: 1
+                      pattern: ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$
                       type: string
                     endorsementPolicy:
                       description: |-
                         EndorsementPolicy is passed as a Fabric signature policy during approve
                         and commit. When empty, the operator will derive a channel-org policy.
+                      maxLength: 512
                       type: string
                     image:
+                      maxLength: 512
+                      minLength: 1
                       type: string
                     initRequired:
                       description: InitRequired controls the Fabric lifecycle --init-required
                         flag.
                       type: boolean
                     name:
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$
                       type: string
                     packageLabel:
                       description: |-
                         PackageLabel overrides the default lifecycle package label. When empty,
                         the operator uses <channel>_<name>_<version>.
+                      maxLength: 128
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$
                       type: string
                     sequence:
                       default: 1
@@ -333,6 +346,8 @@ spec:
                       minimum: 1
                       type: integer
                     version:
+                      maxLength: 128
+                      minLength: 1
                       type: string
                   required:
                   - channel
@@ -345,20 +360,28 @@ spec:
                 items:
                   properties:
                     name:
+                      maxLength: 249
+                      minLength: 1
+                      pattern: ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$
                       type: string
                     orgs:
                       items:
                         properties:
                           name:
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$
                             type: string
                           peers:
                             items:
                               type: string
+                            minItems: 1
                             type: array
                         required:
                         - name
                         - peers
                         type: object
+                      minItems: 1
                       type: array
                   required:
                   - name
@@ -368,7 +391,54 @@ spec:
               global:
                 properties:
                   fabricVersion:
+                    maxLength: 64
+                    minLength: 1
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
                     type: string
+                  networkPolicy:
+                    properties:
+                      enabled:
+                        default: false
+                        description: |-
+                          Enabled creates org boundary NetworkPolicies for FabricOps-managed pods.
+                          The cluster CNI must support Kubernetes NetworkPolicy enforcement.
+                        type: boolean
+                    type: object
+                  observability:
+                    properties:
+                      serviceMonitor:
+                        description: |-
+                          ServiceMonitor controls optional Prometheus Operator ServiceMonitor
+                          output for Fabric operations endpoint Services.
+                        properties:
+                          enabled:
+                            default: false
+                            description: |-
+                              Enabled creates one ServiceMonitor per generated org namespace. The
+                              monitoring.coreos.com/v1 ServiceMonitor CRD must already exist.
+                            type: boolean
+                          interval:
+                            default: 30s
+                            description: |-
+                              Interval configures how often Prometheus scrapes Fabric operations
+                              endpoints.
+                            pattern: ^([0-9]+(ms|s|m|h))+$
+                            type: string
+                          labels:
+                            additionalProperties:
+                              type: string
+                            description: |-
+                              Labels adds metadata labels to generated ServiceMonitors. Use this for
+                              Prometheus release selectors such as release=<name>.
+                            type: object
+                          scrapeTimeout:
+                            default: 10s
+                            description: ScrapeTimeout configures the Prometheus scrape
+                              timeout.
+                            pattern: ^([0-9]+(ms|s|m|h))+$
+                            type: string
+                        type: object
+                    type: object
                   storage:
                     properties:
                       ca:
@@ -376,6 +446,9 @@ spec:
                           size:
                             description: Size is the persistent volume request for
                               each component instance.
+                            maxLength: 32
+                            minLength: 1
+                            pattern: ^[0-9]+(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$
                             type: string
                           storageClassName:
                             description: |-
@@ -390,6 +463,9 @@ spec:
                           size:
                             description: Size is the persistent volume request for
                               each component instance.
+                            maxLength: 32
+                            minLength: 1
+                            pattern: ^[0-9]+(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$
                             type: string
                           storageClassName:
                             description: |-
@@ -404,6 +480,9 @@ spec:
                           size:
                             description: Size is the persistent volume request for
                               each component instance.
+                            maxLength: 32
+                            minLength: 1
+                            pattern: ^[0-9]+(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$
                             type: string
                           storageClassName:
                             description: |-
@@ -426,6 +505,9 @@ spec:
                     ca:
                       properties:
                         db:
+                          maxLength: 32
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9_-]+$
                           type: string
                       required:
                       - db
@@ -434,12 +516,23 @@ spec:
                       items:
                         properties:
                           groupName:
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$
                             type: string
                           instances:
+                            maximum: 50
+                            minimum: 1
                             type: integer
                           prefix:
+                            maxLength: 50
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                             type: string
                           type:
+                            maxLength: 32
+                            minLength: 1
+                            pattern: ^[A-Za-z0-9_-]+$
                             type: string
                         required:
                         - groupName
@@ -451,10 +544,19 @@ spec:
                     organization:
                       properties:
                         domain:
+                          maxLength: 253
+                          minLength: 3
+                          pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?\.)+[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         mspName:
+                          maxLength: 64
+                          minLength: 1
+                          pattern: ^[A-Za-z][A-Za-z0-9]*$
                           type: string
                         name:
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$
                           type: string
                       required:
                       - domain
@@ -464,10 +566,18 @@ spec:
                     peer:
                       properties:
                         db:
+                          maxLength: 32
+                          minLength: 1
+                          pattern: ^[A-Za-z0-9_-]+$
                           type: string
                         instances:
+                          maximum: 50
+                          minimum: 1
                           type: integer
                         prefix:
+                          maxLength: 50
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                       required:
                       - db
@@ -478,6 +588,7 @@ spec:
                   - ca
                   - organization
                   type: object
+                minItems: 1
                 type: array
             required:
             - chaincodes

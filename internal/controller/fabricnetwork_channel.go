@@ -645,25 +645,28 @@ func (r *FabricNetworkReconciler) ensureReplicatedSecret(ctx context.Context, de
 		return err
 	}
 
-	changed := mergeLabels(&existing.Labels, desired.Labels)
-	if mergeAnnotations(&existing.Annotations, desired.Annotations) {
-		changed = true
-	}
-	if existing.Type != desired.Type {
-		existing.Type = desired.Type
-		changed = true
-	}
-	if !reflect.DeepEqual(existing.Data, desired.Data) {
-		existing.Data = desired.Data
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
+	return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+		existing := object.(*corev1.Secret)
+		changed := mergeLabels(&existing.Labels, desired.Labels)
+		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+			changed = true
+		}
+		if existing.Type != desired.Type {
+			existing.Type = desired.Type
+			changed = true
+		}
+		if !reflect.DeepEqual(existing.Data, desired.Data) {
+			existing.Data = desired.Data
+			changed = true
+		}
+		if !changed {
+			return false, nil
+		}
 
-	log := logf.FromContext(ctx)
-	log.Info("Updating Secret", "name", desired.Name, "namespace", desired.Namespace)
-	return r.Update(ctx, &existing)
+		log := logf.FromContext(ctx)
+		log.Info("Updating Secret", "name", desired.Name, "namespace", desired.Namespace)
+		return true, nil
+	})
 }
 
 func copySecretData(data map[string][]byte) map[string][]byte {
@@ -1350,25 +1353,28 @@ func (r *FabricNetworkReconciler) ensureConfigMap(ctx context.Context, desired *
 		return err
 	}
 
-	changed := mergeLabels(&existing.Labels, desired.Labels)
-	if mergeAnnotations(&existing.Annotations, desired.Annotations) {
-		changed = true
-	}
-	if !reflect.DeepEqual(existing.Data, desired.Data) {
-		existing.Data = desired.Data
-		changed = true
-	}
-	if !reflect.DeepEqual(existing.BinaryData, desired.BinaryData) {
-		existing.BinaryData = desired.BinaryData
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
+	return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+		existing := object.(*corev1.ConfigMap)
+		changed := mergeLabels(&existing.Labels, desired.Labels)
+		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+			changed = true
+		}
+		if !reflect.DeepEqual(existing.Data, desired.Data) {
+			existing.Data = desired.Data
+			changed = true
+		}
+		if !reflect.DeepEqual(existing.BinaryData, desired.BinaryData) {
+			existing.BinaryData = desired.BinaryData
+			changed = true
+		}
+		if !changed {
+			return false, nil
+		}
 
-	log := logf.FromContext(ctx)
-	log.Info("Updating ConfigMap", "name", desired.Name, "namespace", desired.Namespace)
-	return r.Update(ctx, &existing)
+		log := logf.FromContext(ctx)
+		log.Info("Updating ConfigMap", "name", desired.Name, "namespace", desired.Namespace)
+		return true, nil
+	})
 }
 
 func buildConfigtxYAML(net *fabricopsv1alpha1.FabricNetwork, channel fabricopsv1alpha1.Channel) (string, error) {

@@ -1,26 +1,40 @@
-## FabricOps
+[![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/13370/badge)](https://bestpractices.coreinfrastructure.org/projects/13370) [![Go Report Card](https://goreportcard.com/badge/github.com/dpereowei/fabricops)](https://goreportcard.com/report/github.com/dpereowei/fabricops) ![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/dpereowei/fabricops?sort=semver)
+
+<h1><img src="./logo.png" alt="FabricOps"/></h1>
 
 FabricOps is a Kubernetes operator for provisioning multi-organization Hyperledger Fabric networks from declarative configuration.
 
 The long-term goal is automated Fabric infrastructure on Kubernetes: Terraform for cluster/cloud infrastructure, a custom operator for Fabric CAs, orderers, peers, channels, and Chaincode-as-a-Service, plus TLS certificate lifecycle management and Prometheus-based health visibility.
 
-### Requirements
+## Requirements
 
 - Go >= 1.23
 - Kubebuilder >= 4.15.0
 - Kubernetes cluster, such as OrbStack, kind, minikube, or EKS
+- Hyperledger Fabric >= 2.5
 
-### Current Status
+## Capabilities
 
-The project is in an early operator milestone. Today it can:
+FabricOps supports:
 
-- Define a `FabricNetwork` CRD at `fabricops.my.domain/v1alpha1`
-- Reconcile a `FabricNetwork` with `global`, `orgs`, `channels`, and `chaincodes` config
-- Create one Kubernetes namespace per Fabric org
-- Create Fabric CA, orderer, and peer Deployments and Services
-- Report per-org namespace and CA readiness in `.status.orgStatus`
+- A namespaced `FabricNetwork` CRD at `fabricops.my.domain/v1alpha1`
+- Per-org Kubernetes namespaces with compact network-scoped names
+- Fabric CA, orderer, peer, and CCaaS chaincode workloads
+- Fabric CA registrar bootstrap, admin enrollment, and workload enrollment Secrets
+- Fabric CA-backed MSP/TLS material for admins, orderers, and peers
+- Persistent storage and resource defaults for Fabric workloads
+- Declarative channel config generation, channel block generation, orderer joins, peer joins, and anchor peer updates
+- CCaaS package metadata generation, install, approve, commit, and chaincode server workloads
+- Kubernetes status conditions for component, identity, channel, chaincode, and observability readiness
+- Fabric peer/orderer operations endpoints and optional Prometheus Operator `ServiceMonitor` resources
+- Optional org-boundary NetworkPolicies for FabricOps-managed pods
+- Finalizer-based cleanup for generated org namespaces
 
-Org namespaces use a compact network-scoped convention:
+See [SUPPORTED_FEATURES.md](SUPPORTED_FEATURES.md) for the detailed compatibility matrix.
+
+## Namespace Layout
+
+Org namespaces use this convention:
 
 ```text
 fo-<network>-<org>
@@ -39,9 +53,9 @@ If the `FabricNetwork` lives outside the `default` namespace, the control namesp
 fo-<control-namespace>-<network>-<org>
 ```
 
-### Smoke Test
+## Local Development
 
-Against an OrbStack Kubernetes cluster, the current sample was installed and reconciled with:
+Install the CRD, run the controller locally, and apply the sample network:
 
 ```bash
 make install
@@ -49,18 +63,86 @@ make run
 kubectl apply -k config/samples
 ```
 
-The operator successfully created separate org namespaces and placed each org's resources in its own namespace. The Fabric CA pods became healthy.
+In another terminal, inspect the reconciled network:
 
-Known limitation: `.status.phase=Ready` currently means all org CAs are ready, not that orderers and peers are ready. The sample orderer and peer pods are expected to fail at this stage because real Fabric TLS/MSP material and peer/orderer runtime configuration are not implemented yet.
+```bash
+kubectl get fabricnetwork fabricnetwork-sample -n default
+kubectl get pods -n fo-sample-orderer
+kubectl get pods -n fo-sample-banka
+```
 
-Observed gaps from the smoke test:
+## Identity Secrets
 
-- Orderers require TLS for the current ordering-node configuration
-- Peers need Kubernetes-safe chaincode listen/address configuration
-- Network readiness must include orderer and peer readiness, not just CA readiness
-- MSP/TLS secret generation and mounting is the next major milestone
+FabricOps uses Fabric CA enrollment as the identity material path. The deterministic Secret contract is:
 
-### Example Resource
+```text
+<org>-ca-bootstrap: username, password, user-pass
+<org>-admin-enrollment: username, password, user-pass
+<workload>-enrollment: username, password, user-pass
+<workload>-msp: config.yaml, cacert.pem, tlscacert.pem, signcert.pem, keystore.pem
+<workload>-tls: ca.crt, server.crt, server.key
+<org>-admin-msp: config.yaml, cacert.pem, tlscacert.pem, signcert.pem, keystore.pem
+<org>-admin-tls: ca.crt, client.crt, client.key
+```
+
+Fabric CA pods receive `<org>-ca-bootstrap/user-pass` through `FABRIC_CA_SERVER_BOOTSTRAP_USER_PASS`. Admin enrollment Jobs use `<org>-admin-enrollment` to register and enroll the org admin identity, then publish enrolled MSP/TLS material to `<org>-admin-msp` and `<org>-admin-tls`. Workload enrollment Jobs use `<workload>-enrollment` to register and enroll orderer and peer identities, then publish enrolled material to `<workload>-msp` and `<workload>-tls`.
+
+Orderers mount identity Secrets at `/var/hyperledger/orderer/msp` and `/var/hyperledger/orderer/tls`. Peers mount them at `/etc/hyperledger/fabric/peer/msp` and `/etc/hyperledger/fabric/peer/tls`.
+
+## Storage
+
+Persistent data is configured through `spec.global.storage.ca`, `spec.global.storage.orderer`, and `spec.global.storage.peer`. Each component accepts a `size` and optional `storageClassName`.
+
+Default sizes are:
+
+- CA: `1Gi`
+- Orderer: `5Gi`
+- Peer: `10Gi`
+
+CA pods mount persistent data at `/etc/hyperledger/fabric-ca-server`. Orderer and peer pods mount persistent data at `/var/hyperledger/production`.
+
+Fabric component instances run as singleton Deployments with `Recreate` rollout strategy and one PVC per instance.
+
+## Observability
+
+Peer and orderer workloads expose Fabric operations endpoints through separate `*-operations` Services. Prometheus metrics are enabled on those operations endpoints.
+
+Prometheus Operator `ServiceMonitor` output is opt-in:
+
+```yaml
+spec:
+  global:
+    observability:
+      serviceMonitor:
+        enabled: true
+        interval: 30s
+        scrapeTimeout: 10s
+        labels:
+          release: prometheus
+```
+
+The `monitoring.coreos.com/v1` ServiceMonitor CRD must already be installed before enabling ServiceMonitor output.
+
+## Network Policy
+
+Org-boundary NetworkPolicies are opt-in:
+
+```yaml
+spec:
+  global:
+    networkPolicy:
+      enabled: true
+```
+
+When enabled, FabricOps creates one `fabricops-org-boundary` NetworkPolicy per generated org namespace. The policy selects FabricOps-managed pods for that org, allows ingress and egress among pods in namespaces that belong to the same `FabricNetwork`, and keeps DNS plus Kubernetes API egress open for helper Jobs. When disabled, FabricOps removes its owned `fabricops-org-boundary` policies and leaves unowned same-name policies untouched.
+
+Your cluster CNI must support Kubernetes NetworkPolicy enforcement. If Prometheus or other operational tools run outside the generated Fabric namespaces, add a separate allow policy for those clients.
+
+## Cleanup
+
+FabricOps adds a finalizer to each `FabricNetwork`. When a `FabricNetwork` is deleted, the controller deletes generated org namespaces after confirming their FabricOps ownership labels.
+
+## Example Resource
 
 ```yaml
 apiVersion: fabricops.my.domain/v1alpha1
@@ -71,6 +153,15 @@ spec:
   global:
     fabricVersion: "3.1.0"
     tls: true
+    networkPolicy:
+      enabled: false
+    storage:
+      ca:
+        size: 1Gi
+      orderer:
+        size: 5Gi
+      peer:
+        size: 10Gi
   orgs:
     - organization:
         name: Orderer
@@ -88,10 +179,10 @@ spec:
         domain: banka.example.com
         mspName: BankAMSP
       ca:
-        db: postgres
+        db: sqlite
       peer:
         instances: 2
-        db: CouchDb
+        db: LevelDB
         prefix: peer
   channels:
     - name: settlement
@@ -102,9 +193,20 @@ spec:
     - name: settlement
       version: "0.0.1"
       channel: settlement
-      image: settlement-engine:latest
+      image: ghcr.io/dpereowei/fabricops-node-settlement:0.1.0
+      sequence: 1
+      ccaas:
+        replicas: 1
+        containerPort: 7052
+        servicePort: 7052
+        dialTimeout: 10s
+        imagePullPolicy: IfNotPresent
 ```
 
-### References
+## References
 
-FabricOps will use [hyperledger-labs/fablo](https://github.com/hyperledger-labs/fablo) as an implementation reference for Fabric network bootstrapping behavior, especially around generated config, Docker Compose topology, CA enrollment flow, peer/orderer configuration, and CCaaS support.
+FabricOps uses [hyperledger-labs/fablo](https://github.com/hyperledger-labs/fablo) as an implementation reference for Fabric network bootstrapping behavior, especially around generated config, Docker Compose topology, CA enrollment flow, peer/orderer configuration, and CCaaS support.
+
+## License
+
+This project is licensed under the Apache License 2.0. See the LICENSE file for details.

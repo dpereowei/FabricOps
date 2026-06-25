@@ -778,17 +778,20 @@ func (r *FabricNetworkReconciler) ensureServiceAccount(ctx context.Context, desi
 		return err
 	}
 
-	changed := mergeLabels(&existing.Labels, desired.Labels)
-	if mergeAnnotations(&existing.Annotations, desired.Annotations) {
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
+	return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+		existing := object.(*corev1.ServiceAccount)
+		changed := mergeLabels(&existing.Labels, desired.Labels)
+		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+			changed = true
+		}
+		if !changed {
+			return false, nil
+		}
 
-	log := logf.FromContext(ctx)
-	log.Info("Updating ServiceAccount", "name", desired.Name, "namespace", desired.Namespace)
-	return r.Update(ctx, &existing)
+		log := logf.FromContext(ctx)
+		log.Info("Updating ServiceAccount", "name", desired.Name, "namespace", desired.Namespace)
+		return true, nil
+	})
 }
 
 func (r *FabricNetworkReconciler) ensureRole(ctx context.Context, desired *rbacv1.Role) error {
@@ -805,21 +808,24 @@ func (r *FabricNetworkReconciler) ensureRole(ctx context.Context, desired *rbacv
 		return err
 	}
 
-	changed := mergeLabels(&existing.Labels, desired.Labels)
-	if mergeAnnotations(&existing.Annotations, desired.Annotations) {
-		changed = true
-	}
-	if !reflect.DeepEqual(existing.Rules, desired.Rules) {
-		existing.Rules = desired.Rules
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
+	return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+		existing := object.(*rbacv1.Role)
+		changed := mergeLabels(&existing.Labels, desired.Labels)
+		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+			changed = true
+		}
+		if !reflect.DeepEqual(existing.Rules, desired.Rules) {
+			existing.Rules = desired.Rules
+			changed = true
+		}
+		if !changed {
+			return false, nil
+		}
 
-	log := logf.FromContext(ctx)
-	log.Info("Updating Role", "name", desired.Name, "namespace", desired.Namespace)
-	return r.Update(ctx, &existing)
+		log := logf.FromContext(ctx)
+		log.Info("Updating Role", "name", desired.Name, "namespace", desired.Namespace)
+		return true, nil
+	})
 }
 
 func (r *FabricNetworkReconciler) ensureRoleBinding(ctx context.Context, desired *rbacv1.RoleBinding) error {
@@ -836,25 +842,28 @@ func (r *FabricNetworkReconciler) ensureRoleBinding(ctx context.Context, desired
 		return err
 	}
 
-	changed := mergeLabels(&existing.Labels, desired.Labels)
-	if mergeAnnotations(&existing.Annotations, desired.Annotations) {
-		changed = true
-	}
-	if !reflect.DeepEqual(existing.Subjects, desired.Subjects) {
-		existing.Subjects = desired.Subjects
-		changed = true
-	}
-	if !reflect.DeepEqual(existing.RoleRef, desired.RoleRef) {
-		existing.RoleRef = desired.RoleRef
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
+	return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+		existing := object.(*rbacv1.RoleBinding)
+		changed := mergeLabels(&existing.Labels, desired.Labels)
+		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+			changed = true
+		}
+		if !reflect.DeepEqual(existing.Subjects, desired.Subjects) {
+			existing.Subjects = desired.Subjects
+			changed = true
+		}
+		if !reflect.DeepEqual(existing.RoleRef, desired.RoleRef) {
+			existing.RoleRef = desired.RoleRef
+			changed = true
+		}
+		if !changed {
+			return false, nil
+		}
 
-	log := logf.FromContext(ctx)
-	log.Info("Updating RoleBinding", "name", desired.Name, "namespace", desired.Namespace)
-	return r.Update(ctx, &existing)
+		log := logf.FromContext(ctx)
+		log.Info("Updating RoleBinding", "name", desired.Name, "namespace", desired.Namespace)
+		return true, nil
+	})
 }
 
 func (r *FabricNetworkReconciler) ensureJob(ctx context.Context, desired *batchv1.Job) error {
@@ -871,17 +880,20 @@ func (r *FabricNetworkReconciler) ensureJob(ctx context.Context, desired *batchv
 		return err
 	}
 
-	changed := mergeLabels(&existing.Labels, desired.Labels)
-	if mergeAnnotations(&existing.Annotations, desired.Annotations) {
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
+	return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+		existing := object.(*batchv1.Job)
+		changed := mergeLabels(&existing.Labels, desired.Labels)
+		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+			changed = true
+		}
+		if !changed {
+			return false, nil
+		}
 
-	log := logf.FromContext(ctx)
-	log.Info("Updating Job metadata", "name", desired.Name, "namespace", desired.Namespace)
-	return r.Update(ctx, &existing)
+		log := logf.FromContext(ctx)
+		log.Info("Updating Job metadata", "name", desired.Name, "namespace", desired.Namespace)
+		return true, nil
+	})
 }
 
 func mergeLabels(existing *map[string]string, desired map[string]string) bool {

@@ -25,9 +25,11 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -49,6 +51,7 @@ const (
 	labelWorkload               = "fabricops.my.domain/workload"
 	labelChannel                = "fabricops.my.domain/channel"
 	labelChaincode              = "fabricops.my.domain/chaincode"
+	labelEndpoint               = "fabricops.my.domain/endpoint"
 
 	labelAppName      = "app.kubernetes.io/name"
 	labelAppManagedBy = "app.kubernetes.io/managed-by"
@@ -70,9 +73,13 @@ const (
 	componentAdmin     = "admin"
 	componentChannel   = "channel"
 	componentChaincode = "chaincode"
+	componentMonitor   = "monitor"
+	componentNetwork   = "network"
 	componentOrderer   = "orderer"
 	componentPeer      = "peer"
 	componentKubectl   = "kubectl"
+
+	endpointOperations = "operations"
 
 	containerCA      = "fabric-ca"
 	containerOrderer = "orderer"
@@ -81,8 +88,10 @@ const (
 	caPort            int32 = 7054
 	ordererPort       int32 = 7050
 	ordererAdminPort  int32 = 9443
+	ordererOpsPort    int32 = 8443
 	peerPort          int32 = 7051
 	peerChaincodePort int32 = 7052
+	peerOpsPort       int32 = 9443
 
 	caBootstrapEnvVar = "FABRIC_CA_SERVER_BOOTSTRAP_USER_PASS"
 
@@ -114,6 +123,9 @@ const (
 	defaultKubectlRequestMem = "64Mi"
 	defaultKubectlLimitCPU   = "250m"
 	defaultKubectlLimitMem   = "128Mi"
+	defaultScrapeInterval    = "30s"
+	defaultScrapeTimeout     = "10s"
+	orgBoundaryPolicyName    = "fabricops-org-boundary"
 
 	secretKindMSP = "msp"
 	secretKindTLS = "tls"
@@ -635,6 +647,257 @@ func orgLabels(net *fabricopsv1alpha1.FabricNetwork, org fabricopsv1alpha1.Org, 
 	return labels
 }
 
+func operationsServiceName(workloadName string) string {
+	return sanitizeName(workloadName + "-operations")
+}
+
+func operationsServiceLabels(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	component string,
+	workloadName string,
+) map[string]string {
+	labels := orgLabels(net, org, component)
+	labels[labelEndpoint] = endpointOperations
+	labels[labelWorkload] = workloadName
+	labels[labelAppComponent] = component + "-operations"
+	return labels
+}
+
+func serviceMonitorEnabled(net *fabricopsv1alpha1.FabricNetwork) bool {
+	return net.Spec.Global.Observability != nil &&
+		net.Spec.Global.Observability.ServiceMonitor != nil &&
+		net.Spec.Global.Observability.ServiceMonitor.Enabled
+}
+
+func networkPolicyEnabled(net *fabricopsv1alpha1.FabricNetwork) bool {
+	return net.Spec.Global.NetworkPolicy != nil && net.Spec.Global.NetworkPolicy.Enabled
+}
+
+func serviceMonitorName(net *fabricopsv1alpha1.FabricNetwork, org fabricopsv1alpha1.Org) string {
+	return sanitizeName(networkNamespaceSlug(net) + "-" + org.Organization.Name + "-operations")
+}
+
+func serviceMonitorInterval(net *fabricopsv1alpha1.FabricNetwork) string {
+	if net.Spec.Global.Observability != nil &&
+		net.Spec.Global.Observability.ServiceMonitor != nil &&
+		net.Spec.Global.Observability.ServiceMonitor.Interval != "" {
+		return net.Spec.Global.Observability.ServiceMonitor.Interval
+	}
+
+	return defaultScrapeInterval
+}
+
+func serviceMonitorScrapeTimeout(net *fabricopsv1alpha1.FabricNetwork) string {
+	if net.Spec.Global.Observability != nil &&
+		net.Spec.Global.Observability.ServiceMonitor != nil &&
+		net.Spec.Global.Observability.ServiceMonitor.ScrapeTimeout != "" {
+		return net.Spec.Global.Observability.ServiceMonitor.ScrapeTimeout
+	}
+
+	return defaultScrapeTimeout
+}
+
+func serviceMonitorMetadataLabels(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+) map[string]string {
+	labels := map[string]string{}
+	if net.Spec.Global.Observability != nil &&
+		net.Spec.Global.Observability.ServiceMonitor != nil {
+		for key, value := range net.Spec.Global.Observability.ServiceMonitor.Labels {
+			labels[key] = value
+		}
+	}
+
+	return mergeMap(labels, orgLabels(net, org, componentMonitor))
+}
+
+func serviceMonitorSelectorLabels(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+) map[string]string {
+	return map[string]string{
+		labelFabricNetwork:          sanitizeName(net.Name),
+		labelFabricNetworkNamespace: sanitizeName(net.Namespace),
+		labelOrg:                    sanitizeName(org.Organization.Name),
+		labelEndpoint:               endpointOperations,
+	}
+}
+
+func orgBoundaryNetworkPolicyName() string {
+	return orgBoundaryPolicyName
+}
+
+func fabricNetworkNamespaceSelectorLabels(net *fabricopsv1alpha1.FabricNetwork) map[string]string {
+	return map[string]string{
+		labelFabricNetwork:          sanitizeName(net.Name),
+		labelFabricNetworkNamespace: sanitizeName(net.Namespace),
+		labelAppManagedBy:           managedByValue,
+	}
+}
+
+func fabricNetworkPodSelectorLabels(net *fabricopsv1alpha1.FabricNetwork) map[string]string {
+	return baseLabels(net)
+}
+
+func orgPodSelectorLabels(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+) map[string]string {
+	labels := fabricNetworkPodSelectorLabels(net)
+	labels[labelOrg] = sanitizeName(org.Organization.Name)
+	return labels
+}
+
+func sameFabricNetworkPeer(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+) networkingv1.NetworkPolicyPeer {
+	return networkingv1.NetworkPolicyPeer{
+		NamespaceSelector: &metav1.LabelSelector{
+			MatchLabels: fabricNetworkNamespaceSelectorLabels(net),
+		},
+		PodSelector: &metav1.LabelSelector{
+			MatchLabels: fabricNetworkPodSelectorLabels(net),
+		},
+	}
+}
+
+func kubeSystemNamespacePeer() networkingv1.NetworkPolicyPeer {
+	return networkingv1.NetworkPolicyPeer{
+		NamespaceSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				"kubernetes.io/metadata.name": "kube-system",
+			},
+		},
+	}
+}
+
+func networkPolicyPort(protocol corev1.Protocol, port int32) networkingv1.NetworkPolicyPort {
+	portValue := intstr.FromInt32(port)
+	return networkingv1.NetworkPolicyPort{
+		Protocol: &protocol,
+		Port:     &portValue,
+	}
+}
+
+func tcpReadinessProbe(port int32) *corev1.Probe {
+	return tcpSocketProbe(port, 5, 10, 2, 6)
+}
+
+func tcpLivenessProbe(port int32) *corev1.Probe {
+	return tcpSocketProbe(port, 30, 20, 2, 3)
+}
+
+func tcpSocketProbe(
+	port int32,
+	initialDelaySeconds int32,
+	periodSeconds int32,
+	timeoutSeconds int32,
+	failureThreshold int32,
+) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.FromInt32(port),
+			},
+		},
+		InitialDelaySeconds: initialDelaySeconds,
+		PeriodSeconds:       periodSeconds,
+		TimeoutSeconds:      timeoutSeconds,
+		FailureThreshold:    failureThreshold,
+	}
+}
+
+func operationsReadinessProbe() *corev1.Probe {
+	return operationsHealthProbe(5, 10, 2, 6)
+}
+
+func operationsLivenessProbe() *corev1.Probe {
+	return operationsHealthProbe(30, 20, 2, 3)
+}
+
+func operationsHealthProbe(
+	initialDelaySeconds int32,
+	periodSeconds int32,
+	timeoutSeconds int32,
+	failureThreshold int32,
+) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path:   "/healthz",
+				Port:   intstr.FromString(endpointOperations),
+				Scheme: corev1.URISchemeHTTP,
+			},
+		},
+		InitialDelaySeconds: initialDelaySeconds,
+		PeriodSeconds:       periodSeconds,
+		TimeoutSeconds:      timeoutSeconds,
+		FailureThreshold:    failureThreshold,
+	}
+}
+
+func buildOrgNetworkPolicy(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) *networkingv1.NetworkPolicy {
+	tcp := corev1.ProtocolTCP
+	udp := corev1.ProtocolUDP
+	sameNetworkPeer := sameFabricNetworkPeer(net, org)
+
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        orgBoundaryNetworkPolicyName(),
+			Namespace:   namespace,
+			Labels:      orgLabels(net, org, componentNetwork),
+			Annotations: resourceAnnotations(net, org),
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: orgPodSelectorLabels(net, org),
+			},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeIngress,
+				networkingv1.PolicyTypeEgress,
+			},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{
+				{
+					From: []networkingv1.NetworkPolicyPeer{sameNetworkPeer},
+				},
+			},
+			Egress: []networkingv1.NetworkPolicyEgressRule{
+				{
+					To: []networkingv1.NetworkPolicyPeer{sameNetworkPeer},
+				},
+				{
+					To: []networkingv1.NetworkPolicyPeer{kubeSystemNamespacePeer()},
+					Ports: []networkingv1.NetworkPolicyPort{
+						networkPolicyPort(udp, 53),
+						networkPolicyPort(tcp, 53),
+					},
+				},
+				{
+					Ports: []networkingv1.NetworkPolicyPort{
+						networkPolicyPort(tcp, 443),
+						networkPolicyPort(tcp, 6443),
+					},
+				},
+			},
+		},
+	}
+}
+
+func stringMapInterface(values map[string]string) map[string]interface{} {
+	out := map[string]interface{}{}
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
 func caImage() string {
 	return "hyperledger/fabric-ca:1.5.15"
 }
@@ -655,51 +918,54 @@ func (r *FabricNetworkReconciler) ensureDeployment(
 
 	err := r.Get(ctx, key, &existing)
 	if err == nil {
-		changed := false
-		if existing.Labels == nil {
-			existing.Labels = map[string]string{}
-			changed = true
-		}
-		for key, value := range desired.Labels {
-			if existing.Labels[key] != value {
-				existing.Labels[key] = value
+		return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+			existing := object.(*appsv1.Deployment)
+			changed := false
+			if existing.Labels == nil {
+				existing.Labels = map[string]string{}
 				changed = true
 			}
-		}
-		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
-			changed = true
-		}
-		if !reflect.DeepEqual(existing.Spec.Replicas, desired.Spec.Replicas) {
-			existing.Spec.Replicas = desired.Spec.Replicas
-			changed = true
-		}
-		if !reflect.DeepEqual(existing.Spec.Strategy, desired.Spec.Strategy) {
-			existing.Spec.Strategy = desired.Spec.Strategy
-			changed = true
-		}
-		if !reflect.DeepEqual(existing.Spec.Template.Labels, desired.Spec.Template.Labels) {
-			existing.Spec.Template.Labels = desired.Spec.Template.Labels
-			changed = true
-		}
-		if !reflect.DeepEqual(existing.Spec.Template.Annotations, desired.Spec.Template.Annotations) {
-			existing.Spec.Template.Annotations = desired.Spec.Template.Annotations
-			changed = true
-		}
-		if containers, containerChanged := syncManagedContainers(existing.Spec.Template.Spec.Containers, desired.Spec.Template.Spec.Containers); containerChanged {
-			existing.Spec.Template.Spec.Containers = containers
-			changed = true
-		}
-		if !reflect.DeepEqual(existing.Spec.Template.Spec.Volumes, desired.Spec.Template.Spec.Volumes) {
-			existing.Spec.Template.Spec.Volumes = desired.Spec.Template.Spec.Volumes
-			changed = true
-		}
-		if !changed {
-			return nil
-		}
+			for key, value := range desired.Labels {
+				if existing.Labels[key] != value {
+					existing.Labels[key] = value
+					changed = true
+				}
+			}
+			if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+				changed = true
+			}
+			if !reflect.DeepEqual(existing.Spec.Replicas, desired.Spec.Replicas) {
+				existing.Spec.Replicas = desired.Spec.Replicas
+				changed = true
+			}
+			if !reflect.DeepEqual(existing.Spec.Strategy, desired.Spec.Strategy) {
+				existing.Spec.Strategy = desired.Spec.Strategy
+				changed = true
+			}
+			if !reflect.DeepEqual(existing.Spec.Template.Labels, desired.Spec.Template.Labels) {
+				existing.Spec.Template.Labels = desired.Spec.Template.Labels
+				changed = true
+			}
+			if !reflect.DeepEqual(existing.Spec.Template.Annotations, desired.Spec.Template.Annotations) {
+				existing.Spec.Template.Annotations = desired.Spec.Template.Annotations
+				changed = true
+			}
+			if containers, containerChanged := syncManagedContainers(existing.Spec.Template.Spec.Containers, desired.Spec.Template.Spec.Containers); containerChanged {
+				existing.Spec.Template.Spec.Containers = containers
+				changed = true
+			}
+			if !reflect.DeepEqual(existing.Spec.Template.Spec.Volumes, desired.Spec.Template.Spec.Volumes) {
+				existing.Spec.Template.Spec.Volumes = desired.Spec.Template.Spec.Volumes
+				changed = true
+			}
+			if !changed {
+				return false, nil
+			}
 
-		log := logf.FromContext(ctx)
-		log.Info("Updating Deployment", "name", desired.Name, "namespace", desired.Namespace)
-		return r.Update(ctx, &existing)
+			log := logf.FromContext(ctx)
+			log.Info("Updating Deployment", "name", desired.Name, "namespace", desired.Namespace)
+			return true, nil
+		})
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
@@ -807,27 +1073,30 @@ func (r *FabricNetworkReconciler) ensurePersistentVolumeClaim(
 
 	err := r.Get(ctx, key, &existing)
 	if err == nil {
-		changed := false
-		if existing.Labels == nil {
-			existing.Labels = map[string]string{}
-			changed = true
-		}
-		for key, value := range desired.Labels {
-			if existing.Labels[key] != value {
-				existing.Labels[key] = value
+		return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+			existing := object.(*corev1.PersistentVolumeClaim)
+			changed := false
+			if existing.Labels == nil {
+				existing.Labels = map[string]string{}
 				changed = true
 			}
-		}
-		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
-			changed = true
-		}
-		if !changed {
-			return nil
-		}
+			for key, value := range desired.Labels {
+				if existing.Labels[key] != value {
+					existing.Labels[key] = value
+					changed = true
+				}
+			}
+			if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+				changed = true
+			}
+			if !changed {
+				return false, nil
+			}
 
-		log := logf.FromContext(ctx)
-		log.Info("Updating PersistentVolumeClaim", "name", desired.Name, "namespace", desired.Namespace)
-		return r.Update(ctx, &existing)
+			log := logf.FromContext(ctx)
+			log.Info("Updating PersistentVolumeClaim", "name", desired.Name, "namespace", desired.Namespace)
+			return true, nil
+		})
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
@@ -847,25 +1116,28 @@ func (r *FabricNetworkReconciler) ensureService(
 
 	err := r.Get(ctx, key, &existing)
 	if err == nil {
-		changed := mergeLabels(&existing.Labels, desired.Labels)
-		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
-			changed = true
-		}
-		if !reflect.DeepEqual(existing.Spec.Selector, desired.Spec.Selector) {
-			existing.Spec.Selector = desired.Spec.Selector
-			changed = true
-		}
-		if !reflect.DeepEqual(existing.Spec.Ports, desired.Spec.Ports) {
-			existing.Spec.Ports = desired.Spec.Ports
-			changed = true
-		}
-		if !changed {
-			return nil
-		}
+		return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+			existing := object.(*corev1.Service)
+			changed := mergeLabels(&existing.Labels, desired.Labels)
+			if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+				changed = true
+			}
+			if !reflect.DeepEqual(existing.Spec.Selector, desired.Spec.Selector) {
+				existing.Spec.Selector = desired.Spec.Selector
+				changed = true
+			}
+			if !reflect.DeepEqual(existing.Spec.Ports, desired.Spec.Ports) {
+				existing.Spec.Ports = desired.Spec.Ports
+				changed = true
+			}
+			if !changed {
+				return false, nil
+			}
 
-		log := logf.FromContext(ctx)
-		log.Info("Updating Service", "name", desired.Name, "namespace", desired.Namespace)
-		return r.Update(ctx, &existing)
+			log := logf.FromContext(ctx)
+			log.Info("Updating Service", "name", desired.Name, "namespace", desired.Namespace)
+			return true, nil
+		})
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
@@ -873,6 +1145,158 @@ func (r *FabricNetworkReconciler) ensureService(
 
 	log := logf.FromContext(ctx)
 	log.Info("Creating Service", "name", desired.Name, "namespace", desired.Namespace)
+	return r.Create(ctx, desired)
+}
+
+func (r *FabricNetworkReconciler) ensureNetworkPolicy(
+	ctx context.Context,
+	desired *networkingv1.NetworkPolicy,
+) error {
+	var existing networkingv1.NetworkPolicy
+	key := client.ObjectKeyFromObject(desired)
+
+	err := r.Get(ctx, key, &existing)
+	if err == nil {
+		return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+			existing := object.(*networkingv1.NetworkPolicy)
+			changed := mergeLabels(&existing.Labels, desired.Labels)
+			if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+				changed = true
+			}
+			if !reflect.DeepEqual(existing.Spec, desired.Spec) {
+				existing.Spec = desired.Spec
+				changed = true
+			}
+			if !changed {
+				return false, nil
+			}
+
+			log := logf.FromContext(ctx)
+			log.Info("Updating NetworkPolicy", "name", desired.Name, "namespace", desired.Namespace)
+			return true, nil
+		})
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	log := logf.FromContext(ctx)
+	log.Info("Creating NetworkPolicy", "name", desired.Name, "namespace", desired.Namespace)
+	return r.Create(ctx, desired)
+}
+
+func (r *FabricNetworkReconciler) ensureNetworkPolicyAbsent(
+	ctx context.Context,
+	desired *networkingv1.NetworkPolicy,
+) error {
+	var existing networkingv1.NetworkPolicy
+	key := client.ObjectKeyFromObject(desired)
+
+	if err := r.Get(ctx, key, &existing); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !hasFabricNetworkOwner(&existing) {
+		return nil
+	}
+	if err := ensureSameFabricNetworkOwner(&existing, desired); err != nil {
+		return err
+	}
+
+	log := logf.FromContext(ctx)
+	log.Info("Deleting NetworkPolicy", "name", desired.Name, "namespace", desired.Namespace)
+	return r.Delete(ctx, &existing)
+}
+
+func hasFabricNetworkOwner(object client.Object) bool {
+	if _, ok := fabricNetworkOwnerFromAnnotations(object); ok {
+		return true
+	}
+	if _, ok := fabricNetworkOwnerFromLabels(object); ok {
+		return true
+	}
+	return false
+}
+
+func buildOrgServiceMonitor(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) *unstructured.Unstructured {
+	serviceMonitor := &unstructured.Unstructured{}
+	serviceMonitor.SetAPIVersion("monitoring.coreos.com/v1")
+	serviceMonitor.SetKind("ServiceMonitor")
+	serviceMonitor.SetName(serviceMonitorName(net, org))
+	serviceMonitor.SetNamespace(namespace)
+	serviceMonitor.SetLabels(serviceMonitorMetadataLabels(net, org))
+	serviceMonitor.SetAnnotations(resourceAnnotations(net, org))
+
+	endpoint := map[string]interface{}{
+		"port":            endpointOperations,
+		"path":            "/metrics",
+		"scheme":          "http",
+		"interval":        serviceMonitorInterval(net),
+		"scrapeTimeout":   serviceMonitorScrapeTimeout(net),
+		"honorLabels":     true,
+		"honorTimestamps": true,
+	}
+	spec := map[string]interface{}{
+		"selector": map[string]interface{}{
+			"matchLabels": stringMapInterface(serviceMonitorSelectorLabels(net, org)),
+		},
+		"endpoints": []interface{}{endpoint},
+	}
+	serviceMonitor.Object["spec"] = spec
+
+	return serviceMonitor
+}
+
+func (r *FabricNetworkReconciler) ensureServiceMonitor(
+	ctx context.Context,
+	desired *unstructured.Unstructured,
+) error {
+	var existing unstructured.Unstructured
+	existing.SetAPIVersion(desired.GetAPIVersion())
+	existing.SetKind(desired.GetKind())
+
+	err := r.Get(ctx, client.ObjectKeyFromObject(desired), &existing)
+	if err == nil {
+		return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+			existing := object.(*unstructured.Unstructured)
+			changed := false
+			labels := existing.GetLabels()
+			if mergeLabels(&labels, desired.GetLabels()) {
+				existing.SetLabels(labels)
+				changed = true
+			}
+			annotations := existing.GetAnnotations()
+			if mergeAnnotations(&annotations, desired.GetAnnotations()) {
+				existing.SetAnnotations(annotations)
+				changed = true
+			}
+
+			desiredSpec, _, _ := unstructured.NestedMap(desired.Object, "spec")
+			existingSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
+			if !reflect.DeepEqual(existingSpec, desiredSpec) {
+				if err := unstructured.SetNestedMap(existing.Object, desiredSpec, "spec"); err != nil {
+					return false, err
+				}
+				changed = true
+			}
+			if !changed {
+				return false, nil
+			}
+
+			log := logf.FromContext(ctx)
+			log.Info("Updating ServiceMonitor", "name", desired.GetName(), "namespace", desired.GetNamespace())
+			return true, nil
+		})
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	log := logf.FromContext(ctx)
+	log.Info("Creating ServiceMonitor", "name", desired.GetName(), "namespace", desired.GetNamespace())
 	return r.Create(ctx, desired)
 }
 
@@ -967,7 +1391,9 @@ func buildCADeployment(
 							Ports: []corev1.ContainerPort{
 								{ContainerPort: caPort, Name: "ca", Protocol: corev1.ProtocolTCP},
 							},
-							Resources: componentResourceRequirements(componentCA),
+							ReadinessProbe: tcpReadinessProbe(caPort),
+							LivenessProbe:  tcpLivenessProbe(caPort),
+							Resources:      componentResourceRequirements(componentCA),
 							VolumeMounts: []corev1.VolumeMount{
 								dataVolumeMount(caHomePath),
 							},
@@ -1039,6 +1465,9 @@ func buildOrdererDeployment(
 		{Name: "ORDERER_GENERAL_LOCALMSPDIR", Value: ordererMSPPath},
 		{Name: "ORDERER_CHANNELPARTICIPATION_ENABLED", Value: "true"},
 		{Name: "ORDERER_ADMIN_LISTENADDRESS", Value: fmt.Sprintf("0.0.0.0:%d", ordererAdminPort)},
+		{Name: "ORDERER_OPERATIONS_LISTENADDRESS", Value: fmt.Sprintf("0.0.0.0:%d", ordererOpsPort)},
+		{Name: "ORDERER_OPERATIONS_TLS_ENABLED", Value: "false"},
+		{Name: "ORDERER_METRICS_PROVIDER", Value: "prometheus"},
 	}
 
 	if tlsEnabled {
@@ -1089,8 +1518,11 @@ func buildOrdererDeployment(
 							Ports: []corev1.ContainerPort{
 								{ContainerPort: ordererPort, Name: "orderer", Protocol: corev1.ProtocolTCP},
 								{ContainerPort: ordererAdminPort, Name: "admin", Protocol: corev1.ProtocolTCP},
+								{ContainerPort: ordererOpsPort, Name: endpointOperations, Protocol: corev1.ProtocolTCP},
 							},
-							Resources: componentResourceRequirements(componentOrderer),
+							ReadinessProbe: operationsReadinessProbe(),
+							LivenessProbe:  operationsLivenessProbe(),
+							Resources:      componentResourceRequirements(componentOrderer),
 							VolumeMounts: append(
 								identityVolumeMounts(ordererMSPPath, ordererTLSPath, tlsEnabled),
 								dataVolumeMount(fabricProductionPath),
@@ -1147,6 +1579,47 @@ func buildOrdererService(
 	}
 }
 
+func buildOrdererOperationsService(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	group fabricopsv1alpha1.OrdererGroup,
+	instance int,
+	namespace string,
+) *corev1.Service {
+	name := sanitizeName(fmt.Sprintf("%s%d", group.Prefix, instance))
+	selector := map[string]string{
+		labelFabricNetwork:          sanitizeName(net.Name),
+		labelFabricNetworkNamespace: sanitizeName(net.Namespace),
+		labelOrg:                    sanitizeName(org.Organization.Name),
+		labelComponent:              componentOrderer,
+		labelOrdererGroup:           sanitizeName(group.GroupName),
+		labelInstance:               fmt.Sprintf("%d", instance),
+	}
+	labels := operationsServiceLabels(net, org, componentOrderer, name)
+	labels[labelOrdererGroup] = sanitizeName(group.GroupName)
+	labels[labelInstance] = fmt.Sprintf("%d", instance)
+
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        operationsServiceName(name),
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: resourceAnnotations(net, org),
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: selector,
+			Ports: []corev1.ServicePort{
+				{
+					Name:       endpointOperations,
+					Port:       ordererOpsPort,
+					Protocol:   corev1.ProtocolTCP,
+					TargetPort: intstr.FromInt32(ordererOpsPort),
+				},
+			},
+		},
+	}
+}
+
 func buildPeerDeployment(
 	net *fabricopsv1alpha1.FabricNetwork,
 	org fabricopsv1alpha1.Org,
@@ -1179,6 +1652,10 @@ func buildPeerDeployment(
 		{Name: "CORE_PEER_GOSSIP_EXTERNALENDPOINT", Value: peerAddress},
 		{Name: "CORE_PEER_LOCALMSPID", Value: org.Organization.MSPName},
 		{Name: "CORE_PEER_MSPCONFIGPATH", Value: peerMSPPath},
+		{Name: "CORE_VM_ENDPOINT", Value: ""},
+		{Name: "CORE_OPERATIONS_LISTENADDRESS", Value: fmt.Sprintf("0.0.0.0:%d", peerOpsPort)},
+		{Name: "CORE_OPERATIONS_TLS_ENABLED", Value: "false"},
+		{Name: "CORE_METRICS_PROVIDER", Value: "prometheus"},
 	}
 
 	if tlsEnabled {
@@ -1220,8 +1697,11 @@ func buildPeerDeployment(
 							Ports: []corev1.ContainerPort{
 								{ContainerPort: peerPort, Name: "peer", Protocol: corev1.ProtocolTCP},
 								{ContainerPort: peerChaincodePort, Name: "chaincode", Protocol: corev1.ProtocolTCP},
+								{ContainerPort: peerOpsPort, Name: endpointOperations, Protocol: corev1.ProtocolTCP},
 							},
-							Resources: componentResourceRequirements(componentPeer),
+							ReadinessProbe: operationsReadinessProbe(),
+							LivenessProbe:  operationsLivenessProbe(),
+							Resources:      componentResourceRequirements(componentPeer),
 							VolumeMounts: append(
 								identityVolumeMounts(peerMSPPath, peerTLSPath, tlsEnabled),
 								dataVolumeMount(fabricProductionPath),
@@ -1270,6 +1750,44 @@ func buildPeerService(
 					Port:       peerChaincodePort,
 					Protocol:   corev1.ProtocolTCP,
 					TargetPort: intstr.FromInt32(peerChaincodePort),
+				},
+			},
+		},
+	}
+}
+
+func buildPeerOperationsService(
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	instance int,
+	namespace string,
+) *corev1.Service {
+	name := sanitizeName(fmt.Sprintf("%s%d", org.Peer.Prefix, instance))
+	selector := map[string]string{
+		labelFabricNetwork:          sanitizeName(net.Name),
+		labelFabricNetworkNamespace: sanitizeName(net.Namespace),
+		labelOrg:                    sanitizeName(org.Organization.Name),
+		labelComponent:              componentPeer,
+		labelInstance:               fmt.Sprintf("%d", instance),
+	}
+	labels := operationsServiceLabels(net, org, componentPeer, name)
+	labels[labelInstance] = fmt.Sprintf("%d", instance)
+
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        operationsServiceName(name),
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: resourceAnnotations(net, org),
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: selector,
+			Ports: []corev1.ServicePort{
+				{
+					Name:       endpointOperations,
+					Port:       peerOpsPort,
+					Protocol:   corev1.ProtocolTCP,
+					TargetPort: intstr.FromInt32(peerOpsPort),
 				},
 			},
 		},
@@ -1337,6 +1855,11 @@ func (r *FabricNetworkReconciler) reconcileOrderers(
 				return status, err
 			}
 
+			opsSvc := buildOrdererOperationsService(net, org, group, i, namespace)
+			if err := r.ensureService(ctx, opsSvc); err != nil {
+				return status, err
+			}
+
 			deploymentStatus, err := r.deploymentWorkloadStatus(ctx, namespace, deploy.Name)
 			if err != nil {
 				return status, err
@@ -1377,6 +1900,11 @@ func (r *FabricNetworkReconciler) reconcilePeers(
 
 		svc := buildPeerService(net, org, i, namespace)
 		if err := r.ensureService(ctx, svc); err != nil {
+			return status, err
+		}
+
+		opsSvc := buildPeerOperationsService(net, org, i, namespace)
+		if err := r.ensureService(ctx, opsSvc); err != nil {
 			return status, err
 		}
 

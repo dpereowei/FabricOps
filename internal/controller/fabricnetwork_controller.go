@@ -18,19 +18,29 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	fabricopsv1alpha1 "github.com/dpereowei/fabricops/api/v1alpha1"
 )
@@ -38,13 +48,15 @@ import (
 // FabricNetworkReconciler reconciles a FabricNetwork object
 type FabricNetworkReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 const (
 	conditionReady                 = "Ready"
 	conditionIdentityMaterialReady = "IdentityMaterialReady"
 	conditionChannelsReady         = "ChannelsReady"
+	conditionObservabilityReady    = "ObservabilityReady"
 	fabricNetworkFinalizer         = "fabricops.my.domain/finalizer"
 )
 
@@ -69,29 +81,31 @@ func (r *FabricNetworkReconciler) ensureNamespace(ctx context.Context, desired *
 
 	err := r.Get(ctx, client.ObjectKey{Name: desired.Name}, &existing)
 	if err == nil {
-		changed := false
-		if existing.Labels == nil {
-			existing.Labels = map[string]string{}
-			changed = true
-		}
-
-		for key, value := range desired.Labels {
-			if existing.Labels[key] != value {
-				existing.Labels[key] = value
+		return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+			existing := object.(*corev1.Namespace)
+			changed := false
+			if existing.Labels == nil {
+				existing.Labels = map[string]string{}
 				changed = true
 			}
-		}
-		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
-			changed = true
-		}
 
-		if changed {
+			for key, value := range desired.Labels {
+				if existing.Labels[key] != value {
+					existing.Labels[key] = value
+					changed = true
+				}
+			}
+			if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+				changed = true
+			}
+			if !changed {
+				return false, nil
+			}
+
 			log := logf.FromContext(ctx)
 			log.Info("Updating Namespace metadata", "namespace", desired.Name)
-			return r.Update(ctx, &existing)
-		}
-
-		return nil
+			return true, nil
+		})
 	}
 
 	if !apierrors.IsNotFound(err) {
@@ -134,6 +148,170 @@ func (r *FabricNetworkReconciler) cleanupFabricNetwork(
 	return nil
 }
 
+func (r *FabricNetworkReconciler) updateFabricNetworkFinalizer(
+	ctx context.Context,
+	key types.NamespacedName,
+	update func(*fabricopsv1alpha1.FabricNetwork) bool,
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var network fabricopsv1alpha1.FabricNetwork
+		if err := r.Get(ctx, key, &network); err != nil {
+			return err
+		}
+		if !update(&network) {
+			return nil
+		}
+
+		return r.Update(ctx, &network)
+	})
+}
+
+func (r *FabricNetworkReconciler) ensureFabricNetworkFinalizer(
+	ctx context.Context,
+	key types.NamespacedName,
+) error {
+	return r.updateFabricNetworkFinalizer(ctx, key, func(network *fabricopsv1alpha1.FabricNetwork) bool {
+		if !network.ObjectMeta.DeletionTimestamp.IsZero() {
+			return false
+		}
+		if controllerutil.ContainsFinalizer(network, fabricNetworkFinalizer) {
+			return false
+		}
+
+		log := logf.FromContext(ctx)
+		log.Info("Adding FabricNetwork finalizer", "name", key.Name, "namespace", key.Namespace)
+		controllerutil.AddFinalizer(network, fabricNetworkFinalizer)
+		return true
+	})
+}
+
+func (r *FabricNetworkReconciler) removeFabricNetworkFinalizer(
+	ctx context.Context,
+	key types.NamespacedName,
+) error {
+	return r.updateFabricNetworkFinalizer(ctx, key, func(network *fabricopsv1alpha1.FabricNetwork) bool {
+		if !controllerutil.ContainsFinalizer(network, fabricNetworkFinalizer) {
+			return false
+		}
+
+		log := logf.FromContext(ctx)
+		log.Info("Removing FabricNetwork finalizer", "name", key.Name, "namespace", key.Namespace)
+		controllerutil.RemoveFinalizer(network, fabricNetworkFinalizer)
+		return true
+	})
+}
+
+func (r *FabricNetworkReconciler) updateObjectWithRetry(
+	ctx context.Context,
+	desired client.Object,
+	mutate func(client.Object) (bool, error),
+) error {
+	key := client.ObjectKeyFromObject(desired)
+
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing, ok := desired.DeepCopyObject().(client.Object)
+		if !ok {
+			return nil
+		}
+		if err := r.Get(ctx, key, existing); err != nil {
+			return err
+		}
+		if err := ensureSameFabricNetworkOwner(existing, desired); err != nil {
+			return err
+		}
+
+		changed, err := mutate(existing)
+		if err != nil || !changed {
+			return err
+		}
+
+		return r.Update(ctx, existing)
+	})
+}
+
+type fabricNetworkOwner struct {
+	name      string
+	namespace string
+}
+
+func ensureSameFabricNetworkOwner(existing client.Object, desired client.Object) error {
+	desiredAnnotations := desired.GetAnnotations()
+	desiredAnnotationOwner := fabricNetworkOwner{
+		name:      desiredAnnotations[annotationFabricNetwork],
+		namespace: desiredAnnotations[annotationFabricNetworkNamespace],
+	}
+	if existingAnnotationOwner, ok := fabricNetworkOwnerFromAnnotations(existing); ok {
+		return ensureMatchingFabricNetworkOwner(existing, existingAnnotationOwner, desiredAnnotationOwner)
+	}
+
+	desiredLabels := desired.GetLabels()
+	desiredLabelOwner := fabricNetworkOwner{
+		name:      desiredLabels[labelFabricNetwork],
+		namespace: desiredLabels[labelFabricNetworkNamespace],
+	}
+	if existingLabelOwner, ok := fabricNetworkOwnerFromLabels(existing); ok {
+		return ensureMatchingFabricNetworkOwner(existing, existingLabelOwner, desiredLabelOwner)
+	}
+
+	return nil
+}
+
+func fabricNetworkOwnerFromAnnotations(object client.Object) (fabricNetworkOwner, bool) {
+	annotations := object.GetAnnotations()
+	owner := fabricNetworkOwner{
+		name:      annotations[annotationFabricNetwork],
+		namespace: annotations[annotationFabricNetworkNamespace],
+	}
+
+	return owner, owner.name != "" || owner.namespace != ""
+}
+
+func fabricNetworkOwnerFromLabels(object client.Object) (fabricNetworkOwner, bool) {
+	labels := object.GetLabels()
+	owner := fabricNetworkOwner{
+		name:      labels[labelFabricNetwork],
+		namespace: labels[labelFabricNetworkNamespace],
+	}
+
+	return owner, owner.name != "" || owner.namespace != ""
+}
+
+func ensureMatchingFabricNetworkOwner(
+	object client.Object,
+	existing fabricNetworkOwner,
+	desired fabricNetworkOwner,
+) error {
+	if existing.name == desired.name && existing.namespace == desired.namespace {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%s is owned by FabricNetwork %s/%s, refusing to update for FabricNetwork %s/%s",
+		objectDescription(object),
+		existing.namespace,
+		existing.name,
+		desired.namespace,
+		desired.name,
+	)
+}
+
+func objectDescription(object client.Object) string {
+	kind := object.GetObjectKind().GroupVersionKind().Kind
+	if kind == "" {
+		objectType := reflect.TypeOf(object)
+		if objectType.Kind() == reflect.Ptr {
+			objectType = objectType.Elem()
+		}
+		kind = objectType.Name()
+	}
+
+	if object.GetNamespace() == "" {
+		return kind + " " + object.GetName()
+	}
+
+	return kind + " " + object.GetNamespace() + "/" + object.GetName()
+}
+
 func namespaceOwnedByFabricNetwork(
 	namespace corev1.Namespace,
 	net *fabricopsv1alpha1.FabricNetwork,
@@ -166,6 +344,22 @@ func (r *FabricNetworkReconciler) reconcileOrg(
 
 	if err := r.ensureNamespace(ctx, buildOrgNamespace(net, org)); err != nil {
 		return status, err
+	}
+
+	if networkPolicyEnabled(net) {
+		if err := r.ensureNetworkPolicy(ctx, buildOrgNetworkPolicy(net, org, namespace)); err != nil {
+			return status, err
+		}
+	} else {
+		if err := r.ensureNetworkPolicyAbsent(ctx, buildOrgNetworkPolicy(net, org, namespace)); err != nil {
+			return status, err
+		}
+	}
+
+	if serviceMonitorEnabled(net) {
+		if err := r.ensureServiceMonitor(ctx, buildOrgServiceMonitor(net, org, namespace)); err != nil {
+			return status, err
+		}
 	}
 
 	if err := r.reconcileIdentityMaterial(ctx, net, org, namespace); err != nil {
@@ -359,6 +553,80 @@ func channelsReadyCondition(
 	return conditions
 }
 
+func observabilityReady(statuses []fabricopsv1alpha1.OrgStatus) bool {
+	return allOrgsReady(statuses)
+}
+
+func observabilityStatusMessage(statuses []fabricopsv1alpha1.OrgStatus) string {
+	if observabilityReady(statuses) {
+		return "All Fabric operations endpoints are exposed"
+	}
+
+	messages := []string{}
+	for _, status := range statuses {
+		orgMessages := []string{}
+		if !status.CAReady {
+			orgMessages = append(orgMessages, "CA not ready")
+		}
+		if !status.OrderersReady {
+			orgMessages = append(orgMessages, "orderers not ready")
+		}
+		if !status.PeersReady {
+			orgMessages = append(orgMessages, "peers not ready")
+		}
+		if len(orgMessages) > 0 {
+			messages = append(messages, status.Name+": "+strings.Join(orgMessages, ", "))
+		}
+	}
+
+	if len(messages) == 0 {
+		return "Waiting for Fabric operations endpoints"
+	}
+
+	return strings.Join(messages, "; ")
+}
+
+func observabilityReadyCondition(
+	net *fabricopsv1alpha1.FabricNetwork,
+	conditions []metav1.Condition,
+	status metav1.ConditionStatus,
+	reason string,
+	message string,
+) []metav1.Condition {
+	conditions = append([]metav1.Condition(nil), conditions...)
+	apiMeta.SetStatusCondition(&conditions, metav1.Condition{
+		Type:               conditionObservabilityReady,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: net.Generation,
+	})
+
+	return conditions
+}
+
+func topologyInvalidConditions(net *fabricopsv1alpha1.FabricNetwork, message string) []metav1.Condition {
+	return observabilityReadyCondition(
+		net,
+		channelsReadyCondition(
+			net,
+			identityMaterialCondition(
+				net,
+				readyCondition(net, metav1.ConditionFalse, "TopologyInvalid", message),
+				metav1.ConditionUnknown,
+				"TopologyInvalid",
+				"Topology validation failed before identity material check: "+message,
+			),
+			metav1.ConditionUnknown,
+			"TopologyInvalid",
+			message,
+		),
+		metav1.ConditionUnknown,
+		"TopologyInvalid",
+		"Topology validation failed before observability check: "+message,
+	)
+}
+
 func (r *FabricNetworkReconciler) updateStatus(
 	ctx context.Context,
 	net *fabricopsv1alpha1.FabricNetwork,
@@ -396,7 +664,20 @@ func (r *FabricNetworkReconciler) updateStatus(
 		"newMessage", newMessage,
 	)
 
-	return r.Status().Patch(ctx, base, client.MergeFrom(net))
+	if err := r.Status().Patch(ctx, base, client.MergeFrom(net)); err != nil {
+		return err
+	}
+
+	if r.Recorder != nil && (net.Status.Phase != newPhase || net.Status.Message != newMessage) {
+		switch newPhase {
+		case fabricopsv1alpha1.PhaseReady:
+			r.Recorder.Event(base, corev1.EventTypeNormal, "FabricNetworkReady", newMessage)
+		case fabricopsv1alpha1.PhaseFailed:
+			r.Recorder.Event(base, corev1.EventTypeWarning, "FabricNetworkReconcileFailed", newMessage)
+		}
+	}
+
+	return nil
 }
 
 // +kubebuilder:rbac:groups=fabricops.my.domain,resources=fabricnetworks,verbs=get;list;watch;create;update;patch;delete
@@ -410,7 +691,10 @@ func (r *FabricNetworkReconciler) updateStatus(
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -434,8 +718,7 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if err := r.cleanupFabricNetwork(ctx, &network); err != nil {
 				return ctrl.Result{}, err
 			}
-			controllerutil.RemoveFinalizer(&network, fabricNetworkFinalizer)
-			if err := r.Update(ctx, &network); err != nil {
+			if err := r.removeFabricNetworkFinalizer(ctx, req.NamespacedName); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -444,10 +727,28 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if !controllerutil.ContainsFinalizer(&network, fabricNetworkFinalizer) {
-		controllerutil.AddFinalizer(&network, fabricNetworkFinalizer)
-		if err := r.Update(ctx, &network); err != nil {
+		if err := r.ensureFabricNetworkFinalizer(ctx, req.NamespacedName); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	if problems := validateFabricNetworkTopology(&network); len(problems) > 0 {
+		message := "Invalid Fabric topology: " + strings.Join(problems, "; ")
+		log.Info("FabricNetwork topology is invalid", "problems", problems)
+		if err := r.updateStatus(
+			ctx,
+			&network,
+			fabricopsv1alpha1.PhaseFailed,
+			message,
+			nil,
+			nil,
+			nil,
+			topologyInvalidConditions(&network, message),
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{}, nil
 	}
 
 	orgStatuses, err := r.reconcileOrgs(ctx, &network)
@@ -462,18 +763,24 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			orgStatuses,
 			nil,
 			nil,
-			channelsReadyCondition(
+			observabilityReadyCondition(
 				&network,
-				identityMaterialCondition(
+				channelsReadyCondition(
 					&network,
-					readyCondition(&network, metav1.ConditionFalse, "ReconcileError", "Failed to reconcile orgs: "+err.Error()),
+					identityMaterialCondition(
+						&network,
+						readyCondition(&network, metav1.ConditionFalse, "ReconcileError", "Failed to reconcile orgs: "+err.Error()),
+						metav1.ConditionUnknown,
+						"ReconcileError",
+						"Failed to check identity material: "+err.Error(),
+					),
 					metav1.ConditionUnknown,
 					"ReconcileError",
-					"Failed to check identity material: "+err.Error(),
+					"Failed to check channels: "+err.Error(),
 				),
 				metav1.ConditionUnknown,
 				"ReconcileError",
-				"Failed to check channels: "+err.Error(),
+				"Failed to check observability: "+err.Error(),
 			),
 		)
 
@@ -492,18 +799,24 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			orgStatuses,
 			channelStatuses,
 			nil,
-			channelsReadyCondition(
+			observabilityReadyCondition(
 				&network,
-				identityMaterialCondition(
+				channelsReadyCondition(
 					&network,
-					readyCondition(&network, metav1.ConditionFalse, "ReconcileError", "Failed to reconcile channels: "+err.Error()),
+					identityMaterialCondition(
+						&network,
+						readyCondition(&network, metav1.ConditionFalse, "ReconcileError", "Failed to reconcile channels: "+err.Error()),
+						metav1.ConditionUnknown,
+						"ReconcileError",
+						"Failed to check identity material: "+err.Error(),
+					),
 					metav1.ConditionUnknown,
 					"ReconcileError",
-					"Failed to check identity material: "+err.Error(),
+					"Failed to reconcile channels: "+err.Error(),
 				),
 				metav1.ConditionUnknown,
 				"ReconcileError",
-				"Failed to reconcile channels: "+err.Error(),
+				"Failed to check observability: "+err.Error(),
 			),
 		)
 
@@ -534,18 +847,24 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			orgStatuses,
 			channelStatuses,
 			chaincodeStatuses,
-			channelsReadyCondition(
+			observabilityReadyCondition(
 				&network,
-				identityMaterialCondition(
+				channelsReadyCondition(
 					&network,
-					readyCondition(&network, metav1.ConditionFalse, "ReconcileError", "Failed to reconcile chaincodes: "+err.Error()),
-					metav1.ConditionUnknown,
-					"ReconcileError",
-					"Failed to check identity material: "+err.Error(),
+					identityMaterialCondition(
+						&network,
+						readyCondition(&network, metav1.ConditionFalse, "ReconcileError", "Failed to reconcile chaincodes: "+err.Error()),
+						metav1.ConditionUnknown,
+						"ReconcileError",
+						"Failed to check identity material: "+err.Error(),
+					),
+					channelsStatus,
+					channelsReason,
+					channelsMessage,
 				),
-				channelsStatus,
-				channelsReason,
-				channelsMessage,
+				metav1.ConditionUnknown,
+				"ReconcileError",
+				"Failed to reconcile chaincodes: "+err.Error(),
 			),
 		)
 
@@ -561,6 +880,14 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		identityReason = "IdentityMaterialPresent"
 	}
 	identityMessage := identityMaterialMessage(orgStatuses)
+
+	observabilityStatus := metav1.ConditionFalse
+	observabilityReason := "OperationsEndpointsPending"
+	observabilityMessage := observabilityStatusMessage(orgStatuses)
+	if observabilityReady(orgStatuses) {
+		observabilityStatus = metav1.ConditionTrue
+		observabilityReason = "OperationsEndpointsReady"
+	}
 
 	if allOrgsReady(orgStatuses) && channelsReady && chaincodesReady {
 		readyReason := "ComponentsReady"
@@ -583,18 +910,24 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			orgStatuses,
 			channelStatuses,
 			chaincodeStatuses,
-			channelsReadyCondition(
+			observabilityReadyCondition(
 				&network,
-				identityMaterialCondition(
+				channelsReadyCondition(
 					&network,
-					readyCondition(&network, metav1.ConditionTrue, readyReason, readyMessage),
-					identityStatus,
-					identityReason,
-					identityMessage,
+					identityMaterialCondition(
+						&network,
+						readyCondition(&network, metav1.ConditionTrue, readyReason, readyMessage),
+						identityStatus,
+						identityReason,
+						identityMessage,
+					),
+					channelsStatus,
+					channelsReason,
+					channelsMessage,
 				),
-				channelsStatus,
-				channelsReason,
-				channelsMessage,
+				observabilityStatus,
+				observabilityReason,
+				observabilityMessage,
 			),
 		); err != nil {
 			return ctrl.Result{}, err
@@ -624,18 +957,24 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		orgStatuses,
 		channelStatuses,
 		chaincodeStatuses,
-		channelsReadyCondition(
+		observabilityReadyCondition(
 			&network,
-			identityMaterialCondition(
+			channelsReadyCondition(
 				&network,
-				readyCondition(&network, metav1.ConditionFalse, readyReason, readyMessage),
-				identityStatus,
-				identityReason,
-				identityMessage,
+				identityMaterialCondition(
+					&network,
+					readyCondition(&network, metav1.ConditionFalse, readyReason, readyMessage),
+					identityStatus,
+					identityReason,
+					identityMessage,
+				),
+				channelsStatus,
+				channelsReason,
+				channelsMessage,
 			),
-			channelsStatus,
-			channelsReason,
-			channelsMessage,
+			observabilityStatus,
+			observabilityReason,
+			observabilityMessage,
 		),
 	); err != nil {
 		return ctrl.Result{}, err
@@ -646,8 +985,52 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *FabricNetworkReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	enqueueOwningFabricNetwork := handler.EnqueueRequestsFromMapFunc(fabricNetworkRequestsForObject)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&fabricopsv1alpha1.FabricNetwork{}).
+		Watches(&corev1.Namespace{}, enqueueOwningFabricNetwork).
+		Watches(&appsv1.Deployment{}, enqueueOwningFabricNetwork).
+		Watches(&corev1.Service{}, enqueueOwningFabricNetwork).
+		Watches(&corev1.ConfigMap{}, enqueueOwningFabricNetwork).
+		Watches(&corev1.Secret{}, enqueueOwningFabricNetwork).
+		Watches(&corev1.ServiceAccount{}, enqueueOwningFabricNetwork).
+		Watches(&corev1.PersistentVolumeClaim{}, enqueueOwningFabricNetwork).
+		Watches(&networkingv1.NetworkPolicy{}, enqueueOwningFabricNetwork).
+		Watches(&batchv1.Job{}, enqueueOwningFabricNetwork).
+		Watches(&rbacv1.Role{}, enqueueOwningFabricNetwork).
+		Watches(&rbacv1.RoleBinding{}, enqueueOwningFabricNetwork).
 		Named("fabricnetwork").
 		Complete(r)
+}
+
+func fabricNetworkRequestsForObject(_ context.Context, object client.Object) []reconcile.Request {
+	if object == nil {
+		return nil
+	}
+
+	annotations := object.GetAnnotations()
+	name := annotations[annotationFabricNetwork]
+	namespace := annotations[annotationFabricNetworkNamespace]
+
+	labels := object.GetLabels()
+	if name == "" {
+		name = labels[labelFabricNetwork]
+	}
+	if namespace == "" {
+		namespace = labels[labelFabricNetworkNamespace]
+	}
+
+	if name == "" || namespace == "" {
+		return nil
+	}
+
+	return []reconcile.Request{
+		{
+			NamespacedName: types.NamespacedName{
+				Name:      name,
+				Namespace: namespace,
+			},
+		},
+	}
 }

@@ -226,36 +226,45 @@ func (r *FabricNetworkReconciler) ensureSecret(
 		return corev1.Secret{}, err
 	}
 
-	changed := false
-	if existing.Labels == nil {
-		existing.Labels = map[string]string{}
-		changed = true
-	}
-	for key, value := range desired.Labels {
-		if existing.Labels[key] != value {
-			existing.Labels[key] = value
+	updated := existing
+	if err := r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
+		existing := object.(*corev1.Secret)
+		changed := false
+		if existing.Labels == nil {
+			existing.Labels = map[string]string{}
 			changed = true
 		}
-	}
-	if mergeAnnotations(&existing.Annotations, desired.Annotations) {
-		changed = true
-	}
-
-	if validationError != nil {
-		if reason := validationError(existing); reason != "" {
-			existing.Data = desired.Data
-			existing.Type = desired.Type
+		for key, value := range desired.Labels {
+			if existing.Labels[key] != value {
+				existing.Labels[key] = value
+				changed = true
+			}
+		}
+		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
 			changed = true
 		}
+
+		if validationError != nil {
+			if reason := validationError(*existing); reason != "" {
+				existing.Data = desired.Data
+				existing.Type = desired.Type
+				changed = true
+			}
+		}
+
+		updated = *existing
+		if !changed {
+			return false, nil
+		}
+
+		log := logf.FromContext(ctx)
+		log.Info("Updating Secret", "name", existing.Name, "namespace", existing.Namespace)
+		return true, nil
+	}); err != nil {
+		return corev1.Secret{}, err
 	}
 
-	if !changed {
-		return existing, nil
-	}
-
-	log := logf.FromContext(ctx)
-	log.Info("Updating Secret", "name", existing.Name, "namespace", existing.Namespace)
-	return existing, r.Update(ctx, &existing)
+	return updated, nil
 }
 
 func identityLabels(

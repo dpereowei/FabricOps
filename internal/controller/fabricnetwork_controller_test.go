@@ -33,11 +33,13 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -46,6 +48,71 @@ import (
 )
 
 var _ = Describe("FabricNetwork Controller", func() {
+	Context("When mapping secondary resources", func() {
+		It("should map annotated objects to the owning FabricNetwork", func() {
+			object := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "peer0",
+					Namespace: "fo-sample-banka",
+					Annotations: map[string]string{
+						annotationFabricNetwork:          "fabricnetwork.sample",
+						annotationFabricNetworkNamespace: "control-plane",
+					},
+					Labels: map[string]string{
+						labelFabricNetwork:          "sanitized-name",
+						labelFabricNetworkNamespace: "sanitized-namespace",
+					},
+				},
+			}
+
+			requests := fabricNetworkRequestsForObject(context.Background(), object)
+
+			Expect(requests).To(Equal([]reconcile.Request{
+				{
+					NamespacedName: types.NamespacedName{
+						Name:      "fabricnetwork.sample",
+						Namespace: "control-plane",
+					},
+				},
+			}))
+		})
+
+		It("should fall back to labels when annotations are absent", func() {
+			object := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "channel-config",
+					Namespace: "fo-sample-orderer",
+					Labels: map[string]string{
+						labelFabricNetwork:          "fabricnetwork-sample",
+						labelFabricNetworkNamespace: "default",
+					},
+				},
+			}
+
+			requests := fabricNetworkRequestsForObject(context.Background(), object)
+
+			Expect(requests).To(Equal([]reconcile.Request{
+				{
+					NamespacedName: types.NamespacedName{
+						Name:      "fabricnetwork-sample",
+						Namespace: "default",
+					},
+				},
+			}))
+		})
+
+		It("should ignore unrelated objects", func() {
+			object := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "external-secret",
+					Namespace: "default",
+				},
+			}
+
+			Expect(fabricNetworkRequestsForObject(context.Background(), object)).To(BeEmpty())
+		})
+	})
+
 	Context("When reconciling a resource", func() {
 		const (
 			resourceName      = "fabricnetwork-test"
@@ -194,6 +261,8 @@ var _ = Describe("FabricNetwork Controller", func() {
 				"sh", "-c",
 				"fabric-ca-server start -b \"$FABRIC_CA_SERVER_BOOTSTRAP_USER_PASS\" -d",
 			}))
+			expectTCPProbe(caContainer.ReadinessProbe, caPort)
+			expectTCPProbe(caContainer.LivenessProbe, caPort)
 			expectContainerResources(caContainer, defaultCARequestCPU, defaultCARequestMemory, defaultCALimitCPU, defaultCALimitMemory)
 			Expect(pvcVolumeNames(caDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(dataVolumeName, "banka-ca-data"))
 			Expect(volumeMountPaths(caContainer)).To(HaveKeyWithValue(dataVolumeName, caHomePath))
@@ -259,6 +328,12 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(identity.Status).To(Equal(metav1.ConditionFalse))
 			Expect(identity.Reason).To(Equal("IdentityMaterialMissing"))
 
+			observability := apiMeta.FindStatusCondition(network.Status.Conditions, conditionObservabilityReady)
+			Expect(observability).NotTo(BeNil())
+			Expect(observability.Status).To(Equal(metav1.ConditionFalse))
+			Expect(observability.Reason).To(Equal("OperationsEndpointsPending"))
+			Expect(observability.Message).To(ContainSubstring("CA not ready"))
+
 			expectIdentitySecret(ctx, ordererNamespace, caBootstrapSecretName(network.Spec.Orgs[0]), secretKindCABootstrap, true)
 			expectIdentitySecret(ctx, ordererNamespace, adminEnrollmentSecretName(network.Spec.Orgs[0]), secretKindAdminEnroll, true)
 			expectIdentitySecret(ctx, ordererNamespace, "orderer0-enrollment", secretKindWorkloadEnroll, true)
@@ -273,6 +348,91 @@ var _ = Describe("FabricNetwork Controller", func() {
 			expectSecretNotFound(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindTLS))
 			expectSecretNotFound(ctx, bankNamespace, "peer0-msp")
 			expectSecretNotFound(ctx, bankNamespace, "peer0-tls")
+		})
+
+		It("should create and repair org boundary NetworkPolicies when enabled", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Global.NetworkPolicy = &fabricopsv1alpha1.NetworkPolicyConfig{Enabled: true}
+			Expect(k8sClient.Update(ctx, &network)).To(Succeed())
+
+			By("Reconciling the created resource")
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			ordererNamespace := "fo-test-orderer"
+			bankNamespace := "fo-test-banka"
+
+			var ordererPolicy networkingv1.NetworkPolicy
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      orgBoundaryNetworkPolicyName(),
+			}, &ordererPolicy)).To(Succeed())
+			Expect(ordererPolicy.Labels[labelAppComponent]).To(Equal(componentNetwork))
+			Expect(ordererPolicy.Annotations[annotationOrg]).To(Equal("Orderer"))
+
+			var bankPolicy networkingv1.NetworkPolicy
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      orgBoundaryNetworkPolicyName(),
+			}, &bankPolicy)).To(Succeed())
+			Expect(bankPolicy.Labels[labelAppComponent]).To(Equal(componentNetwork))
+			Expect(bankPolicy.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(bankPolicy.Spec.PodSelector.MatchLabels).To(HaveKeyWithValue(labelFabricNetwork, resourceName))
+			Expect(bankPolicy.Spec.PodSelector.MatchLabels).To(HaveKeyWithValue(labelFabricNetworkNamespace, resourceNamespace))
+			Expect(bankPolicy.Spec.PodSelector.MatchLabels).To(HaveKeyWithValue(labelOrg, "banka"))
+			Expect(bankPolicy.Spec.PolicyTypes).To(ConsistOf(
+				networkingv1.PolicyTypeIngress,
+				networkingv1.PolicyTypeEgress,
+			))
+			Expect(bankPolicy.Spec.Ingress).To(HaveLen(1))
+			Expect(bankPolicy.Spec.Ingress[0].From).To(HaveLen(1))
+			Expect(bankPolicy.Spec.Ingress[0].From[0].NamespaceSelector.MatchLabels).To(HaveKeyWithValue(labelFabricNetwork, resourceName))
+			Expect(bankPolicy.Spec.Ingress[0].From[0].NamespaceSelector.MatchLabels).To(HaveKeyWithValue(labelFabricNetworkNamespace, resourceNamespace))
+			Expect(bankPolicy.Spec.Ingress[0].From[0].PodSelector.MatchLabels).To(HaveKeyWithValue(labelFabricNetwork, resourceName))
+			Expect(bankPolicy.Spec.Ingress[0].From[0].PodSelector.MatchLabels).NotTo(HaveKey(labelOrg))
+			Expect(bankPolicy.Spec.Egress).To(HaveLen(3))
+
+			bankPolicy.Labels = map[string]string{}
+			bankPolicy.Annotations = map[string]string{}
+			bankPolicy.Spec.Egress = nil
+			Expect(k8sClient.Update(ctx, &bankPolicy)).To(Succeed())
+
+			By("Reconciling after NetworkPolicy drift")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      orgBoundaryNetworkPolicyName(),
+			}, &bankPolicy)).To(Succeed())
+			Expect(bankPolicy.Labels[labelAppComponent]).To(Equal(componentNetwork))
+			Expect(bankPolicy.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(bankPolicy.Spec.Egress).To(HaveLen(3))
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Global.NetworkPolicy = nil
+			Expect(k8sClient.Update(ctx, &network)).To(Succeed())
+
+			By("Reconciling after NetworkPolicy is disabled")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      orgBoundaryNetworkPolicyName(),
+			}, &bankPolicy)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
 		})
 
 		It("should not generate fallback identity secrets after enrollment failure", func() {
@@ -492,6 +652,16 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			bankNamespace := "fo-test-banka"
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			bankOrg := network.Spec.Orgs[1]
+
+			markDeploymentReady(ctx, bankNamespace, "banka-ca")
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
 
 			var caDeploy appsv1.Deployment
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -515,6 +685,54 @@ var _ = Describe("FabricNetwork Controller", func() {
 			caSvc.Spec.Selector = map[string]string{labelComponent: "wrong"}
 			caSvc.Spec.Ports[0].Port = 9999
 			Expect(k8sClient.Update(ctx, &caSvc)).To(Succeed())
+
+			var bootstrapSecret corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      caBootstrapSecretName(bankOrg),
+			}, &bootstrapSecret)).To(Succeed())
+			bootstrapSecret.Labels = map[string]string{}
+			bootstrapSecret.Annotations = map[string]string{}
+			bootstrapSecret.Data = map[string][]byte{
+				caBootstrapUsernameKey: []byte("broken"),
+			}
+			Expect(k8sClient.Update(ctx, &bootstrapSecret)).To(Succeed())
+
+			enrollmentName := enrollmentServiceAccountName(bankOrg)
+			var serviceAccount corev1.ServiceAccount
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      enrollmentName,
+			}, &serviceAccount)).To(Succeed())
+			serviceAccount.Labels = map[string]string{}
+			serviceAccount.Annotations = map[string]string{}
+			Expect(k8sClient.Update(ctx, &serviceAccount)).To(Succeed())
+
+			var role rbacv1.Role
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      enrollmentName,
+			}, &role)).To(Succeed())
+			role.Labels = map[string]string{}
+			role.Annotations = map[string]string{}
+			role.Rules = []rbacv1.PolicyRule{
+				{
+					APIGroups: []string{""},
+					Resources: []string{"configmaps"},
+					Verbs:     []string{"get"},
+				},
+			}
+			Expect(k8sClient.Update(ctx, &role)).To(Succeed())
+
+			var roleBinding rbacv1.RoleBinding
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      enrollmentName,
+			}, &roleBinding)).To(Succeed())
+			roleBinding.Labels = map[string]string{}
+			roleBinding.Annotations = map[string]string{}
+			roleBinding.Subjects = nil
+			Expect(k8sClient.Update(ctx, &roleBinding)).To(Succeed())
 
 			By("Reconciling after managed fields were changed")
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
@@ -540,6 +758,85 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(caSvc.Annotations[annotationOrg]).To(Equal("BankA"))
 			Expect(caSvc.Spec.Selector[labelComponent]).To(Equal(componentCA))
 			Expect(servicePorts(caSvc)).To(ContainElements(caPort))
+
+			expectIdentitySecret(ctx, bankNamespace, caBootstrapSecretName(bankOrg), secretKindCABootstrap, true)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      caBootstrapSecretName(bankOrg),
+			}, &bootstrapSecret)).To(Succeed())
+			Expect(bootstrapSecret.Labels[labelAppComponent]).To(Equal(componentCA))
+			Expect(bootstrapSecret.Annotations[annotationOrg]).To(Equal("BankA"))
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      enrollmentName,
+			}, &serviceAccount)).To(Succeed())
+			Expect(serviceAccount.Labels[labelAppComponent]).To(Equal(componentAdmin))
+			Expect(serviceAccount.Annotations[annotationOrg]).To(Equal("BankA"))
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      enrollmentName,
+			}, &role)).To(Succeed())
+			Expect(role.Labels[labelAppComponent]).To(Equal(componentAdmin))
+			Expect(role.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(role.Rules).To(ContainElement(rbacv1.PolicyRule{
+				APIGroups: []string{""},
+				Resources: []string{"secrets"},
+				Verbs:     []string{"get", "create", "update", "patch"},
+			}))
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      enrollmentName,
+			}, &roleBinding)).To(Succeed())
+			Expect(roleBinding.Labels[labelAppComponent]).To(Equal(componentAdmin))
+			Expect(roleBinding.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(roleBinding.Subjects).To(ContainElement(rbacv1.Subject{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      enrollmentName,
+				Namespace: bankNamespace,
+			}))
+		})
+
+		It("should refuse to update generated resources owned by another FabricNetwork", func() {
+			By("Reconciling the created resource")
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			bankNamespace := "fo-test-banka"
+
+			var caSvc corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "banka-ca",
+			}, &caSvc)).To(Succeed())
+			caSvc.Annotations[annotationFabricNetwork] = "other-network"
+			caSvc.Annotations[annotationFabricNetworkNamespace] = "other-control"
+			caSvc.Labels[labelFabricNetwork] = "other-network"
+			caSvc.Labels[labelFabricNetworkNamespace] = "other-control"
+			Expect(k8sClient.Update(ctx, &caSvc)).To(Succeed())
+
+			By("Reconciling after a managed resource claimed another owner")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).To(MatchError(ContainSubstring("Service fo-test-banka/banka-ca is owned by FabricNetwork other-control/other-network")))
+			Expect(err).To(MatchError(ContainSubstring("refusing to update for FabricNetwork default/fabricnetwork-test")))
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "banka-ca",
+			}, &caSvc)).To(Succeed())
+			Expect(caSvc.Annotations[annotationFabricNetwork]).To(Equal("other-network"))
+			Expect(caSvc.Annotations[annotationFabricNetworkNamespace]).To(Equal("other-control"))
 		})
 
 		It("should remove generated org namespaces when the FabricNetwork is deleted", func() {
@@ -670,6 +967,9 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(ordererEnv["ORDERER_GENERAL_LOCALMSPDIR"]).To(Equal(ordererMSPPath))
 			Expect(ordererEnv["ORDERER_CHANNELPARTICIPATION_ENABLED"]).To(Equal("true"))
 			Expect(ordererEnv["ORDERER_ADMIN_LISTENADDRESS"]).To(Equal("0.0.0.0:9443"))
+			Expect(ordererEnv["ORDERER_OPERATIONS_LISTENADDRESS"]).To(Equal("0.0.0.0:8443"))
+			Expect(ordererEnv["ORDERER_OPERATIONS_TLS_ENABLED"]).To(Equal("false"))
+			Expect(ordererEnv["ORDERER_METRICS_PROVIDER"]).To(Equal("prometheus"))
 			Expect(ordererEnv["ORDERER_GENERAL_TLS_ENABLED"]).To(Equal("true"))
 			Expect(ordererEnv["ORDERER_GENERAL_TLS_PRIVATEKEY"]).To(Equal(ordererTLSPath + "/server.key"))
 			Expect(ordererEnv["ORDERER_GENERAL_TLS_CERTIFICATE"]).To(Equal(ordererTLSPath + "/server.crt"))
@@ -686,7 +986,9 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(ordererDeploy.Labels[labelWorkload]).To(Equal("orderer0"))
 			Expect(ordererDeploy.Annotations[annotationOrg]).To(Equal("Orderer"))
 			Expect(ordererDeploy.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
-			Expect(containerPorts(ordererContainer)).To(ContainElements(int32(7050), int32(9443)))
+			Expect(containerPorts(ordererContainer)).To(ContainElements(int32(7050), int32(9443), int32(8443)))
+			expectOperationsProbe(ordererContainer.ReadinessProbe)
+			expectOperationsProbe(ordererContainer.LivenessProbe)
 			expectContainerResources(ordererContainer, defaultOrdererRequestCPU, defaultOrdererRequestMem, defaultOrdererLimitCPU, defaultOrdererLimitMem)
 			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "orderer0-msp"))
 			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "orderer0-tls"))
@@ -705,6 +1007,16 @@ var _ = Describe("FabricNetwork Controller", func() {
 			}, &ordererSvc)).To(Succeed())
 			Expect(servicePorts(ordererSvc)).To(ContainElements(int32(7050), int32(9443)))
 
+			var ordererOpsSvc corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "orderer0-operations",
+			}, &ordererOpsSvc)).To(Succeed())
+			Expect(ordererOpsSvc.Labels[labelEndpoint]).To(Equal(endpointOperations))
+			Expect(ordererOpsSvc.Labels[labelAppComponent]).To(Equal("orderer-operations"))
+			Expect(ordererOpsSvc.Spec.Selector[labelComponent]).To(Equal(componentOrderer))
+			Expect(servicePorts(ordererOpsSvc)).To(ContainElement(int32(8443)))
+
 			var peerDeploy appsv1.Deployment
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Namespace: bankNamespace,
@@ -722,6 +1034,10 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(peerEnv["CORE_PEER_GOSSIP_EXTERNALENDPOINT"]).To(Equal("peer0.fo-test-banka.svc.cluster.local:7051"))
 			Expect(peerEnv["CORE_PEER_LOCALMSPID"]).To(Equal("BankAMSP"))
 			Expect(peerEnv["CORE_PEER_MSPCONFIGPATH"]).To(Equal(peerMSPPath))
+			Expect(peerEnv["CORE_VM_ENDPOINT"]).To(Equal(""))
+			Expect(peerEnv["CORE_OPERATIONS_LISTENADDRESS"]).To(Equal("0.0.0.0:9443"))
+			Expect(peerEnv["CORE_OPERATIONS_TLS_ENABLED"]).To(Equal("false"))
+			Expect(peerEnv["CORE_METRICS_PROVIDER"]).To(Equal("prometheus"))
 			Expect(peerEnv["CORE_PEER_TLS_ENABLED"]).To(Equal("true"))
 			Expect(peerEnv["CORE_PEER_TLS_CERT_FILE"]).To(Equal(peerTLSPath + "/server.crt"))
 			Expect(peerEnv["CORE_PEER_TLS_KEY_FILE"]).To(Equal(peerTLSPath + "/server.key"))
@@ -729,7 +1045,9 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(peerDeploy.Labels[labelWorkload]).To(Equal("peer0"))
 			Expect(peerDeploy.Annotations[annotationOrg]).To(Equal("BankA"))
 			Expect(peerDeploy.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
-			Expect(containerPorts(peerContainer)).To(ContainElements(int32(7051), int32(7052)))
+			Expect(containerPorts(peerContainer)).To(ContainElements(int32(7051), int32(7052), int32(9443)))
+			expectOperationsProbe(peerContainer.ReadinessProbe)
+			expectOperationsProbe(peerContainer.LivenessProbe)
 			expectContainerResources(peerContainer, defaultPeerRequestCPU, defaultPeerRequestMem, defaultPeerLimitCPU, defaultPeerLimitMem)
 			Expect(secretVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "peer0-msp"))
 			Expect(secretVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "peer0-tls"))
@@ -747,6 +1065,16 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Name:      "peer0",
 			}, &peerSvc)).To(Succeed())
 			Expect(servicePorts(peerSvc)).To(ContainElements(int32(7051), int32(7052)))
+
+			var peerOpsSvc corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "peer0-operations",
+			}, &peerOpsSvc)).To(Succeed())
+			Expect(peerOpsSvc.Labels[labelEndpoint]).To(Equal(endpointOperations))
+			Expect(peerOpsSvc.Labels[labelAppComponent]).To(Equal("peer-operations"))
+			Expect(peerOpsSvc.Spec.Selector[labelComponent]).To(Equal(componentPeer))
+			Expect(servicePorts(peerOpsSvc)).To(ContainElement(int32(9443)))
 
 			markDeploymentReady(ctx, ordererNamespace, "orderer0")
 			markDeploymentReady(ctx, bankNamespace, "peer0")
@@ -786,6 +1114,11 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(channels).NotTo(BeNil())
 			Expect(channels.Status).To(Equal(metav1.ConditionTrue))
 			Expect(channels.Reason).To(Equal("NoChannelsDeclared"))
+
+			observability := apiMeta.FindStatusCondition(network.Status.Conditions, conditionObservabilityReady)
+			Expect(observability).NotTo(BeNil())
+			Expect(observability.Status).To(Equal(metav1.ConditionTrue))
+			Expect(observability.Reason).To(Equal("OperationsEndpointsReady"))
 		})
 
 		It("should map declared channel memberships into status", func() {
@@ -842,6 +1175,128 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(channels.Status).To(Equal(metav1.ConditionFalse))
 			Expect(channels.Reason).To(Equal("ChannelBootstrapPending"))
 			Expect(channels.Message).To(Equal("settlement: Waiting for Fabric components before channel bootstrap"))
+		})
+
+		It("should report invalid Fabric topology before reconciling child resources", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Orgs = []fabricopsv1alpha1.Org{
+				{
+					Organization: fabricopsv1alpha1.OrgMeta{
+						Name:    "BankA",
+						Domain:  "banka.example.com",
+						MSPName: "BankAMSP",
+					},
+					CA: fabricopsv1alpha1.CAConfig{DB: "sqlite"},
+					Peer: &fabricopsv1alpha1.PeerConfig{
+						Instances: 1,
+						DB:        "CouchDB",
+						Prefix:    componentPeer,
+					},
+				},
+			}
+			network.Spec.Channels = []fabricopsv1alpha1.Channel{
+				{
+					Name: "settlement",
+					Orgs: []fabricopsv1alpha1.ChannelOrg{
+						{
+							Name:  "BankA",
+							Peers: []string{"peer9"},
+						},
+						{
+							Name:  "MissingOrg",
+							Peers: []string{"peer0"},
+						},
+					},
+				},
+			}
+			network.Spec.Chaincodes = []fabricopsv1alpha1.Chaincode{
+				{
+					Name:    "settlement",
+					Version: "0.0.1",
+					Channel: "payments",
+					Image:   "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0",
+				},
+			}
+			Expect(k8sClient.Update(ctx, &network)).To(Succeed())
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseFailed))
+			Expect(network.Status.Message).To(ContainSubstring("Invalid Fabric topology"))
+			Expect(network.Status.Message).To(ContainSubstring("at least one orderer instance is required"))
+			Expect(network.Status.Message).To(ContainSubstring(`channel "settlement" org "BankA" references unknown peers: peer9`))
+			Expect(network.Status.Message).To(ContainSubstring(`channel "settlement" references unknown org "MissingOrg"`))
+			Expect(network.Status.Message).To(ContainSubstring(`chaincode "settlement" references unknown channel "payments"`))
+			Expect(network.Status.OrgStatus).To(BeEmpty())
+			Expect(network.Status.ChannelStatus).To(BeEmpty())
+			Expect(network.Status.ChaincodeStatus).To(BeEmpty())
+
+			ready := apiMeta.FindStatusCondition(network.Status.Conditions, conditionReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal("TopologyInvalid"))
+			Expect(ready.Message).To(Equal(network.Status.Message))
+
+			channels := apiMeta.FindStatusCondition(network.Status.Conditions, conditionChannelsReady)
+			Expect(channels).NotTo(BeNil())
+			Expect(channels.Status).To(Equal(metav1.ConditionUnknown))
+			Expect(channels.Reason).To(Equal("TopologyInvalid"))
+		})
+
+		It("should build ServiceMonitor output for org operations services when enabled", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Global.Observability = &fabricopsv1alpha1.ObservabilityConfig{
+				ServiceMonitor: &fabricopsv1alpha1.ServiceMonitorConfig{
+					Enabled:       true,
+					Interval:      "15s",
+					ScrapeTimeout: "5s",
+					Labels: map[string]string{
+						"release": "prometheus",
+					},
+				},
+			}
+			org := network.Spec.Orgs[1]
+
+			serviceMonitor := buildOrgServiceMonitor(&network, org, "fo-test-banka")
+			Expect(serviceMonitor.GetAPIVersion()).To(Equal("monitoring.coreos.com/v1"))
+			Expect(serviceMonitor.GetKind()).To(Equal("ServiceMonitor"))
+			Expect(serviceMonitor.GetName()).To(Equal("test-banka-operations"))
+			Expect(serviceMonitor.GetNamespace()).To(Equal("fo-test-banka"))
+			Expect(serviceMonitor.GetLabels()).To(HaveKeyWithValue("release", "prometheus"))
+			Expect(serviceMonitor.GetLabels()).To(HaveKeyWithValue(labelAppComponent, componentMonitor))
+			Expect(serviceMonitor.GetAnnotations()).To(HaveKeyWithValue(annotationOrg, "BankA"))
+
+			selector, found, err := unstructured.NestedStringMap(serviceMonitor.Object, "spec", "selector", "matchLabels")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(selector).To(HaveKeyWithValue(labelFabricNetwork, resourceName))
+			Expect(selector).To(HaveKeyWithValue(labelFabricNetworkNamespace, resourceNamespace))
+			Expect(selector).To(HaveKeyWithValue(labelOrg, "banka"))
+			Expect(selector).To(HaveKeyWithValue(labelEndpoint, endpointOperations))
+
+			endpoints, found, err := unstructured.NestedSlice(serviceMonitor.Object, "spec", "endpoints")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(endpoints).To(HaveLen(1))
+			endpoint, ok := endpoints[0].(map[string]interface{})
+			Expect(ok).To(BeTrue())
+			Expect(endpoint).To(HaveKeyWithValue("port", endpointOperations))
+			Expect(endpoint).To(HaveKeyWithValue("path", "/metrics"))
+			Expect(endpoint).To(HaveKeyWithValue("scheme", "http"))
+			Expect(endpoint).To(HaveKeyWithValue("interval", "15s"))
+			Expect(endpoint).To(HaveKeyWithValue("scrapeTimeout", "5s"))
+			Expect(endpoint).To(HaveKeyWithValue("honorLabels", true))
 		})
 
 		It("should generate CCaaS package metadata for declared chaincodes", func() {
@@ -1467,6 +1922,8 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(chaincodeContainer.Image).To(Equal("ghcr.io/dpereowei/fabricops-node-settlement:0.1.0"))
 			Expect(chaincodeContainer.ImagePullPolicy).To(Equal(corev1.PullIfNotPresent))
 			Expect(containerPorts(chaincodeContainer)).To(ContainElement(int32(7052)))
+			expectTCPProbe(chaincodeContainer.ReadinessProbe, 7052)
+			expectTCPProbe(chaincodeContainer.LivenessProbe, 7052)
 			Expect(envMap(chaincodeContainer)[envCCAASChaincodeID]).To(Equal("settlement_settlement_0.0.1:abc123"))
 			Expect(envMap(chaincodeContainer)[envCCAASCoreChaincodeIDName]).To(Equal("settlement_settlement_0.0.1:abc123"))
 			Expect(envMap(chaincodeContainer)[envCCAASChaincodeServerAddress]).To(Equal("0.0.0.0:7052"))
@@ -1623,6 +2080,7 @@ func deleteFabricNetworkIfExists(ctx context.Context, name types.NamespacedName)
 
 func cleanupOrgNamespaceResources(ctx context.Context, namespace string) {
 	deleteAllJobs(ctx, namespace)
+	deleteAllNetworkPolicies(ctx, namespace)
 	deleteAllConfigMaps(ctx, namespace)
 	deleteAllDeployments(ctx, namespace)
 	deleteAllPersistentVolumeClaims(ctx, namespace)
@@ -1643,6 +2101,19 @@ func deleteAllJobs(ctx context.Context, namespace string) {
 
 	for i := range jobs.Items {
 		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &jobs.Items[i]))).To(Succeed())
+	}
+}
+
+func deleteAllNetworkPolicies(ctx context.Context, namespace string) {
+	var networkPolicies networkingv1.NetworkPolicyList
+	err := k8sClient.List(ctx, &networkPolicies, client.InNamespace(namespace))
+	if errors.IsNotFound(err) {
+		return
+	}
+	Expect(err).NotTo(HaveOccurred())
+
+	for i := range networkPolicies.Items {
+		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &networkPolicies.Items[i]))).To(Succeed())
 	}
 }
 
@@ -2224,6 +2695,20 @@ func containerPorts(container corev1.Container) []int32 {
 		ports = append(ports, port.ContainerPort)
 	}
 	return ports
+}
+
+func expectTCPProbe(probe *corev1.Probe, port int32) {
+	Expect(probe).NotTo(BeNil())
+	Expect(probe.TCPSocket).NotTo(BeNil())
+	Expect(probe.TCPSocket.Port.IntVal).To(Equal(port))
+}
+
+func expectOperationsProbe(probe *corev1.Probe) {
+	Expect(probe).NotTo(BeNil())
+	Expect(probe.HTTPGet).NotTo(BeNil())
+	Expect(probe.HTTPGet.Path).To(Equal("/healthz"))
+	Expect(probe.HTTPGet.Port.StrVal).To(Equal(endpointOperations))
+	Expect(probe.HTTPGet.Scheme).To(Equal(corev1.URISchemeHTTP))
 }
 
 func expectContainerResources(container corev1.Container, requestCPU, requestMemory, limitCPU, limitMemory string) {
