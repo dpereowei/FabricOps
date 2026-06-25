@@ -97,6 +97,33 @@ kubectl get pods -n fo-sample-orderer
 kubectl get pods -n fo-sample-banka
 ```
 
+For a clean kind-cluster demo:
+
+```bash
+kind create cluster --name fabricops-packaging
+kind load docker-image controller:latest --name fabricops-packaging
+kubectl apply -f dist/install.yaml
+kubectl rollout status deployment/fabricops-controller-manager -n fabricops-system --timeout=120s
+kubectl apply -k config/samples
+kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
+config/samples/chaincodes/node_settlement/invoke_smoke.sh
+```
+
+## Helm Install
+
+FabricOps also ships a generated Helm chart at `dist/chart`:
+
+```bash
+make docker-build IMG=controller:latest
+kind load docker-image controller:latest --name <cluster-name>
+make helm-deploy IMG=controller:latest
+make helm-status
+kubectl apply -k config/samples
+kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
+```
+
+By default, the chart installs CRDs, RBAC, the manager Deployment, and the metrics Service into `fabricops-system`. The chart defaults to `controller:latest` with `IfNotPresent` for local development. Override release settings with `HELM_RELEASE`, `HELM_NAMESPACE`, `HELM_CHART_DIR`, and `HELM_EXTRA_ARGS`.
+
 ## Identity Secrets
 
 FabricOps uses Fabric CA enrollment as the identity material path. The deterministic Secret contract is:
