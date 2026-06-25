@@ -51,7 +51,7 @@ spec:
     - name: settlement
       version: "0.0.1"
       channel: settlement
-      image: settlement-engine:latest
+      image: ghcr.io/dpereowei/fabricops-node-settlement:0.1.0
       sequence: 1
       ccaas:
         replicas: 1

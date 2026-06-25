@@ -207,14 +207,24 @@ type ChannelStatus struct {
 }
 
 type ChaincodeTargetStatus struct {
-	OrgName              string `json:"orgName"`
-	Namespace            string `json:"namespace,omitempty"`
-	PeerName             string `json:"peerName"`
-	ServiceName          string `json:"serviceName,omitempty"`
-	Address              string `json:"address,omitempty"`
-	PackageConfigMapName string `json:"packageConfigMapName,omitempty"`
-	PackageMetadataReady bool   `json:"packageMetadataReady"`
-	Message              string `json:"message,omitempty"`
+	OrgName                string         `json:"orgName"`
+	Namespace              string         `json:"namespace,omitempty"`
+	PeerName               string         `json:"peerName"`
+	WorkloadName           string         `json:"workloadName,omitempty"`
+	Workload               WorkloadStatus `json:"workload,omitempty"`
+	WorkloadReady          bool           `json:"workloadReady"`
+	ServiceName            string         `json:"serviceName,omitempty"`
+	Address                string         `json:"address,omitempty"`
+	PackageConfigMapName   string         `json:"packageConfigMapName,omitempty"`
+	PackageIDConfigMapName string         `json:"packageIDConfigMapName,omitempty"`
+	InstallJobName         string         `json:"installJobName,omitempty"`
+	ApproveJobName         string         `json:"approveJobName,omitempty"`
+	PackageMetadataReady   bool           `json:"packageMetadataReady"`
+	PackageID              string         `json:"packageID,omitempty"`
+	ChaincodeID            string         `json:"chaincodeID,omitempty"`
+	Installed              bool           `json:"installed"`
+	Approved               bool           `json:"approved"`
+	Message                string         `json:"message,omitempty"`
 }
 
 type ChaincodeStatus struct {
@@ -225,6 +235,15 @@ type ChaincodeStatus struct {
 	Sequence             int32                   `json:"sequence,omitempty"`
 	PackageMetadata      WorkloadStatus          `json:"packageMetadata,omitempty"`
 	PackageMetadataReady bool                    `json:"packageMetadataReady"`
+	Installed            WorkloadStatus          `json:"installed,omitempty"`
+	InstalledReady       bool                    `json:"installedReady"`
+	Workloads            WorkloadStatus          `json:"workloads,omitempty"`
+	WorkloadsReady       bool                    `json:"workloadsReady"`
+	Approved             WorkloadStatus          `json:"approved,omitempty"`
+	ApprovedReady        bool                    `json:"approvedReady"`
+	CommitJobName        string                  `json:"commitJobName,omitempty"`
+	Committed            bool                    `json:"committed"`
+	Ready                bool                    `json:"ready"`
 	Targets              []ChaincodeTargetStatus `json:"targets,omitempty"`
 	Message              string                  `json:"message,omitempty"`
 }

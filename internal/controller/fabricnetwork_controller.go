@@ -553,6 +553,7 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	identityReady := identityMaterialReady(orgStatuses)
+	chaincodesReady := allChaincodesReady(chaincodeStatuses)
 	identityStatus := metav1.ConditionFalse
 	identityReason := "IdentityMaterialMissing"
 	if identityReady {
@@ -561,12 +562,18 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	identityMessage := identityMaterialMessage(orgStatuses)
 
-	if allOrgsReady(orgStatuses) && channelsReady {
+	if allOrgsReady(orgStatuses) && channelsReady && chaincodesReady {
 		readyReason := "ComponentsReady"
 		readyMessage := "All Fabric components are ready"
-		if len(channelStatuses) > 0 {
+		if len(channelStatuses) > 0 && len(chaincodeStatuses) > 0 {
+			readyReason = "FabricNetworkReady"
+			readyMessage = "All Fabric components, channels, and chaincodes are ready"
+		} else if len(channelStatuses) > 0 {
 			readyReason = "FabricNetworkReady"
 			readyMessage = "All Fabric components and channels are ready"
+		} else if len(chaincodeStatuses) > 0 {
+			readyReason = "FabricNetworkReady"
+			readyMessage = "All Fabric components and chaincodes are ready"
 		}
 		if err := r.updateStatus(
 			ctx,
@@ -604,6 +611,9 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	} else if allOrgsReady(orgStatuses) && !channelsReady {
 		readyReason = "ChannelsNotReady"
 		readyMessage = "Waiting for Fabric channels to become ready"
+	} else if allOrgsReady(orgStatuses) && channelsReady && !chaincodesReady {
+		readyReason = "ChaincodesNotReady"
+		readyMessage = "Waiting for Fabric chaincodes to become ready"
 	}
 
 	if err := r.updateStatus(

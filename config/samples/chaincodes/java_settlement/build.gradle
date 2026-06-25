@@ -10,17 +10,6 @@ java {
     targetCompatibility = JavaVersion.VERSION_1_8
 }
 
-repositories {
-    mavenLocal()
-    mavenCentral()
-    maven {
-        url 'https://jitpack.io'
-    }
-    maven {
-        url 'https://nexus.hyperledger.org/content/repositories/snapshots/'
-    }
-}
-
 dependencies {
     implementation 'org.hyperledger.fabric-chaincode-java:fabric-chaincode-shim:2.5.0'
     implementation 'org.json:json:20180813'

@@ -491,8 +491,40 @@ spec:
               chaincodeStatus:
                 items:
                   properties:
+                    approved:
+                      properties:
+                        desired:
+                          format: int32
+                          type: integer
+                        ready:
+                          format: int32
+                          type: integer
+                      required:
+                      - desired
+                      - ready
+                      type: object
+                    approvedReady:
+                      type: boolean
                     channel:
                       type: string
+                    commitJobName:
+                      type: string
+                    committed:
+                      type: boolean
+                    installed:
+                      properties:
+                        desired:
+                          format: int32
+                          type: integer
+                        ready:
+                          format: int32
+                          type: integer
+                      required:
+                      - desired
+                      - ready
+                      type: object
+                    installedReady:
+                      type: boolean
                     message:
                       type: string
                     name:
@@ -513,6 +545,8 @@ spec:
                       type: object
                     packageMetadataReady:
                       type: boolean
+                    ready:
+                      type: boolean
                     sequence:
                       format: int32
                       type: integer
@@ -521,6 +555,16 @@ spec:
                         properties:
                           address:
                             type: string
+                          approveJobName:
+                            type: string
+                          approved:
+                            type: boolean
+                          chaincodeID:
+                            type: string
+                          installJobName:
+                            type: string
+                          installed:
+                            type: boolean
                           message:
                             type: string
                           namespace:
@@ -529,25 +573,67 @@ spec:
                             type: string
                           packageConfigMapName:
                             type: string
+                          packageID:
+                            type: string
+                          packageIDConfigMapName:
+                            type: string
                           packageMetadataReady:
                             type: boolean
                           peerName:
                             type: string
                           serviceName:
                             type: string
+                          workload:
+                            properties:
+                              desired:
+                                format: int32
+                                type: integer
+                              ready:
+                                format: int32
+                                type: integer
+                            required:
+                            - desired
+                            - ready
+                            type: object
+                          workloadName:
+                            type: string
+                          workloadReady:
+                            type: boolean
                         required:
+                        - approved
+                        - installed
                         - orgName
                         - packageMetadataReady
                         - peerName
+                        - workloadReady
                         type: object
                       type: array
                     version:
                       type: string
+                    workloads:
+                      properties:
+                        desired:
+                          format: int32
+                          type: integer
+                        ready:
+                          format: int32
+                          type: integer
+                      required:
+                      - desired
+                      - ready
+                      type: object
+                    workloadsReady:
+                      type: boolean
                   required:
+                  - approvedReady
                   - channel
+                  - committed
+                  - installedReady
                   - name
                   - packageMetadataReady
+                  - ready
                   - version
+                  - workloadsReady
                   type: object
                 type: array
               channelStatus:

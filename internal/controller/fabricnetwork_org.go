@@ -728,6 +728,10 @@ func syncManagedContainers(existing []corev1.Container, desired []corev1.Contain
 			containers[i].Image = desired[i].Image
 			changed = true
 		}
+		if containers[i].ImagePullPolicy != desired[i].ImagePullPolicy {
+			containers[i].ImagePullPolicy = desired[i].ImagePullPolicy
+			changed = true
+		}
 		if !reflect.DeepEqual(containers[i].Command, desired[i].Command) {
 			containers[i].Command = desired[i].Command
 			changed = true
