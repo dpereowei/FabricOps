@@ -17,7 +17,7 @@ The long-term goal is automated Fabric infrastructure on Kubernetes: Terraform f
 
 FabricOps supports:
 
-- A namespaced `FabricNetwork` CRD at `fabricops.my.domain/v1alpha1`
+- A namespaced `FabricNetwork` CRD at `fabricops.io/v1alpha1`
 - Per-org Kubernetes namespaces with compact network-scoped names
 - Fabric CA, orderer, peer, and CCaaS chaincode workloads
 - Fabric CA registrar bootstrap, admin enrollment, and workload enrollment Secrets
@@ -124,6 +124,30 @@ kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready
 
 By default, the chart installs CRDs, RBAC, the manager Deployment, and the metrics Service into `fabricops-system`. The chart defaults to `controller:latest` with `IfNotPresent` for local development. Override release settings with `HELM_RELEASE`, `HELM_NAMESPACE`, `HELM_CHART_DIR`, and `HELM_EXTRA_ARGS`.
 
+## Manager Images
+
+Local development uses `controller:latest` so OrbStack and kind can run the manager image without a registry. Published manager images should use immutable SemVer tags at:
+
+```text
+ghcr.io/dpereowei/fabricops:<version>
+```
+
+For example:
+
+```bash
+make docker-build-release VERSION=0.1.0
+make docker-push-release VERSION=0.1.0
+make build-installer-release VERSION=0.1.0
+```
+
+Use that same tag for Helm installs:
+
+```bash
+make helm-deploy-release VERSION=0.1.0
+```
+
+The release helpers derive `RELEASE_IMG` from `IMAGE_REGISTRY`, `IMAGE_REPOSITORY`, and `VERSION`. Override those variables if the image moves to another registry or repository.
+
 ## Identity Secrets
 
 FabricOps uses Fabric CA enrollment as the identity material path. The deterministic Secret contract is:
@@ -198,7 +222,7 @@ FabricOps adds a finalizer to each `FabricNetwork`. When a `FabricNetwork` is de
 ## Example Resource
 
 ```yaml
-apiVersion: fabricops.my.domain/v1alpha1
+apiVersion: fabricops.io/v1alpha1
 kind: FabricNetwork
 metadata:
   name: fabricnetwork-sample

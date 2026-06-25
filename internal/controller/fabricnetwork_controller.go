@@ -57,7 +57,7 @@ const (
 	conditionIdentityMaterialReady = "IdentityMaterialReady"
 	conditionChannelsReady         = "ChannelsReady"
 	conditionObservabilityReady    = "ObservabilityReady"
-	fabricNetworkFinalizer         = "fabricops.my.domain/finalizer"
+	fabricNetworkFinalizer         = "fabricops.io/finalizer"
 )
 
 func orgNamespaceName(net *fabricopsv1alpha1.FabricNetwork, org fabricopsv1alpha1.Org) string {
@@ -680,9 +680,9 @@ func (r *FabricNetworkReconciler) updateStatus(
 	return nil
 }
 
-// +kubebuilder:rbac:groups=fabricops.my.domain,resources=fabricnetworks,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=fabricops.my.domain,resources=fabricnetworks/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=fabricops.my.domain,resources=fabricnetworks/finalizers,verbs=update
+// +kubebuilder:rbac:groups=fabricops.io,resources=fabricnetworks,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=fabricops.io,resources=fabricnetworks/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=fabricops.io,resources=fabricnetworks/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete

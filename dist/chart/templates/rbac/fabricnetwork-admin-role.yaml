@@ -17,13 +17,13 @@ metadata:
   name: {{ include "fabricops.resourceName" (dict "suffix" "fabricnetwork-admin-role" "context" $) }}
 rules:
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks
   verbs:
   - '*'
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks/status
   verbs:

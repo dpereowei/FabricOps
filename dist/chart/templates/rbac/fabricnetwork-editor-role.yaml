@@ -17,7 +17,7 @@ metadata:
   name: {{ include "fabricops.resourceName" (dict "suffix" "fabricnetwork-editor-role" "context" $) }}
 rules:
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks
   verbs:
@@ -29,7 +29,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks/status
   verbs:

@@ -1981,8 +1981,8 @@ kubectl -n "$POD_NAMESPACE" create configmap "$FABRICOPS_CHANNEL_BLOCK_CONFIGMAP
   --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
 
 kubectl -n "$POD_NAMESPACE" label configmap "$FABRICOPS_CHANNEL_BLOCK_CONFIGMAP" \
-  fabricops.my.domain/component=channel \
-  fabricops.my.domain/channel="${FABRICOPS_CHANNEL_BLOCK_FILE%.block}" \
+  fabricops.io/component=channel \
+  fabricops.io/channel="${FABRICOPS_CHANNEL_BLOCK_FILE%.block}" \
   app.kubernetes.io/component=channel \
   --overwrite
 `

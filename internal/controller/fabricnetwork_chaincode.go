@@ -1395,10 +1395,10 @@ kubectl -n "$POD_NAMESPACE" create configmap "$FABRICOPS_CHAINCODE_PACKAGE_ID_CO
   --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
 
 kubectl -n "$POD_NAMESPACE" label configmap "$FABRICOPS_CHAINCODE_PACKAGE_ID_CONFIGMAP" \
-  fabricops.my.domain/component=chaincode \
-  fabricops.my.domain/channel="$FABRICOPS_CHAINCODE_CHANNEL" \
-  fabricops.my.domain/chaincode="$FABRICOPS_CHAINCODE_NAME" \
-  fabricops.my.domain/workload="$FABRICOPS_CHAINCODE_PEER" \
+  fabricops.io/component=chaincode \
+  fabricops.io/channel="$FABRICOPS_CHAINCODE_CHANNEL" \
+  fabricops.io/chaincode="$FABRICOPS_CHAINCODE_NAME" \
+  fabricops.io/workload="$FABRICOPS_CHAINCODE_PEER" \
   app.kubernetes.io/component=chaincode \
   --overwrite
 `

@@ -12,9 +12,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: fabricnetworks.fabricops.my.domain
+  name: fabricnetworks.fabricops.io
 spec:
-  group: fabricops.my.domain
+  group: fabricops.io
   names:
     kind: FabricNetwork
     listKind: FabricNetworkList
@@ -1020,13 +1020,13 @@ metadata:
   name: fabricops-fabricnetwork-admin-role
 rules:
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks
   verbs:
   - '*'
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks/status
   verbs:
@@ -1041,7 +1041,7 @@ metadata:
   name: fabricops-fabricnetwork-editor-role
 rules:
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks
   verbs:
@@ -1053,7 +1053,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks/status
   verbs:
@@ -1068,7 +1068,7 @@ metadata:
   name: fabricops-fabricnetwork-viewer-role
 rules:
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks
   verbs:
@@ -1076,7 +1076,7 @@ rules:
   - list
   - watch
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks/status
   verbs:
@@ -1145,7 +1145,7 @@ rules:
   - update
   - watch
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks
   verbs:
@@ -1157,13 +1157,13 @@ rules:
   - update
   - watch
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks/finalizers
   verbs:
   - update
 - apiGroups:
-  - fabricops.my.domain
+  - fabricops.io
   resources:
   - fabricnetworks/status
   verbs:

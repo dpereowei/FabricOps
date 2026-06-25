@@ -1,5 +1,11 @@
-# Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+# Image URL to use for local building/deployment targets.
+LOCAL_IMG ?= controller:latest
+IMG ?= $(LOCAL_IMG)
+# Canonical manager image location for release builds.
+IMAGE_REGISTRY ?= ghcr.io/dpereowei
+IMAGE_REPOSITORY ?= fabricops
+VERSION ?= 0.1.0
+RELEASE_IMG ?= $(IMAGE_REGISTRY)/$(IMAGE_REPOSITORY):$(VERSION)
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -127,6 +133,14 @@ docker-build: ## Build docker image with the manager.
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
+.PHONY: docker-build-release
+docker-build-release: ## Build the manager image with the canonical release tag.
+	$(MAKE) docker-build IMG=$(RELEASE_IMG)
+
+.PHONY: docker-push-release
+docker-push-release: ## Push the manager image with the canonical release tag.
+	$(MAKE) docker-push IMG=$(RELEASE_IMG)
+
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
 # - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
@@ -149,6 +163,10 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	mkdir -p dist
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+
+.PHONY: build-installer-release
+build-installer-release: ## Generate install bundle with the canonical release image tag.
+	$(MAKE) build-installer IMG=$(RELEASE_IMG)
 
 ##@ Deployment
 
@@ -289,6 +307,10 @@ helm-deploy: install-helm ## Deploy manager to the K8s cluster via Helm. Specify
 		--wait \
 		--timeout 5m \
 		$(HELM_EXTRA_ARGS)
+
+.PHONY: helm-deploy-release
+helm-deploy-release: ## Deploy manager via Helm with the canonical release image tag.
+	$(MAKE) helm-deploy IMG=$(RELEASE_IMG)
 
 .PHONY: helm-uninstall
 helm-uninstall: ## Uninstall the Helm release from the K8s cluster.

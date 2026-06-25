@@ -34,7 +34,7 @@ has repeatable CI or e2e coverage in this repository.
 
 | Feature | Fablo v2 | Fablo v3 | FabricOps status | Documented | CI tests | Notes |
 |---------|----------|----------|------------------|------------|----------|-------|
-| Declarative Kubernetes `FabricNetwork` CRD | n/a | n/a | Supported | README | | Main operator API at `fabricops.my.domain/v1alpha1` |
+| Declarative Kubernetes `FabricNetwork` CRD | n/a | n/a | Supported | README | | Main operator API at `fabricops.io/v1alpha1` |
 | Per-org Kubernetes namespaces | n/a | n/a | Supported | README | | Uses compact `fo-<network>-<org>` names |
 | Fabric CA deployment | n/a | n/a | Supported | README | | One CA Deployment per org |
 | Fabric CA registrar bootstrap Secrets | n/a | n/a | Supported | README | | Deterministic bootstrap credential Secrets |

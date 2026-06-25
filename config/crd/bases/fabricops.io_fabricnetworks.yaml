@@ -1,15 +1,12 @@
-{{- if .Values.crd.enabled }}
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    {{- if .Values.crd.keep }}
-    "helm.sh/resource-policy": keep
-    {{- end }}
     controller-gen.kubebuilder.io/version: v0.21.0
-  name: fabricnetworks.fabricops.my.domain
+  name: fabricnetworks.fabricops.io
 spec:
-  group: fabricops.my.domain
+  group: fabricops.io
   names:
     kind: FabricNetwork
     listKind: FabricNetworkList
@@ -955,4 +952,3 @@ spec:
     storage: true
     subresources:
       status: {}
-{{- end }}

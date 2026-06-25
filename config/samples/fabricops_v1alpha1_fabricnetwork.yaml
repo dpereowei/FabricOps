@@ -1,4 +1,4 @@
-apiVersion: fabricops.my.domain/v1alpha1
+apiVersion: fabricops.io/v1alpha1
 kind: FabricNetwork
 metadata:
   labels:

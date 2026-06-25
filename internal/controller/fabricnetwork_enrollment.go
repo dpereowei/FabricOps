@@ -636,9 +636,9 @@ kubectl -n "$POD_NAMESPACE" create secret generic "$FABRICOPS_ADMIN_MSP_SECRET" 
   --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
 
 kubectl -n "$POD_NAMESPACE" label secret "$FABRICOPS_ADMIN_MSP_SECRET" \
-  fabricops.my.domain/identity-kind=admin-msp \
-  fabricops.my.domain/identity-source=fabric-ca \
-  fabricops.my.domain/workload="$FABRICOPS_ADMIN_NAME" \
+  fabricops.io/identity-kind=admin-msp \
+  fabricops.io/identity-source=fabric-ca \
+  fabricops.io/workload="$FABRICOPS_ADMIN_NAME" \
   --overwrite
 
 if [ "$FABRICOPS_TLS_ENABLED" = "true" ]; then
@@ -649,9 +649,9 @@ if [ "$FABRICOPS_TLS_ENABLED" = "true" ]; then
     --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
 
   kubectl -n "$POD_NAMESPACE" label secret "$FABRICOPS_ADMIN_TLS_SECRET" \
-    fabricops.my.domain/identity-kind=admin-tls \
-    fabricops.my.domain/identity-source=fabric-ca \
-    fabricops.my.domain/workload="$FABRICOPS_ADMIN_NAME" \
+    fabricops.io/identity-kind=admin-tls \
+    fabricops.io/identity-source=fabric-ca \
+    fabricops.io/workload="$FABRICOPS_ADMIN_NAME" \
     --overwrite
 fi
 `
@@ -743,9 +743,9 @@ else
 fi
 
 kubectl -n "$POD_NAMESPACE" label secret "$FABRICOPS_WORKLOAD_MSP_SECRET" \
-  fabricops.my.domain/identity-kind=msp \
-  fabricops.my.domain/identity-source=fabric-ca \
-  fabricops.my.domain/workload="$FABRICOPS_WORKLOAD_NAME" \
+  fabricops.io/identity-kind=msp \
+  fabricops.io/identity-source=fabric-ca \
+  fabricops.io/workload="$FABRICOPS_WORKLOAD_NAME" \
   --overwrite
 
 if [ "$FABRICOPS_TLS_ENABLED" = "true" ]; then
@@ -756,9 +756,9 @@ if [ "$FABRICOPS_TLS_ENABLED" = "true" ]; then
     --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
 
   kubectl -n "$POD_NAMESPACE" label secret "$FABRICOPS_WORKLOAD_TLS_SECRET" \
-    fabricops.my.domain/identity-kind=tls \
-    fabricops.my.domain/identity-source=fabric-ca \
-    fabricops.my.domain/workload="$FABRICOPS_WORKLOAD_NAME" \
+    fabricops.io/identity-kind=tls \
+    fabricops.io/identity-source=fabric-ca \
+    fabricops.io/workload="$FABRICOPS_WORKLOAD_NAME" \
     --overwrite
 fi
 `
