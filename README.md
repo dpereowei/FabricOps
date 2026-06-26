@@ -1,6 +1,7 @@
 [![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/13370/badge)](https://bestpractices.coreinfrastructure.org/projects/13370) [![Go Report Card](https://goreportcard.com/badge/github.com/dpereowei/fabricops)](https://goreportcard.com/report/github.com/dpereowei/fabricops) ![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/dpereowei/fabricops?sort=semver)
 
-<h1><img src="./logo.png" alt="FabricOps"/></h1>
+![FabricOps](./fabricops-lockup-ink.png#gh-light-mode-only)
+![FabricOps](./logo.png#gh-dark-mode-only)
 
 FabricOps is a Kubernetes operator for provisioning multi-organization Hyperledger Fabric networks from declarative configuration.
 
