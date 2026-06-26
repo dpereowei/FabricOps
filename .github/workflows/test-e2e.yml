@@ -10,8 +10,13 @@ jobs:
   test-e2e:
     permissions:
       contents: read
-    name: Run on Ubuntu
+    name: Bundle smoke on kind
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      KIND_CLUSTER: fabricops-ci-e2e
+      KIND_VERSION: v0.31.0
+      IMG: controller:latest
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -23,16 +28,19 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install the latest version of kind
+      - name: Install kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-$(go env GOARCH)
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
       - name: Verify kind installation
         run: kind version
 
-      - name: Running Test e2e
+      - name: Run kind bundle e2e smoke
         run: |
-          go mod tidy
           make test-e2e
+
+      - name: Cleanup kind cluster
+        if: always()
+        run: kind delete cluster --name "${KIND_CLUSTER}" || true

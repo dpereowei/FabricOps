@@ -7,13 +7,16 @@ on:
 permissions: {}
 
 jobs:
-  test-e2e:
+  test-chart:
     permissions:
       contents: read
-    name: Run on Ubuntu
+    name: Helm smoke on kind
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       IMG: controller:latest
+      KIND_CLUSTER: fabricops-ci-helm
+      KIND_VERSION: v0.31.0
     steps:
       - name: Clone the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -25,9 +28,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install the latest version of kind
+      - name: Install kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-$(go env GOARCH)
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
@@ -35,13 +38,12 @@ jobs:
         run: kind version
 
       - name: Create kind cluster
-        run: kind create cluster
+        run: kind create cluster --name "${KIND_CLUSTER}"
 
       - name: Prepare fabricops
         run: |
-          go mod tidy
           make docker-build
-          kind load docker-image $IMG
+          kind load docker-image "${IMG}" --name "${KIND_CLUSTER}"
 
       - name: Install Helm
         run: make install-helm
@@ -76,3 +78,15 @@ jobs:
       - name: Check Helm release status
         run: |
           make helm-status
+
+      - name: Apply sample network
+        run: |
+          kubectl apply -k config/samples
+          kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
+
+      - name: Run Node chaincode invoke smoke
+        run: config/samples/chaincodes/node_settlement/invoke_smoke.sh
+
+      - name: Cleanup kind cluster
+        if: always()
+        run: kind delete cluster --name "${KIND_CLUSTER}" || true

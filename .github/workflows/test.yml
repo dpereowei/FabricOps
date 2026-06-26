@@ -23,7 +23,14 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Running Tests
+      - name: Verify Go modules are tidy
         run: |
           go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Run unit and envtest suite
+        run: |
           make test
+
+      - name: Verify generated files are committed
+        run: git diff --exit-code

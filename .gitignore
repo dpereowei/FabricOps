@@ -28,3 +28,16 @@ go.work
 
 # Kubeconfig might contain secrets
 *.kubeconfig
+
+# Terraform local state and machine-specific inputs
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+!*.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

@@ -6,6 +6,8 @@ IMAGE_REGISTRY ?= ghcr.io/dpereowei
 IMAGE_REPOSITORY ?= fabricops
 VERSION ?= 0.1.0
 RELEASE_IMG ?= $(IMAGE_REGISTRY)/$(IMAGE_REPOSITORY):$(VERSION)
+SAMPLE_CHAINCODE_IMAGES ?= $(IMAGE_REGISTRY)/fabricops-node-settlement:$(VERSION) $(IMAGE_REGISTRY)/fabricops-go-settlement:$(VERSION) $(IMAGE_REGISTRY)/fabricops-java-settlement:$(VERSION)
+RELEASE_CHECK_IMAGES ?= $(RELEASE_IMG) $(SAMPLE_CHAINCODE_IMAGES)
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -76,6 +78,7 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= fabricops-test-e2e
+E2E_SKIP_CLEANUP ?= false
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -90,15 +93,27 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
 			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
 	esac
+	@$(KUBECTL) config use-context kind-$(KIND_CLUSTER)
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e
+	@status=0; \
+	KIND=$(KIND) KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) IMG=$(IMG) go test -tags=e2e ./test/e2e/ -v -ginkgo.v || status=$$?; \
+	if [ "$(E2E_SKIP_CLEANUP)" = "true" ]; then \
+		echo "Keeping Kind cluster '$(KIND_CLUSTER)' because E2E_SKIP_CLEANUP=true"; \
+	else \
+		$(KIND) delete cluster --name $(KIND_CLUSTER); \
+	fi; \
+	exit $$status
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+.PHONY: cleanup-sample
+cleanup-sample: ## Delete the sample FabricNetwork and generated sample namespaces from the current cluster.
+	-$(KUBECTL) delete fabricnetwork fabricnetwork-sample -n default --ignore-not-found
+	-$(KUBECTL) delete namespace fo-sample-orderer fo-sample-banka --ignore-not-found
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -140,6 +155,10 @@ docker-build-release: ## Build the manager image with the canonical release tag.
 .PHONY: docker-push-release
 docker-push-release: ## Push the manager image with the canonical release tag.
 	$(MAKE) docker-push IMG=$(RELEASE_IMG)
+
+.PHONY: release-check-ghcr
+release-check-ghcr: ## Verify release manager and sample chaincode images are publicly pullable from GHCR.
+	VERSION="$(VERSION)" IMAGE_REGISTRY="$(IMAGE_REGISTRY)" IMAGE_REPOSITORY="$(IMAGE_REPOSITORY)" hack/check-ghcr-public.sh $(RELEASE_CHECK_IMAGES)
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

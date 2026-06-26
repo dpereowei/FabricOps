@@ -148,6 +148,35 @@ make helm-deploy-release VERSION=0.1.0
 
 The release helpers derive `RELEASE_IMG` from `IMAGE_REGISTRY`, `IMAGE_REPOSITORY`, and `VERSION`. Override those variables if the image moves to another registry or repository.
 
+Before publishing release instructions, verify that the manager image and sample chaincode images are publicly pullable from GHCR:
+
+```bash
+make release-check-ghcr VERSION=0.1.0
+```
+
+See [docs/first-release-checklist.md](docs/first-release-checklist.md) for the full release checklist.
+
+## Terraform Examples
+
+Local development infrastructure examples live under [examples/terraform](examples/terraform). The first example provisions a single-node kind cluster for FabricOps demos:
+
+```bash
+make docker-build IMG=controller:latest
+cd examples/terraform/local-kind
+terraform init
+terraform apply
+```
+
+## E2E Validation
+
+Run the repeatable kind-based e2e proof with:
+
+```bash
+make test-e2e
+```
+
+The e2e target builds the local manager image, loads it into kind, installs the generated bundle, applies the sample network, waits for `Ready=True`, and runs the Node settlement invoke smoke. See [docs/e2e-validation.md](docs/e2e-validation.md) for kind, OrbStack, and cleanup notes.
+
 ## Identity Secrets
 
 FabricOps uses Fabric CA enrollment as the identity material path. The deterministic Secret contract is:
