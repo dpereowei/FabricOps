@@ -9,6 +9,9 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/settlement-chaincode .
 
 FROM alpine:3.21
+LABEL org.opencontainers.image.source="https://github.com/dpereowei/fabricops" \
+      org.opencontainers.image.description="FabricOps Go settlement CCaaS sample chaincode" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 WORKDIR /chaincode
 COPY --from=build /out/settlement-chaincode /chaincode/settlement-chaincode

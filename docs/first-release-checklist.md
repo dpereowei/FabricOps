@@ -12,13 +12,14 @@ Use this checklist before publishing a FabricOps release tag or pointing users a
 ## Build And Publish Images
 
 ```bash
-make docker-build-release VERSION=0.1.0
-make docker-push-release VERSION=0.1.0
+make docker-buildx-release VERSION=0.1.0
 
 config/samples/chaincodes/node_settlement/build_and_push.sh
 config/samples/chaincodes/go_settlement/build_and_push.sh
 config/samples/chaincodes/java_settlement/build_and_push.sh
 ```
+
+`docker-buildx-release` is the preferred manager image release path because it publishes all configured `PLATFORMS`. Use `docker-build-release` and `docker-push-release` only for a local single-platform sanity build when needed.
 
 The published release image names are:
 
@@ -37,12 +38,20 @@ make release-check-ghcr VERSION=0.1.0
 
 This check asks GHCR for anonymous pull tokens and then reads image manifests without Docker credentials. It should pass for the manager image and all sample chaincode images before release docs, bundles, or charts reference those tags.
 
+If a newly published GHCR package is still private, open the package settings on GitHub and change its visibility to public, then rerun the check. GitHub documents the package visibility flow in [Configuring a package's access control and visibility](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility): personal-account packages are private on first publish, and public container packages allow anonymous pulls.
+
 ## Generate Release Artifacts
 
 ```bash
 make build-installer-release VERSION=0.1.0
 helm lint dist/chart
 helm template fabricops dist/chart --namespace fabricops-system >/tmp/fabricops-chart.yaml
+```
+
+Confirm the generated bundle uses the public manager image:
+
+```bash
+grep 'image: ghcr.io/dpereowei/fabricops:0.1.0' dist/install.yaml
 ```
 
 Commit the generated `dist/install.yaml` changes for the release tag.

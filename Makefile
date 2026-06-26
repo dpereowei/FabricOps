@@ -169,18 +169,26 @@ release-check-ghcr: ## Verify release manager and sample chaincode images are pu
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
+	# copy existing Dockerfile and insert the build platform directive into Dockerfile.cross, and preserve the original Dockerfile
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name fabricops-builder
-	$(CONTAINER_TOOL) buildx use fabricops-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm fabricops-builder
-	rm Dockerfile.cross
+	builder=fabricops-builder; \
+	cleanup() { $(CONTAINER_TOOL) buildx rm "$$builder" >/dev/null 2>&1 || true; rm -f Dockerfile.cross; }; \
+	trap cleanup EXIT; \
+	$(CONTAINER_TOOL) buildx create --name "$$builder" >/dev/null 2>&1 || true; \
+	$(CONTAINER_TOOL) buildx build --builder "$$builder" --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+
+.PHONY: docker-buildx-release
+docker-buildx-release: ## Build and push the manager image with the canonical release tag for all configured platforms.
+	$(MAKE) docker-buildx IMG=$(RELEASE_IMG)
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
 	mkdir -p dist
-	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
+	tmp="$$(mktemp)"; \
+	cp config/manager/kustomization.yaml "$$tmp"; \
+	trap 'cp "$$tmp" config/manager/kustomization.yaml; rm -f "$$tmp"' EXIT; \
+	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}; \
+	cd ../..; \
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
 
 .PHONY: build-installer-release

@@ -123,7 +123,7 @@ kubectl apply -k config/samples
 kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
 ```
 
-By default, the chart installs CRDs, RBAC, the manager Deployment, and the metrics Service into `fabricops-system`. The chart defaults to `controller:latest` with `IfNotPresent` for local development. Override release settings with `HELM_RELEASE`, `HELM_NAMESPACE`, `HELM_CHART_DIR`, and `HELM_EXTRA_ARGS`.
+By default, the chart installs CRDs, RBAC, the manager Deployment, and the metrics Service into `fabricops-system`. The chart defaults to `ghcr.io/dpereowei/fabricops:<chart-appVersion>`. Local development can still override the image with `make helm-deploy IMG=controller:latest`. Override release settings with `HELM_RELEASE`, `HELM_NAMESPACE`, `HELM_CHART_DIR`, and `HELM_EXTRA_ARGS`.
 
 ## Manager Images
 
@@ -136,10 +136,11 @@ ghcr.io/dpereowei/fabricops:<version>
 For example:
 
 ```bash
-make docker-build-release VERSION=0.1.0
-make docker-push-release VERSION=0.1.0
+make docker-buildx-release VERSION=0.1.0
 make build-installer-release VERSION=0.1.0
 ```
+
+`docker-buildx-release` publishes the manager image for all configured `PLATFORMS`. For local single-platform sanity checks, use `docker-build-release` and `docker-push-release`.
 
 Use that same tag for Helm installs:
 
@@ -156,6 +157,12 @@ make release-check-ghcr VERSION=0.1.0
 ```
 
 See [docs/first-release-checklist.md](docs/first-release-checklist.md) for the full release checklist.
+
+After a release tag is published, install the bundle directly with:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/dpereowei/fabricops/v0.1.0/dist/install.yaml
+```
 
 ## Terraform Examples
 

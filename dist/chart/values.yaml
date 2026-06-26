@@ -16,10 +16,10 @@ manager:
   replicas: 1
 
   image:
-    repository: controller
+    repository: ghcr.io/dpereowei/fabricops
     ## Image tag (defaults to Chart.appVersion if not set)
     ##
-    tag: latest
+    tag: ""
     pullPolicy: IfNotPresent
 
   ## Arguments
