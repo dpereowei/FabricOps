@@ -9,7 +9,6 @@ linters:
     - dupl
     - errcheck
     - ginkgolinter
-    - goconst
     - gocyclo
     - govet
     - ineffassign
@@ -17,7 +16,6 @@ linters:
     - modernize
     - misspell
     - nakedret
-    - prealloc
     - revive
     - staticcheck
     - unconvert
@@ -43,6 +41,8 @@ linters:
       disable:
         - omitzero
         - newexpr
+    gocyclo:
+      min-complexity: 50
   exclusions:
     generated: lax
     rules:

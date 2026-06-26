@@ -22,7 +22,9 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"maps"
 	"math/big"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -108,7 +110,7 @@ func (r *FabricNetworkReconciler) ensureCABootstrapSecret(
 		return err
 	}
 
-	_, err = r.ensureSecret(ctx, desired, func(secret corev1.Secret) string {
+	err = r.ensureSecret(ctx, desired, func(secret corev1.Secret) string {
 		return identitySecretValidationError(secret, secretKindCABootstrap, net.Spec.Global.TLS)
 	})
 	return err
@@ -168,7 +170,7 @@ func (r *FabricNetworkReconciler) ensureEnrollmentCredentialSecret(
 		return err
 	}
 
-	_, err = r.ensureSecret(ctx, desired, func(secret corev1.Secret) string {
+	err = r.ensureSecret(ctx, desired, func(secret corev1.Secret) string {
 		return identitySecretValidationError(secret, kind, net.Spec.Global.TLS)
 	})
 	return err
@@ -212,7 +214,7 @@ func (r *FabricNetworkReconciler) ensureSecret(
 	ctx context.Context,
 	desired *corev1.Secret,
 	validationError func(corev1.Secret) string,
-) (corev1.Secret, error) {
+) error {
 	var existing corev1.Secret
 	key := client.ObjectKeyFromObject(desired)
 
@@ -220,13 +222,12 @@ func (r *FabricNetworkReconciler) ensureSecret(
 	if apierrors.IsNotFound(err) {
 		log := logf.FromContext(ctx)
 		log.Info("Creating Secret", "name", desired.Name, "namespace", desired.Namespace)
-		return *desired, r.Create(ctx, desired)
+		return r.Create(ctx, desired)
 	}
 	if err != nil {
-		return corev1.Secret{}, err
+		return err
 	}
 
-	updated := existing
 	if err := r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
 		existing := object.(*corev1.Secret)
 		changed := false
@@ -252,7 +253,6 @@ func (r *FabricNetworkReconciler) ensureSecret(
 			}
 		}
 
-		updated = *existing
 		if !changed {
 			return false, nil
 		}
@@ -261,10 +261,10 @@ func (r *FabricNetworkReconciler) ensureSecret(
 		log.Info("Updating Secret", "name", existing.Name, "namespace", existing.Namespace)
 		return true, nil
 	}); err != nil {
-		return corev1.Secret{}, err
+		return err
 	}
 
-	return updated, nil
+	return nil
 }
 
 func identityLabels(
@@ -277,9 +277,7 @@ func identityLabels(
 	labels := orgLabels(net, org, component)
 	labels[labelWorkload] = workloadName
 
-	for key, value := range extra {
-		labels[key] = value
-	}
+	maps.Copy(labels, extra)
 
 	return labels
 }
@@ -378,7 +376,7 @@ func mspIdentitySecretValidationError(secret corev1.Secret, tlsEnabled bool) str
 	if len(signCert.ExtKeyUsage) > 0 {
 		return "signing certificate has incompatible extended key usage"
 	}
-	if _, err := parsePEMPrivateKey(secret.Data[mspKeyStoreKey]); err != nil {
+	if err := parsePEMPrivateKey(secret.Data[mspKeyStoreKey]); err != nil {
 		return "invalid private key"
 	}
 
@@ -397,7 +395,7 @@ func tlsIdentitySecretValidationError(secret corev1.Secret) string {
 	if _, err := parsePEMCertificate(secret.Data[tlsServerCertKey]); err != nil {
 		return "invalid TLS server certificate"
 	}
-	if _, err := parsePEMPrivateKey(secret.Data[tlsServerKeyKey]); err != nil {
+	if err := parsePEMPrivateKey(secret.Data[tlsServerKeyKey]); err != nil {
 		return "invalid TLS server key"
 	}
 
@@ -424,7 +422,7 @@ func adminTLSIdentitySecretValidationError(secret corev1.Secret) string {
 	if !hasExtKeyUsage(cert, x509.ExtKeyUsageClientAuth) {
 		return "TLS client certificate missing client auth usage"
 	}
-	if _, err := parsePEMPrivateKey(secret.Data[tlsClientKeyKey]); err != nil {
+	if err := parsePEMPrivateKey(secret.Data[tlsClientKeyKey]); err != nil {
 		return "invalid TLS client key"
 	}
 
@@ -432,13 +430,7 @@ func adminTLSIdentitySecretValidationError(secret corev1.Secret) string {
 }
 
 func hasExtKeyUsage(cert *x509.Certificate, usage x509.ExtKeyUsage) bool {
-	for _, actual := range cert.ExtKeyUsage {
-		if actual == usage {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(cert.ExtKeyUsage, usage)
 }
 
 func parsePEMCertificate(data []byte) (*x509.Certificate, error) {
@@ -450,22 +442,24 @@ func parsePEMCertificate(data []byte) (*x509.Certificate, error) {
 	return x509.ParseCertificate(block.Bytes)
 }
 
-func parsePEMPrivateKey(data []byte) (any, error) {
+func parsePEMPrivateKey(data []byte) error {
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return nil, fmt.Errorf("missing private key PEM block")
+		return fmt.Errorf("missing private key PEM block")
 	}
 
+	var err error
 	switch block.Type {
 	case "EC PRIVATE KEY":
-		return x509.ParseECPrivateKey(block.Bytes)
+		_, err = x509.ParseECPrivateKey(block.Bytes)
 	case "PRIVATE KEY":
-		return x509.ParsePKCS8PrivateKey(block.Bytes)
+		_, err = x509.ParsePKCS8PrivateKey(block.Bytes)
 	case "RSA PRIVATE KEY":
-		return x509.ParsePKCS1PrivateKey(block.Bytes)
+		_, err = x509.ParsePKCS1PrivateKey(block.Bytes)
 	default:
-		return nil, fmt.Errorf("unsupported private key PEM block %q", block.Type)
+		return fmt.Errorf("unsupported private key PEM block %q", block.Type)
 	}
+	return err
 }
 
 func mspConfigYAML() string {

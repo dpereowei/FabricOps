@@ -334,16 +334,16 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(observability.Reason).To(Equal("OperationsEndpointsPending"))
 			Expect(observability.Message).To(ContainSubstring("CA not ready"))
 
-			expectIdentitySecret(ctx, ordererNamespace, caBootstrapSecretName(network.Spec.Orgs[0]), secretKindCABootstrap, true)
-			expectIdentitySecret(ctx, ordererNamespace, adminEnrollmentSecretName(network.Spec.Orgs[0]), secretKindAdminEnroll, true)
-			expectIdentitySecret(ctx, ordererNamespace, "orderer0-enrollment", secretKindWorkloadEnroll, true)
+			expectIdentitySecret(ctx, ordererNamespace, caBootstrapSecretName(network.Spec.Orgs[0]), secretKindCABootstrap)
+			expectIdentitySecret(ctx, ordererNamespace, adminEnrollmentSecretName(network.Spec.Orgs[0]), secretKindAdminEnroll)
+			expectIdentitySecret(ctx, ordererNamespace, "orderer0-enrollment", secretKindWorkloadEnroll)
 			expectSecretNotFound(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindMSP))
 			expectSecretNotFound(ctx, ordererNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[0]), secretKindTLS))
 			expectSecretNotFound(ctx, ordererNamespace, "orderer0-msp")
 			expectSecretNotFound(ctx, ordererNamespace, "orderer0-tls")
-			expectIdentitySecret(ctx, bankNamespace, caBootstrapSecretName(network.Spec.Orgs[1]), secretKindCABootstrap, true)
-			expectIdentitySecret(ctx, bankNamespace, adminEnrollmentSecretName(network.Spec.Orgs[1]), secretKindAdminEnroll, true)
-			expectIdentitySecret(ctx, bankNamespace, "peer0-enrollment", secretKindWorkloadEnroll, true)
+			expectIdentitySecret(ctx, bankNamespace, caBootstrapSecretName(network.Spec.Orgs[1]), secretKindCABootstrap)
+			expectIdentitySecret(ctx, bankNamespace, adminEnrollmentSecretName(network.Spec.Orgs[1]), secretKindAdminEnroll)
+			expectIdentitySecret(ctx, bankNamespace, "peer0-enrollment", secretKindWorkloadEnroll)
 			expectSecretNotFound(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindMSP))
 			expectSecretNotFound(ctx, bankNamespace, identitySecretName(adminIdentityName(network.Spec.Orgs[1]), secretKindTLS))
 			expectSecretNotFound(ctx, bankNamespace, "peer0-msp")
@@ -765,7 +765,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(caSvc.Spec.Selector[labelComponent]).To(Equal(componentCA))
 			Expect(servicePorts(caSvc)).To(ContainElements(caPort))
 
-			expectIdentitySecret(ctx, bankNamespace, caBootstrapSecretName(bankOrg), secretKindCABootstrap, true)
+			expectIdentitySecret(ctx, bankNamespace, caBootstrapSecretName(bankOrg), secretKindCABootstrap)
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Namespace: bankNamespace,
 				Name:      caBootstrapSecretName(bankOrg),
@@ -1306,7 +1306,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(found).To(BeTrue())
 			Expect(endpoints).To(HaveLen(1))
-			endpoint, ok := endpoints[0].(map[string]interface{})
+			endpoint, ok := endpoints[0].(map[string]any)
 			Expect(ok).To(BeTrue())
 			Expect(endpoint).To(HaveKeyWithValue("port", endpointOperations))
 			Expect(endpoint).To(HaveKeyWithValue("path", "/metrics"))
@@ -2076,21 +2076,21 @@ var _ = Describe("FabricNetwork Controller", func() {
 })
 
 func deleteFabricNetworkIfExists(ctx context.Context, name types.NamespacedName) {
-	resource := &fabricopsv1alpha1.FabricNetwork{}
-	err := k8sClient.Get(ctx, name, resource)
+	network := &fabricopsv1alpha1.FabricNetwork{}
+	err := k8sClient.Get(ctx, name, network)
 	if errors.IsNotFound(err) {
 		return
 	}
 	Expect(err).NotTo(HaveOccurred())
 
-	if len(resource.Finalizers) > 0 {
-		resource.Finalizers = nil
-		Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+	if len(network.Finalizers) > 0 {
+		network.Finalizers = nil
+		Expect(k8sClient.Update(ctx, network)).To(Succeed())
 	}
 
-	Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, resource))).To(Succeed())
+	Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, network))).To(Succeed())
 	Eventually(func() bool {
-		err := k8sClient.Get(ctx, name, resource)
+		err := k8sClient.Get(ctx, name, network)
 		return errors.IsNotFound(err)
 	}).Should(BeTrue())
 }
@@ -2756,7 +2756,7 @@ func expectPersistentVolumeClaim(ctx context.Context, namespace, name, size, sto
 	Expect(persistentVolumeClaim.Annotations[annotationManagedBy]).To(Equal(controllerName))
 }
 
-func expectIdentitySecret(ctx context.Context, namespace, name, kind string, tlsEnabled bool) {
+func expectIdentitySecret(ctx context.Context, namespace, name, kind string) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
@@ -2768,19 +2768,8 @@ func expectIdentitySecret(ctx context.Context, namespace, name, kind string, tls
 		Name:      name,
 	}, secret)).To(Succeed())
 
-	Expect(identitySecretValidationError(*secret, kind, tlsEnabled)).To(BeEmpty())
+	Expect(identitySecretValidationError(*secret, kind, true)).To(BeEmpty())
 	Expect(secret.Labels[labelIdentityKind]).To(Equal(kind))
-}
-
-func expectIdentitySecretSource(ctx context.Context, namespace, name, kind string, tlsEnabled bool, source string) {
-	expectIdentitySecret(ctx, namespace, name, kind, tlsEnabled)
-
-	var secret corev1.Secret
-	Expect(k8sClient.Get(ctx, types.NamespacedName{
-		Namespace: namespace,
-		Name:      name,
-	}, &secret)).To(Succeed())
-	Expect(secret.Labels[labelIdentitySource]).To(Equal(source))
 }
 
 func expectSecretNotFound(ctx context.Context, namespace, name string) {

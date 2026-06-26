@@ -171,7 +171,7 @@ func (r *FabricNetworkReconciler) ensureFabricNetworkFinalizer(
 	key types.NamespacedName,
 ) error {
 	return r.updateFabricNetworkFinalizer(ctx, key, func(network *fabricopsv1alpha1.FabricNetwork) bool {
-		if !network.ObjectMeta.DeletionTimestamp.IsZero() {
+		if !network.DeletionTimestamp.IsZero() {
 			return false
 		}
 		if controllerutil.ContainsFinalizer(network, fabricNetworkFinalizer) {
@@ -299,7 +299,7 @@ func objectDescription(object client.Object) string {
 	kind := object.GetObjectKind().GroupVersionKind().Kind
 	if kind == "" {
 		objectType := reflect.TypeOf(object)
-		if objectType.Kind() == reflect.Ptr {
+		if objectType.Kind() == reflect.Pointer {
 			objectType = objectType.Elem()
 		}
 		kind = objectType.Name()
@@ -713,7 +713,7 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if !network.ObjectMeta.DeletionTimestamp.IsZero() {
+	if !network.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&network, fabricNetworkFinalizer) {
 			if err := r.cleanupFabricNetwork(ctx, &network); err != nil {
 				return ctrl.Result{}, err

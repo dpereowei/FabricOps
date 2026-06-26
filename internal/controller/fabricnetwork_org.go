@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"maps"
 	"reflect"
 	"strings"
 
@@ -252,12 +253,8 @@ func resourceAnnotations(
 
 func mergeMap(base map[string]string, extra map[string]string) map[string]string {
 	out := map[string]string{}
-	for key, value := range base {
-		out[key] = value
-	}
-	for key, value := range extra {
-		out[key] = value
-	}
+	maps.Copy(out, base)
+	maps.Copy(out, extra)
 	return out
 }
 
@@ -705,9 +702,7 @@ func serviceMonitorMetadataLabels(
 	labels := map[string]string{}
 	if net.Spec.Global.Observability != nil &&
 		net.Spec.Global.Observability.ServiceMonitor != nil {
-		for key, value := range net.Spec.Global.Observability.ServiceMonitor.Labels {
-			labels[key] = value
-		}
+		maps.Copy(labels, net.Spec.Global.Observability.ServiceMonitor.Labels)
 	}
 
 	return mergeMap(labels, orgLabels(net, org, componentMonitor))
@@ -750,10 +745,7 @@ func orgPodSelectorLabels(
 	return labels
 }
 
-func sameFabricNetworkPeer(
-	net *fabricopsv1alpha1.FabricNetwork,
-	org fabricopsv1alpha1.Org,
-) networkingv1.NetworkPolicyPeer {
+func sameFabricNetworkPeer(net *fabricopsv1alpha1.FabricNetwork) networkingv1.NetworkPolicyPeer {
 	return networkingv1.NetworkPolicyPeer{
 		NamespaceSelector: &metav1.LabelSelector{
 			MatchLabels: fabricNetworkNamespaceSelectorLabels(net),
@@ -848,7 +840,7 @@ func buildOrgNetworkPolicy(
 ) *networkingv1.NetworkPolicy {
 	tcp := corev1.ProtocolTCP
 	udp := corev1.ProtocolUDP
-	sameNetworkPeer := sameFabricNetworkPeer(net, org)
+	sameNetworkPeer := sameFabricNetworkPeer(net)
 
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -892,8 +884,8 @@ func buildOrgNetworkPolicy(
 	}
 }
 
-func stringMapInterface(values map[string]string) map[string]interface{} {
-	out := map[string]interface{}{}
+func stringMapInterface(values map[string]string) map[string]any {
+	out := map[string]any{}
 	for key, value := range values {
 		out[key] = value
 	}
@@ -1240,7 +1232,7 @@ func buildOrgServiceMonitor(
 	serviceMonitor.SetLabels(serviceMonitorMetadataLabels(net, org))
 	serviceMonitor.SetAnnotations(resourceAnnotations(net, org))
 
-	endpoint := map[string]interface{}{
+	endpoint := map[string]any{
 		"port":            endpointOperations,
 		"path":            "/metrics",
 		"scheme":          "http",
@@ -1249,11 +1241,11 @@ func buildOrgServiceMonitor(
 		"honorLabels":     true,
 		"honorTimestamps": true,
 	}
-	spec := map[string]interface{}{
-		"selector": map[string]interface{}{
+	spec := map[string]any{
+		"selector": map[string]any{
 			"matchLabels": stringMapInterface(serviceMonitorSelectorLabels(net, org)),
 		},
-		"endpoints": []interface{}{endpoint},
+		"endpoints": []any{endpoint},
 	}
 	serviceMonitor.Object["spec"] = spec
 

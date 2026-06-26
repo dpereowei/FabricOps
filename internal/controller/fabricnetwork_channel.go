@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 
@@ -167,7 +168,7 @@ func (r *FabricNetworkReconciler) reconcileChannels(
 					status.Peers.Ready = peersJoined
 					status.Message = peerMessage
 					if peerMessage == "" {
-						anchorMessage, err := r.reconcileAnchorPeerUpdates(ctx, net, channel, hostNamespace, &status)
+						anchorMessage, err := r.reconcileAnchorPeerUpdates(ctx, net, channel, &status)
 						if err != nil {
 							return statuses, err
 						}
@@ -216,12 +217,7 @@ func (r *FabricNetworkReconciler) reconcileChannelBlockGeneration(
 		return err
 	}
 
-	job, err := buildChannelBlockJob(net, channel, hostOrg, hostNamespace)
-	if err != nil {
-		return err
-	}
-
-	return r.ensureJob(ctx, job)
+	return r.ensureJob(ctx, buildChannelBlockJob(net, channel, hostOrg, hostNamespace))
 }
 
 func (r *FabricNetworkReconciler) ensureChannelRBAC(
@@ -418,7 +414,6 @@ func (r *FabricNetworkReconciler) reconcileAnchorPeerUpdates(
 	ctx context.Context,
 	net *fabricopsv1alpha1.FabricNetwork,
 	channel fabricopsv1alpha1.Channel,
-	hostNamespace string,
 	status *fabricopsv1alpha1.ChannelStatus,
 ) (string, error) {
 	orderers := desiredOrdererInstances(net)
@@ -533,17 +528,6 @@ func (r *FabricNetworkReconciler) ensureChannelBlockConfigMapCopy(
 	namespace string,
 ) error {
 	return r.ensureChannelConfigMapNamedCopy(ctx, net, channel.Name, channelBlockConfigMapName(channel.Name), sourceNamespace, org, namespace)
-}
-
-func (r *FabricNetworkReconciler) ensureChannelConfigMapCopy(
-	ctx context.Context,
-	net *fabricopsv1alpha1.FabricNetwork,
-	channel fabricopsv1alpha1.Channel,
-	sourceNamespace string,
-	org fabricopsv1alpha1.Org,
-	namespace string,
-) error {
-	return r.ensureChannelConfigMapNamedCopy(ctx, net, channel.Name, channelConfigMapName(channel.Name), sourceNamespace, org, namespace)
 }
 
 func (r *FabricNetworkReconciler) ensureChannelConfigMapNamedCopy(
@@ -688,9 +672,7 @@ func copyStringData(data map[string]string) map[string]string {
 	}
 
 	out := make(map[string]string, len(data))
-	for key, value := range data {
-		out[key] = value
-	}
+	maps.Copy(out, data)
 
 	return out
 }
@@ -963,7 +945,7 @@ func buildChannelBlockJob(
 	channel fabricopsv1alpha1.Channel,
 	hostOrg fabricopsv1alpha1.Org,
 	namespace string,
-) (*batchv1.Job, error) {
+) *batchv1.Job {
 	labels := channelLabels(net, hostOrg, channel.Name)
 	backoffLimit := int32(4)
 	volumes := []corev1.Volume{
@@ -1069,7 +1051,7 @@ func buildChannelBlockJob(
 				},
 			},
 		},
-	}, nil
+	}
 }
 
 func buildOrdererJoinJob(
