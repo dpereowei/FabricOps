@@ -7,12 +7,114 @@ FabricOps is a Kubernetes operator for provisioning multi-organization Hyperledg
 
 The long-term goal is automated Fabric infrastructure on Kubernetes: Terraform for cluster/cloud infrastructure, a custom operator for Fabric CAs, orderers, peers, channels, and Chaincode-as-a-Service, plus TLS certificate lifecycle management and Prometheus-based health visibility.
 
-## Requirements
+## Installation
 
-- Go >= 1.23
-- Kubebuilder >= 4.15.0
-- Kubernetes cluster, such as OrbStack, kind, minikube, or EKS
-- Hyperledger Fabric >= 2.5
+FabricOps installs into an existing Kubernetes cluster. End users only need `kubectl`; Helm is optional.
+
+Requirements:
+
+- Kubernetes cluster, such as EKS, kind, minikube, or OrbStack
+- `kubectl` configured for the target cluster
+- Default storage class for the sample network's persistent volumes
+- Helm 3 or later, only if installing with Helm
+
+### Install From Release Bundle
+
+Install the latest published release bundle:
+
+```bash
+kubectl apply -f https://github.com/dpereowei/fabricops/releases/download/v0.1.0/install.yaml
+kubectl rollout status deployment/fabricops-controller-manager -n fabricops-system --timeout=120s
+```
+
+The bundle installs the `FabricNetwork` CRD, RBAC, ServiceAccount, manager Deployment, and metrics Service. The manager image is pinned to the release tag:
+
+```text
+ghcr.io/dpereowei/fabricops:0.1.0
+```
+
+### Install With Helm
+
+Install the release chart directly from the GitHub release:
+
+```bash
+helm upgrade --install fabricops \
+  https://github.com/dpereowei/fabricops/releases/download/v0.1.0/fabricops-0.1.0.tgz \
+  --namespace fabricops-system \
+  --create-namespace \
+  --wait
+```
+
+The chart installs CRDs, RBAC, the manager Deployment, and the metrics Service. By default it uses `ghcr.io/dpereowei/fabricops:<chart-appVersion>`.
+
+Override the manager image if needed:
+
+```bash
+helm upgrade --install fabricops \
+  https://github.com/dpereowei/fabricops/releases/download/v0.1.0/fabricops-0.1.0.tgz \
+  --namespace fabricops-system \
+  --create-namespace \
+  --set manager.image.repository=ghcr.io/dpereowei/fabricops \
+  --set manager.image.tag=0.1.0 \
+  --wait
+```
+
+### Render Then Apply
+
+If you want to review the Kubernetes objects before applying them:
+
+```bash
+helm template fabricops \
+  https://github.com/dpereowei/fabricops/releases/download/v0.1.0/fabricops-0.1.0.tgz \
+  --namespace fabricops-system > fabricops-install.yaml
+
+kubectl apply -f fabricops-install.yaml
+kubectl rollout status deployment/fabricops-controller-manager -n fabricops-system --timeout=120s
+```
+
+### Create A Sample Network
+
+After installing the operator, apply the sample `FabricNetwork`:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/dpereowei/fabricops/v0.1.0/config/samples/fabricops_v1alpha1_fabricnetwork.yaml
+kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
+```
+
+Inspect the generated network:
+
+```bash
+kubectl get fabricnetwork fabricnetwork-sample -n default
+kubectl get pods -n fo-sample-orderer
+kubectl get pods -n fo-sample-banka
+```
+
+### Uninstall
+
+Delete `FabricNetwork` resources before removing the operator so FabricOps finalizers can clean up generated org namespaces:
+
+```bash
+kubectl delete fabricnetwork fabricnetwork-sample -n default --ignore-not-found
+kubectl delete -f https://github.com/dpereowei/fabricops/releases/download/v0.1.0/install.yaml
+```
+
+For Helm installs:
+
+```bash
+kubectl delete fabricnetwork fabricnetwork-sample -n default --ignore-not-found
+helm uninstall fabricops -n fabricops-system
+```
+
+## Release Artifacts
+
+Release `v0.1.0` publishes:
+
+- `install.yaml`: single-file Kubernetes install bundle
+- `fabricops-0.1.0.tgz`: Helm chart archive
+- `ghcr.io/dpereowei/fabricops:0.1.0`: multi-platform manager image
+- `ghcr.io/dpereowei/fabricops-node-settlement:0.1.0`: Node CCaaS sample
+- `ghcr.io/dpereowei/fabricops-go-settlement:0.1.0`: Go CCaaS sample
+- `ghcr.io/dpereowei/fabricops-java-settlement:0.1.0`: Java CCaaS sample
 
 ## Capabilities
 
@@ -54,7 +156,17 @@ If the `FabricNetwork` lives outside the `default` namespace, the control namesp
 fo-<control-namespace>-<network>-<org>
 ```
 
-## Local Development
+## For Contributors
+
+Contributor requirements:
+
+- Go >= 1.23
+- Kubebuilder >= 4.15.0
+- Docker with buildx
+- Helm 3 or later
+- kind, OrbStack, minikube, or another Kubernetes cluster
+
+### Local Controller Run
 
 Install the CRD, run the controller locally, and apply the sample network:
 
@@ -72,7 +184,7 @@ kubectl get pods -n fo-sample-orderer
 kubectl get pods -n fo-sample-banka
 ```
 
-## In-Cluster Install
+### Local In-Cluster Bundle
 
 Build the manager image, render the install bundle, deploy the operator, and apply the sample network:
 
@@ -110,9 +222,9 @@ kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready
 config/samples/chaincodes/node_settlement/invoke_smoke.sh
 ```
 
-## Helm Install
+### Local Helm Install
 
-FabricOps also ships a generated Helm chart at `dist/chart`:
+Use the generated chart in `dist/chart` for local chart development:
 
 ```bash
 make docker-build IMG=controller:latest
@@ -123,9 +235,9 @@ kubectl apply -k config/samples
 kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
 ```
 
-By default, the chart installs CRDs, RBAC, the manager Deployment, and the metrics Service into `fabricops-system`. The chart defaults to `ghcr.io/dpereowei/fabricops:<chart-appVersion>`. Local development can still override the image with `make helm-deploy IMG=controller:latest`. Override release settings with `HELM_RELEASE`, `HELM_NAMESPACE`, `HELM_CHART_DIR`, and `HELM_EXTRA_ARGS`.
+Override local Helm settings with `HELM_RELEASE`, `HELM_NAMESPACE`, `HELM_CHART_DIR`, and `HELM_EXTRA_ARGS`.
 
-## Manager Images
+### Manager Images
 
 Local development uses `controller:latest` so OrbStack and kind can run the manager image without a registry. Published manager images should use immutable SemVer tags at:
 
@@ -158,13 +270,7 @@ make release-check-ghcr VERSION=0.1.0
 
 See [docs/first-release-checklist.md](docs/first-release-checklist.md) for the full release checklist.
 
-After a release tag is published, install the bundle directly with:
-
-```bash
-kubectl apply -f https://raw.githubusercontent.com/dpereowei/fabricops/v0.1.0/dist/install.yaml
-```
-
-## Terraform Examples
+### Terraform Examples
 
 Local development infrastructure examples live under [examples/terraform](examples/terraform). The first example provisions a single-node kind cluster for FabricOps demos:
 
@@ -175,7 +281,7 @@ terraform init
 terraform apply
 ```
 
-## E2E Validation
+### E2E Validation
 
 Run the repeatable kind-based e2e proof with:
 
