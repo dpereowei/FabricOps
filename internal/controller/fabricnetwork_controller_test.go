@@ -1052,6 +1052,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(peerEnv["CORE_PEER_LOCALMSPID"]).To(Equal("BankAMSP"))
 			Expect(peerEnv["CORE_PEER_MSPCONFIGPATH"]).To(Equal(peerMSPPath))
 			Expect(peerEnv["CORE_VM_ENDPOINT"]).To(Equal(""))
+			Expect(peerEnv[ccaasBuilderEnvVar]).To(Equal(`{"peer_hostname":"peer0"}`))
 			Expect(peerEnv["CORE_OPERATIONS_LISTENADDRESS"]).To(Equal("0.0.0.0:9443"))
 			Expect(peerEnv["CORE_OPERATIONS_TLS_ENABLED"]).To(Equal("false"))
 			Expect(peerEnv["CORE_METRICS_PROVIDER"]).To(Equal("prometheus"))
@@ -1234,6 +1235,20 @@ var _ = Describe("FabricNetwork Controller", func() {
 					Channel: "payments",
 					Image:   "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0",
 				},
+				{
+					Name:         "audit",
+					Version:      "0.0.1",
+					Channel:      "settlement",
+					Image:        "ghcr.io/dpereowei/fabricops-node-audit:0.1.0",
+					PackageLabel: "shared-package",
+				},
+				{
+					Name:         "risk",
+					Version:      "0.0.1",
+					Channel:      "settlement",
+					Image:        "ghcr.io/dpereowei/fabricops-node-risk:0.1.0",
+					PackageLabel: "shared-package",
+				},
 			}
 			Expect(k8sClient.Update(ctx, &network)).To(Succeed())
 
@@ -1254,6 +1269,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.Message).To(ContainSubstring(`channel "settlement" org "BankA" references unknown peers: peer9`))
 			Expect(network.Status.Message).To(ContainSubstring(`channel "settlement" references unknown org "MissingOrg"`))
 			Expect(network.Status.Message).To(ContainSubstring(`chaincode "settlement" references unknown channel "payments"`))
+			Expect(network.Status.Message).To(ContainSubstring(`chaincode package label "shared-package" is used by both "settlement/audit" and "settlement/risk"`))
 			Expect(network.Status.OrgStatus).To(BeEmpty())
 			Expect(network.Status.ChannelStatus).To(BeEmpty())
 			Expect(network.Status.ChaincodeStatus).To(BeEmpty())
@@ -1358,17 +1374,17 @@ var _ = Describe("FabricNetwork Controller", func() {
 			var packageConfig corev1.ConfigMap
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Namespace: "fo-test-banka",
-				Name:      "settlement-settlement-banka-peer0-package",
+				Name:      "settlement-settlement-banka-package",
 			}, &packageConfig)).To(Succeed())
 			Expect(packageConfig.Labels[labelAppComponent]).To(Equal(componentChaincode))
 			Expect(packageConfig.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(packageConfig.Labels[labelChaincode]).To(Equal("settlement"))
 			Expect(packageConfig.Data[chaincodePackageLabelKey]).To(Equal("settlement_settlement_0.0.1"))
 			Expect(packageConfig.Data[chaincodePackageFileKey]).To(Equal("settlement_settlement_0.0.1.tar.gz"))
-			Expect(packageConfig.Data[chaincodeConnectionAddrKey]).To(Equal("settlement-settlement-banka-peer0-ccaas.fo-test-banka.svc.cluster.local:7052"))
+			Expect(packageConfig.Data[chaincodeConnectionAddrKey]).To(Equal("settlement-settlement-banka-{{.peer_hostname}}-ccaas.fo-test-banka.svc.cluster.local:7052"))
 			Expect(packageConfig.Data[chaincodeMetadataKey]).To(ContainSubstring(`"type": "ccaas"`))
 			Expect(packageConfig.Data[chaincodeMetadataKey]).To(ContainSubstring(`"label": "settlement_settlement_0.0.1"`))
-			Expect(packageConfig.Data[chaincodeConnectionKey]).To(ContainSubstring(`"address": "settlement-settlement-banka-peer0-ccaas.fo-test-banka.svc.cluster.local:7052"`))
+			Expect(packageConfig.Data[chaincodeConnectionKey]).To(ContainSubstring(`"address": "settlement-settlement-banka-{{.peer_hostname}}-ccaas.fo-test-banka.svc.cluster.local:7052"`))
 			Expect(packageConfig.Data[chaincodeConnectionKey]).To(ContainSubstring(`"dial_timeout": "10s"`))
 			Expect(packageConfig.Data[chaincodeConnectionKey]).To(ContainSubstring(`"tls_required": false`))
 
@@ -1399,13 +1415,106 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(chaincode.Targets[0].Workload.Ready).To(Equal(int32(0)))
 			Expect(chaincode.Targets[0].WorkloadReady).To(BeFalse())
 			Expect(chaincode.Targets[0].ServiceName).To(Equal("settlement-settlement-banka-peer0-ccaas"))
-			Expect(chaincode.Targets[0].PackageConfigMapName).To(Equal("settlement-settlement-banka-peer0-package"))
+			Expect(chaincode.Targets[0].PackageConfigMapName).To(Equal("settlement-settlement-banka-package"))
 			Expect(chaincode.Targets[0].PackageIDConfigMapName).To(Equal("settlement-settlement-0-0-1-banka-peer0-package-id"))
 			Expect(chaincode.Targets[0].InstallJobName).To(Equal("settlement-settlement-0-0-1-banka-peer0-install"))
 			Expect(chaincode.Targets[0].PackageMetadataReady).To(BeTrue())
 			Expect(chaincode.Targets[0].Installed).To(BeFalse())
 			expectDeploymentNotFound(ctx, "fo-test-banka", "settlement-settlement-banka-peer0-ccaas")
 			expectServiceNotFound(ctx, "fo-test-banka", "settlement-settlement-banka-peer0-ccaas")
+		})
+
+		It("should reuse one CCaaS package across multiple peers in the same org", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Orgs[1].Peer.Instances = 2
+			network.Spec.Channels = []fabricopsv1alpha1.Channel{
+				{
+					Name: "settlement",
+					Orgs: []fabricopsv1alpha1.ChannelOrg{
+						{
+							Name:  "BankA",
+							Peers: []string{"peer0", "peer1"},
+						},
+					},
+				},
+			}
+			network.Spec.Chaincodes = []fabricopsv1alpha1.Chaincode{
+				{
+					Name:     "settlement",
+					Version:  "0.0.1",
+					Channel:  "settlement",
+					Image:    "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0",
+					Sequence: 1,
+					CCAAS: &fabricopsv1alpha1.ChaincodeAsAService{
+						ServicePort: 7052,
+					},
+				},
+				{
+					Name:    "audit",
+					Version: "0.0.1",
+					Channel: "settlement",
+					Image:   "ghcr.io/dpereowei/fabricops-node-audit:0.1.0",
+				},
+			}
+			Expect(k8sClient.Update(ctx, &network)).To(Succeed())
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			var settlementPackage corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: "fo-test-banka",
+				Name:      "settlement-settlement-banka-package",
+			}, &settlementPackage)).To(Succeed())
+			Expect(settlementPackage.Data[chaincodeConnectionAddrKey]).To(Equal("settlement-settlement-banka-{{.peer_hostname}}-ccaas.fo-test-banka.svc.cluster.local:7052"))
+			Expect(settlementPackage.Data[chaincodeConnectionKey]).To(ContainSubstring(`"tls_required": false`))
+
+			var auditPackage corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: "fo-test-banka",
+				Name:      "settlement-audit-banka-package",
+			}, &auditPackage)).To(Succeed())
+			Expect(auditPackage.Data[chaincodePackageLabelKey]).To(Equal("settlement_audit_0.0.1"))
+			Expect(auditPackage.Data[chaincodeConnectionAddrKey]).To(Equal("settlement-audit-banka-{{.peer_hostname}}-ccaas.fo-test-banka.svc.cluster.local:7052"))
+
+			var peerSpecificPackage corev1.ConfigMap
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: "fo-test-banka",
+				Name:      "settlement-settlement-banka-peer0-package",
+			}, &peerSpecificPackage)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.ChaincodeStatus).To(HaveLen(2))
+			settlementStatus := network.Status.ChaincodeStatus[0]
+			Expect(settlementStatus.Name).To(Equal("settlement"))
+			Expect(settlementStatus.PackageMetadata.Desired).To(Equal(int32(2)))
+			Expect(settlementStatus.PackageMetadata.Ready).To(Equal(int32(2)))
+			Expect(settlementStatus.Workloads.Desired).To(Equal(int32(2)))
+			Expect(settlementStatus.Targets).To(HaveLen(2))
+			Expect(settlementStatus.Targets[0].PeerName).To(Equal("peer0"))
+			Expect(settlementStatus.Targets[0].Address).To(Equal("settlement-settlement-banka-peer0-ccaas.fo-test-banka.svc.cluster.local:7052"))
+			Expect(settlementStatus.Targets[0].PackageConfigMapName).To(Equal("settlement-settlement-banka-package"))
+			Expect(settlementStatus.Targets[0].PackageIDConfigMapName).To(Equal("settlement-settlement-0-0-1-banka-peer0-package-id"))
+			Expect(settlementStatus.Targets[1].PeerName).To(Equal("peer1"))
+			Expect(settlementStatus.Targets[1].Address).To(Equal("settlement-settlement-banka-peer1-ccaas.fo-test-banka.svc.cluster.local:7052"))
+			Expect(settlementStatus.Targets[1].PackageConfigMapName).To(Equal("settlement-settlement-banka-package"))
+			Expect(settlementStatus.Targets[1].PackageIDConfigMapName).To(Equal("settlement-settlement-0-0-1-banka-peer1-package-id"))
+
+			bankOrg := network.Spec.Orgs[1]
+			settlementChaincode := network.Spec.Chaincodes[0]
+			peer0InstallJob := buildChaincodeInstallJob(&network, settlementChaincode, bankOrg, "peer0")
+			peer1InstallJob := buildChaincodeInstallJob(&network, settlementChaincode, bankOrg, "peer1")
+			Expect(configMapVolumeNames(peer0InstallJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodePackageVolumeName, "settlement-settlement-banka-package"))
+			Expect(configMapVolumeNames(peer1InstallJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodePackageVolumeName, "settlement-settlement-banka-package"))
 		})
 
 		It("should generate channel config and a channel block Job after components are ready", func() {
@@ -1808,7 +1917,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(chaincodeInstallJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
 			Expect(chaincodeInstallJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
 			Expect(chaincodeInstallJob.Spec.Template.Spec.Containers).To(HaveLen(1))
-			Expect(configMapVolumeNames(chaincodeInstallJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodePackageVolumeName, "settlement-settlement-banka-peer0-package"))
+			Expect(configMapVolumeNames(chaincodeInstallJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodePackageVolumeName, "settlement-settlement-banka-package"))
 			Expect(secretVolumeNames(chaincodeInstallJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminMSPVolume, "banka-admin-msp"))
 			Expect(secretVolumeNames(chaincodeInstallJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminTLSVolume, "banka-admin-tls"))
 

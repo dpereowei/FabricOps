@@ -28,7 +28,7 @@ When the test completes, it has validated:
 - generated install bundle deployment
 - sample `FabricNetwork` reconciliation to `Ready=True`
 - channel bootstrap, chaincode lifecycle, and CCaaS workload readiness
-- a committed Node settlement chaincode invoke plus query
+- committed Node settlement chaincode invokes plus queries through both sample peers
 
 Clean up a retained e2e cluster with:
 

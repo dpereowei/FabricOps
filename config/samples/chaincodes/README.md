@@ -43,7 +43,7 @@ After the sample `FabricNetwork` reaches `Ready=True`, run the Node settlement i
 config/samples/chaincodes/node_settlement/invoke_smoke.sh
 ```
 
-The script creates a temporary Fabric tools Job in the BankA namespace, invokes `createSettlement`, and queries the created settlement back from the `settlement` channel.
+The script verifies the shared CCaaS package template, creates a temporary Fabric tools Job in the BankA namespace, then invokes `createSettlement` and queries the created settlement back through both sample peers.
 
 For the Go sample, override the transaction names used by the smoke because Go contract methods are exported:
 

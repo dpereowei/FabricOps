@@ -94,7 +94,8 @@ const (
 	peerChaincodePort int32 = 7052
 	peerOpsPort       int32 = 9443
 
-	caBootstrapEnvVar = "FABRIC_CA_SERVER_BOOTSTRAP_USER_PASS"
+	caBootstrapEnvVar  = "FABRIC_CA_SERVER_BOOTSTRAP_USER_PASS"
+	ccaasBuilderEnvVar = "CHAINCODE_AS_A_SERVICE_BUILDER_CONFIG"
 
 	ordererMSPPath = "/var/hyperledger/orderer/msp"
 	ordererTLSPath = "/var/hyperledger/orderer/tls"
@@ -1655,6 +1656,7 @@ func buildPeerDeployment(
 		{Name: "CORE_PEER_LOCALMSPID", Value: org.Organization.MSPName},
 		{Name: "CORE_PEER_MSPCONFIGPATH", Value: peerMSPPath},
 		{Name: "CORE_VM_ENDPOINT", Value: ""},
+		{Name: ccaasBuilderEnvVar, Value: ccaasBuilderConfig(name)},
 		{Name: "CORE_OPERATIONS_LISTENADDRESS", Value: fmt.Sprintf("0.0.0.0:%d", peerOpsPort)},
 		{Name: "CORE_OPERATIONS_TLS_ENABLED", Value: "false"},
 		{Name: "CORE_METRICS_PROVIDER", Value: "prometheus"},
@@ -1714,6 +1716,10 @@ func buildPeerDeployment(
 			},
 		},
 	}
+}
+
+func ccaasBuilderConfig(peerName string) string {
+	return fmt.Sprintf(`{"peer_hostname":"%s"}`, sanitizeName(peerName))
 }
 
 func buildPeerService(
