@@ -46,6 +46,10 @@ spec:
       orgs:
         - name: BankA
           peers: ["peer0", "peer1"]
+    - name: audit
+      orgs:
+        - name: BankA
+          peers: ["peer0", "peer1"]
 
   chaincodes:
     - name: settlement
