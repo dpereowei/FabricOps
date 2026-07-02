@@ -93,6 +93,7 @@ func validateFabricNetworkTopology(net *fabricopsv1alpha1.FabricNetwork) []strin
 	}
 
 	seenChaincodes := map[string]struct{}{}
+	seenChaincodePackageLabels := map[string]string{}
 	for _, chaincode := range net.Spec.Chaincodes {
 		chaincodeName := strings.TrimSpace(chaincode.Name)
 		channelName := strings.TrimSpace(chaincode.Channel)
@@ -109,6 +110,16 @@ func validateFabricNetworkTopology(net *fabricopsv1alpha1.FabricNetwork) []strin
 		if _, ok := channels[channelName]; !ok {
 			problems = append(problems, fmt.Sprintf("chaincode %q references unknown channel %q", chaincodeName, channelName))
 		}
+
+		packageLabel := chaincodePackageLabel(chaincode)
+		chaincodeRef := channelName + "/" + chaincodeName
+		if previous, ok := seenChaincodePackageLabels[packageLabel]; ok {
+			problems = append(
+				problems,
+				fmt.Sprintf("chaincode package label %q is used by both %q and %q", packageLabel, previous, chaincodeRef),
+			)
+		}
+		seenChaincodePackageLabels[packageLabel] = chaincodeRef
 	}
 
 	return problems

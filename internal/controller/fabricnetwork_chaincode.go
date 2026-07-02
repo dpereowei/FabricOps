@@ -77,6 +77,9 @@ const (
 	envCCAASCoreChaincodeIDName    = "CORE_CHAINCODE_ID_NAME"
 	envCCAASChaincodeServerAddress = "CHAINCODE_SERVER_ADDRESS"
 	envCCAASCoreChaincodeAddress   = "CORE_CHAINCODE_ADDRESS"
+
+	chaincodePeerHostnameTemplate    = "{{.peer_hostname}}"
+	chaincodePeerHostnamePlaceholder = "fabricops-peer-hostname"
 )
 
 type chaincodePackageMetadata struct {
@@ -166,7 +169,7 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 					target.Workload.Desired = chaincodeReplicas(chaincode)
 					target.ServiceName = chaincodeServiceName(chaincode, org, peerName)
 					target.Address = chaincodeConnectionAddress(target.ServiceName, target.Namespace, chaincode)
-					target.PackageConfigMapName = chaincodePackageConfigMapName(chaincode, org, peerName)
+					target.PackageConfigMapName = chaincodePackageConfigMapName(chaincode, org)
 					target.PackageIDConfigMapName = chaincodePackageIDConfigMapName(chaincode, org, peerName)
 					target.InstallJobName = chaincodeInstallJobName(chaincode, org, peerName)
 
@@ -182,7 +185,7 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 					}
 					status.Workloads.Desired += target.Workload.Desired
 
-					configMap, err := buildChaincodePackageConfigMap(net, chaincode, org, peerName)
+					configMap, err := buildChaincodePackageConfigMap(net, chaincode, org)
 					if err != nil {
 						return statuses, err
 					}
@@ -310,10 +313,12 @@ func buildChaincodePackageConfigMap(
 	net *fabricopsv1alpha1.FabricNetwork,
 	chaincode fabricopsv1alpha1.Chaincode,
 	org fabricopsv1alpha1.Org,
-	peerName string,
 ) (*corev1.ConfigMap, error) {
 	label := chaincodePackageLabel(chaincode)
-	address := chaincodeConnectionAddress(chaincodeServiceName(chaincode, org, peerName), orgNamespaceName(net, org), chaincode)
+	address, err := chaincodeConnectionAddressTemplate(chaincode, org, orgNamespaceName(net, org))
+	if err != nil {
+		return nil, err
+	}
 
 	metadataJSON, err := marshalChaincodeJSON(chaincodePackageMetadata{
 		Type:  "ccaas",
@@ -336,7 +341,7 @@ func buildChaincodePackageConfigMap(
 
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        chaincodePackageConfigMapName(chaincode, org, peerName),
+			Name:        chaincodePackageConfigMapName(chaincode, org),
 			Namespace:   orgNamespaceName(net, org),
 			Labels:      labels,
 			Annotations: resourceAnnotations(net, org),
@@ -584,7 +589,7 @@ func buildChaincodeInstallJob(
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{
-						Name: chaincodePackageConfigMapName(chaincode, org, peerName),
+						Name: chaincodePackageConfigMapName(chaincode, org),
 					},
 					Items: []corev1.KeyToPath{
 						{Key: chaincodeMetadataKey, Path: chaincodeMetadataKey},
@@ -1687,12 +1692,30 @@ func chaincodeConnectionAddress(serviceName string, namespace string, chaincode 
 	return serviceDNS(serviceName, namespace, chaincodeServicePort(chaincode))
 }
 
+func chaincodeConnectionAddressTemplate(
+	chaincode fabricopsv1alpha1.Chaincode,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) (string, error) {
+	serviceName := chaincodeServiceName(chaincode, org, chaincodePeerHostnamePlaceholder)
+	if !strings.Contains(serviceName, chaincodePeerHostnamePlaceholder) {
+		return "", fmt.Errorf(
+			"chaincode service name for %q on channel %q in org %q is too long to template peer-specific CCaaS addresses",
+			chaincode.Name,
+			chaincode.Channel,
+			org.Organization.Name,
+		)
+	}
+
+	serviceName = strings.ReplaceAll(serviceName, chaincodePeerHostnamePlaceholder, chaincodePeerHostnameTemplate)
+	return chaincodeConnectionAddress(serviceName, namespace, chaincode), nil
+}
+
 func chaincodePackageConfigMapName(
 	chaincode fabricopsv1alpha1.Chaincode,
 	org fabricopsv1alpha1.Org,
-	peerName string,
 ) string {
-	return sanitizeName(fmt.Sprintf("%s-%s-%s-%s-package", chaincode.Channel, chaincode.Name, org.Organization.Name, peerName))
+	return sanitizeName(fmt.Sprintf("%s-%s-%s-package", chaincode.Channel, chaincode.Name, org.Organization.Name))
 }
 
 func chaincodePackageIDConfigMapName(

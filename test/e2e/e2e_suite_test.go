@@ -88,7 +88,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		By("waiting for FabricOps to provision the Fabric network")
 		runCommand(25*time.Minute, kubectlBin, "wait", "fabricnetwork/"+sampleName, "-n", sampleNamespace, "--for=condition=Ready", "--timeout=20m")
 
-		By("invoking and querying the sample Node CCaaS chaincode")
+		By("invoking and querying the sample Node CCaaS chaincode through both BankA peers")
 		smokeID := fmt.Sprintf("e2e-%d", time.Now().Unix())
 		runCommandWithEnv(3*time.Minute, []string{"SMOKE_ID=" + smokeID}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
 
