@@ -133,7 +133,10 @@ FabricOps supports:
 - Optional org-boundary NetworkPolicies for FabricOps-managed pods
 - Finalizer-based cleanup for generated org namespaces
 
-See [SUPPORTED_FEATURES.md](SUPPORTED_FEATURES.md) for the detailed compatibility matrix.
+See [SUPPORTED_FEATURES.md](SUPPORTED_FEATURES.md) for the detailed
+compatibility matrix and
+[docs/fabric-fablo-parity-roadmap.md](docs/fabric-fablo-parity-roadmap.md) for
+the post-demo parity roadmap.
 
 ## Namespace Layout
 
