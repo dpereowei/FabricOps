@@ -87,6 +87,7 @@ Inspect the generated network:
 kubectl get fabricnetwork fabricnetwork-sample -n default
 kubectl get pods -n fo-sample-orderer
 kubectl get pods -n fo-sample-banka
+kubectl get pods -n fo-sample-bankb
 ```
 
 ### Uninstall
@@ -134,9 +135,7 @@ FabricOps supports:
 - Finalizer-based cleanup for generated org namespaces
 
 See [SUPPORTED_FEATURES.md](SUPPORTED_FEATURES.md) for the detailed
-compatibility matrix and
-[docs/fabric-fablo-parity-roadmap.md](docs/fabric-fablo-parity-roadmap.md) for
-the post-demo parity roadmap.
+compatibility matrix.
 
 ## Namespace Layout
 

@@ -10,9 +10,6 @@ The `Fablo v2` and `Fablo v3` columns describe upstream Fablo support for
 Hyperledger Fabric 2.5.x and 3.1.x. The `FabricOps status` column describes the
 current operator implementation in this repository.
 
-For PR-sized follow-up work, see
-[docs/fabric-fablo-parity-roadmap.md](docs/fabric-fablo-parity-roadmap.md).
-
 CI test links are intentionally empty for now. Fill them only after a feature
 has repeatable CI or e2e coverage in this repository.
 
@@ -92,13 +89,13 @@ has repeatable CI or e2e coverage in this repository.
 
 | Feature | Fablo v2 | Fablo v3 | FabricOps status | Documented | CI tests | Notes |
 |---------|----------|----------|------------------|------------|----------|-------|
-| Node chaincode | yes | yes | Supported | README, samples | | Node CCaaS sample image is invoked successfully in OrbStack |
+| Node chaincode | yes | yes | Supported | README, samples | | Node CCaaS sample image is invoked successfully in kind e2e |
 | Go chaincode | yes | yes | Supported | samples | | Go CCaaS sample image is invoked successfully in OrbStack |
 | Java chaincode | yes | yes | Supported | samples | | Java CCaaS sample image is invoked successfully in OrbStack |
 | Chaincode-as-a-Service (CCaaS) | yes | yes | Supported | README, samples | | Package metadata, install, approve, commit, and workloads are reconciled |
 | CCaaS hot reload | yes | yes | Planned | | | Not modelled yet |
-| Endorsement policies | yes | yes | Partial | | | `endorsementPolicy` is accepted and passed to lifecycle commands; broader validation pending |
-| Multi-org endorsements | yes | yes | Partial | | | Lifecycle code handles channel orgs; multi-org sample smoke is pending |
+| Endorsement policies | yes | yes | Partial | samples | | `AND(...)` is validated by the multi-org sample; broader policy validation is still pending |
+| Multi-org endorsements | yes | yes | Supported | samples | | Kind e2e invokes through BankA+BankB endorsement sets and queries both orgs |
 | Private data collections | yes | yes | Planned | | | Collection package/config modelling is not implemented |
 | Chaincode scripts: invoke/query | yes | yes | Partial | samples | | Node/Go/Java invoke smoke exists; list/query utilities are not generalized yet |
 | Chaincode scripts: list | yes | yes | Planned | | | Not implemented |
