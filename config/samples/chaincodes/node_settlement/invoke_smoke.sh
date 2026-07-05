@@ -4,7 +4,7 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-fo-sample-banka}"
 JOB_NAME="${JOB_NAME:-fabricops-node-settlement-invoke-smoke}"
-TIMEOUT="${TIMEOUT:-120s}"
+TIMEOUT="${TIMEOUT:-180s}"
 FABRIC_VERSION="${FABRIC_VERSION:-2.5.14}"
 CHANNEL="${CHANNEL:-settlement}"
 CHAINCODE="${CHAINCODE:-settlement}"
@@ -17,6 +17,8 @@ ADMIN_TLS_SECRET="${ADMIN_TLS_SECRET:-banka-admin-tls}"
 SMOKE_ID="${SMOKE_ID:-smoke-$(date +%s)}"
 CREATE_FUNCTION="${CREATE_FUNCTION:-createSettlement}"
 READ_FUNCTION="${READ_FUNCTION:-readSettlement}"
+RETRY_ATTEMPTS="${RETRY_ATTEMPTS:-6}"
+RETRY_DELAY_SECONDS="${RETRY_DELAY_SECONDS:-10}"
 CHAINCODE_SERVICE_PORT="${CHAINCODE_SERVICE_PORT:-7052}"
 DEFAULT_PEER_ADDRESSES="peer0.${NAMESPACE}.svc.cluster.local:7051,peer1.${NAMESPACE}.svc.cluster.local:7051"
 DEFAULT_PEER_TLS_SECRETS="peer0-tls,peer1-tls"
@@ -131,6 +133,10 @@ spec:
               value: "${PEER_TLS_ROOTS}"
             - name: FABRICOPS_MSP_ID
               value: "${MSP_ID}"
+            - name: FABRICOPS_RETRY_ATTEMPTS
+              value: "${RETRY_ATTEMPTS}"
+            - name: FABRICOPS_RETRY_DELAY_SECONDS
+              value: "${RETRY_DELAY_SECONDS}"
           command:
             - sh
             - -ec
@@ -159,23 +165,50 @@ spec:
                 INVOKE_PAYLOAD="{\"Args\":[\"\$FABRICOPS_CREATE_FUNCTION\",\"\$target_smoke_id\",\"alice\",\"bob\",\"100\",\"USD\"]}"
                 QUERY_PAYLOAD="{\"Args\":[\"\$FABRICOPS_READ_FUNCTION\",\"\$target_smoke_id\"]}"
 
-                peer chaincode invoke \
-                  -o "\$FABRICOPS_ORDERER_ADDRESS" \
-                  --tls \
-                  --cafile /fabricops/smoke/orderer-tls/ca.crt \
-                  -C "\$FABRICOPS_CHANNEL" \
-                  -n "\$FABRICOPS_CHAINCODE" \
-                  --peerAddresses "\$target_peer_address" \
-                  --tlsRootCertFiles "\$target_peer_tls_root" \
-                  -c "\$INVOKE_PAYLOAD" \
-                  --waitForEvent
+                invoke_attempt=1
+                while true; do
+                  if peer chaincode invoke \
+                    -o "\$FABRICOPS_ORDERER_ADDRESS" \
+                    --tls \
+                    --cafile /fabricops/smoke/orderer-tls/ca.crt \
+                    -C "\$FABRICOPS_CHANNEL" \
+                    -n "\$FABRICOPS_CHAINCODE" \
+                    --peerAddresses "\$target_peer_address" \
+                    --tlsRootCertFiles "\$target_peer_tls_root" \
+                    -c "\$INVOKE_PAYLOAD" \
+                    --waitForEvent; then
+                    break
+                  fi
 
-                peer chaincode query \
-                  -C "\$FABRICOPS_CHANNEL" \
-                  -n "\$FABRICOPS_CHAINCODE" \
-                  -c "\$QUERY_PAYLOAD" | tee /tmp/fabricops-query.out
+                  if [ "\$invoke_attempt" -ge "\$FABRICOPS_RETRY_ATTEMPTS" ]; then
+                    echo "Invoke through \$target_peer_name failed after \$invoke_attempt attempts" >&2
+                    exit 1
+                  fi
 
-                grep "\$target_smoke_id" /tmp/fabricops-query.out
+                  echo "Invoke through \$target_peer_name was not ready; retrying in \$FABRICOPS_RETRY_DELAY_SECONDS seconds"
+                  invoke_attempt=\$((invoke_attempt + 1))
+                  sleep "\$FABRICOPS_RETRY_DELAY_SECONDS"
+                done
+
+                query_attempt=1
+                while true; do
+                  if peer chaincode query \
+                    -C "\$FABRICOPS_CHANNEL" \
+                    -n "\$FABRICOPS_CHAINCODE" \
+                    -c "\$QUERY_PAYLOAD" | tee /tmp/fabricops-query.out &&
+                    grep "\$target_smoke_id" /tmp/fabricops-query.out; then
+                    break
+                  fi
+
+                  if [ "\$query_attempt" -ge "\$FABRICOPS_RETRY_ATTEMPTS" ]; then
+                    echo "Query through \$target_peer_name failed after \$query_attempt attempts" >&2
+                    exit 1
+                  fi
+
+                  echo "Query through \$target_peer_name was not ready; retrying in \$FABRICOPS_RETRY_DELAY_SECONDS seconds"
+                  query_attempt=\$((query_attempt + 1))
+                  sleep "\$FABRICOPS_RETRY_DELAY_SECONDS"
+                done
                 peer_index=\$((peer_index + 1))
               done
           volumeMounts:

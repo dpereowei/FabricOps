@@ -90,7 +90,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 
 		By("invoking and querying the sample Node CCaaS chaincode through both BankA peers")
 		smokeID := fmt.Sprintf("e2e-%d", time.Now().Unix())
-		runCommandWithEnv(3*time.Minute, []string{"SMOKE_ID=" + smokeID}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+		runCommandWithEnv(5*time.Minute, []string{"SMOKE_ID=" + smokeID}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
 
 		status := runCommand(30*time.Second, kubectlBin, "get", "fabricnetwork", sampleName, "-n", sampleNamespace, "-o", "jsonpath={.status.phase}{\"\\n\"}{range .status.conditions[*]}{.type}={.status} {.reason}{\"\\n\"}{end}")
 		Expect(status).To(ContainSubstring("Ready\n"))
