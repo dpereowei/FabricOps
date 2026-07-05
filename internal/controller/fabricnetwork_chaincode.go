@@ -24,7 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -387,7 +387,7 @@ func buildChaincodePackageArchive(metadataJSON, connectionJSON string) ([]byte, 
 func gzipTar(files map[string][]byte) ([]byte, error) {
 	var buffer bytes.Buffer
 	gzipWriter := gzip.NewWriter(&buffer)
-	gzipWriter.Header.ModTime = time.Unix(0, 0).UTC()
+	gzipWriter.ModTime = time.Unix(0, 0).UTC()
 
 	tarWriter := tar.NewWriter(gzipWriter)
 	for _, name := range sortedKeys(files) {
@@ -421,7 +421,7 @@ func sortedKeys(values map[string][]byte) []string {
 	for key := range values {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	return keys
 }
 
@@ -1193,11 +1193,11 @@ func (r *FabricNetworkReconciler) chaincodeInstallReadiness(
 }
 
 func marshalChaincodeJSON(value any) (string, error) {
-	bytes, err := json.MarshalIndent(value, "", "  ")
+	encoded, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	return string(bytes) + "\n", nil
+	return string(encoded) + "\n", nil
 }
 
 func installChaincodePackageScript(
