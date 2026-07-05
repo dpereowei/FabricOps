@@ -17,11 +17,16 @@ limitations under the License.
 package controller
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -50,6 +55,7 @@ const (
 	chaincodeChaincodeIDFile    = "chaincode-id"
 	chaincodePackageHashFile    = "package-hash"
 	chaincodeQueryInstalledFile = "queryinstalled.json"
+	chaincodePackageArchiveMode = 0o644
 
 	chaincodeWorkDir         = "/fabricops/chaincode"
 	chaincodePackageInputDir = chaincodeWorkDir + "/package"
@@ -77,6 +83,9 @@ const (
 	envCCAASCoreChaincodeIDName    = "CORE_CHAINCODE_ID_NAME"
 	envCCAASChaincodeServerAddress = "CHAINCODE_SERVER_ADDRESS"
 	envCCAASCoreChaincodeAddress   = "CORE_CHAINCODE_ADDRESS"
+
+	chaincodePeerHostnameTemplate    = "{{.peer_hostname}}"
+	chaincodePeerHostnamePlaceholder = "fabricops-peer-hostname"
 )
 
 type chaincodePackageMetadata struct {
@@ -166,7 +175,7 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 					target.Workload.Desired = chaincodeReplicas(chaincode)
 					target.ServiceName = chaincodeServiceName(chaincode, org, peerName)
 					target.Address = chaincodeConnectionAddress(target.ServiceName, target.Namespace, chaincode)
-					target.PackageConfigMapName = chaincodePackageConfigMapName(chaincode, org, peerName)
+					target.PackageConfigMapName = chaincodePackageConfigMapName(chaincode, org)
 					target.PackageIDConfigMapName = chaincodePackageIDConfigMapName(chaincode, org, peerName)
 					target.InstallJobName = chaincodeInstallJobName(chaincode, org, peerName)
 
@@ -182,7 +191,7 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 					}
 					status.Workloads.Desired += target.Workload.Desired
 
-					configMap, err := buildChaincodePackageConfigMap(net, chaincode, org, peerName)
+					configMap, err := buildChaincodePackageConfigMap(net, chaincode, org)
 					if err != nil {
 						return statuses, err
 					}
@@ -310,10 +319,12 @@ func buildChaincodePackageConfigMap(
 	net *fabricopsv1alpha1.FabricNetwork,
 	chaincode fabricopsv1alpha1.Chaincode,
 	org fabricopsv1alpha1.Org,
-	peerName string,
 ) (*corev1.ConfigMap, error) {
 	label := chaincodePackageLabel(chaincode)
-	address := chaincodeConnectionAddress(chaincodeServiceName(chaincode, org, peerName), orgNamespaceName(net, org), chaincode)
+	address, err := chaincodeConnectionAddressTemplate(chaincode, org, orgNamespaceName(net, org))
+	if err != nil {
+		return nil, err
+	}
 
 	metadataJSON, err := marshalChaincodeJSON(chaincodePackageMetadata{
 		Type:  "ccaas",
@@ -331,12 +342,17 @@ func buildChaincodePackageConfigMap(
 	if err != nil {
 		return nil, err
 	}
+	packageFile := label + ".tar.gz"
+	packageArchive, err := buildChaincodePackageArchive(metadataJSON, connectionJSON)
+	if err != nil {
+		return nil, err
+	}
 
 	labels := chaincodeLabels(net, org, chaincode.Channel, chaincode.Name)
 
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        chaincodePackageConfigMapName(chaincode, org, peerName),
+			Name:        chaincodePackageConfigMapName(chaincode, org),
 			Namespace:   orgNamespaceName(net, org),
 			Labels:      labels,
 			Annotations: resourceAnnotations(net, org),
@@ -345,10 +361,68 @@ func buildChaincodePackageConfigMap(
 			chaincodeMetadataKey:       metadataJSON,
 			chaincodeConnectionKey:     connectionJSON,
 			chaincodePackageLabelKey:   label,
-			chaincodePackageFileKey:    label + ".tar.gz",
+			chaincodePackageFileKey:    packageFile,
 			chaincodeConnectionAddrKey: address,
 		},
+		BinaryData: map[string][]byte{
+			packageFile: packageArchive,
+		},
 	}, nil
+}
+
+func buildChaincodePackageArchive(metadataJSON, connectionJSON string) ([]byte, error) {
+	codeArchive, err := gzipTar(map[string][]byte{
+		chaincodeConnectionKey: []byte(connectionJSON),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return gzipTar(map[string][]byte{
+		chaincodeMetadataKey: []byte(metadataJSON),
+		"code.tar.gz":        codeArchive,
+	})
+}
+
+func gzipTar(files map[string][]byte) ([]byte, error) {
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	gzipWriter.ModTime = time.Unix(0, 0).UTC()
+
+	tarWriter := tar.NewWriter(gzipWriter)
+	for _, name := range sortedKeys(files) {
+		contents := files[name]
+		header := &tar.Header{
+			Name:    name,
+			Mode:    chaincodePackageArchiveMode,
+			Size:    int64(len(contents)),
+			ModTime: time.Unix(0, 0).UTC(),
+			Format:  tar.FormatUSTAR,
+		}
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return nil, err
+		}
+		if _, err := tarWriter.Write(contents); err != nil {
+			return nil, err
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		return nil, err
+	}
+	if err := gzipWriter.Close(); err != nil {
+		return nil, err
+	}
+
+	return buffer.Bytes(), nil
+}
+
+func sortedKeys(values map[string][]byte) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 func (r *FabricNetworkReconciler) ensureChaincodeWorkload(
@@ -572,6 +646,7 @@ func buildChaincodeInstallJob(
 ) *batchv1.Job {
 	namespace := orgNamespaceName(net, org)
 	labels := chaincodePeerLabels(net, org, chaincode, peerName)
+	packageFile := chaincodePackageLabel(chaincode) + ".tar.gz"
 	backoffLimit := int32(4)
 	volumeMounts := []corev1.VolumeMount{
 		{Name: chaincodePackageVolumeName, MountPath: chaincodePackageInputDir, ReadOnly: true},
@@ -584,13 +659,14 @@ func buildChaincodeInstallJob(
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{
-						Name: chaincodePackageConfigMapName(chaincode, org, peerName),
+						Name: chaincodePackageConfigMapName(chaincode, org),
 					},
 					Items: []corev1.KeyToPath{
 						{Key: chaincodeMetadataKey, Path: chaincodeMetadataKey},
 						{Key: chaincodeConnectionKey, Path: chaincodeConnectionKey},
 						{Key: chaincodePackageLabelKey, Path: chaincodePackageLabelKey},
 						{Key: chaincodePackageFileKey, Path: chaincodePackageFileKey},
+						{Key: packageFile, Path: packageFile},
 					},
 				},
 			},
@@ -1117,11 +1193,11 @@ func (r *FabricNetworkReconciler) chaincodeInstallReadiness(
 }
 
 func marshalChaincodeJSON(value any) (string, error) {
-	bytes, err := json.MarshalIndent(value, "", "  ")
+	encoded, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	return string(bytes) + "\n", nil
+	return string(encoded) + "\n", nil
 }
 
 func installChaincodePackageScript(
@@ -1142,11 +1218,10 @@ export CORE_PEER_TLS_ROOTCERT_FILE="$ADMIN_TLS_DIR/ca.crt"`, chaincodeAdminTLSPa
 	return fmt.Sprintf(`set -eu
 
 PACKAGE_INPUT_DIR=%q
-PACKAGE_BUILD_DIR=%q
 OUTPUT_DIR=%q
 PACKAGE_LABEL="$(cat "$PACKAGE_INPUT_DIR/%s")"
 PACKAGE_ARCHIVE="$(cat "$PACKAGE_INPUT_DIR/%s")"
-PACKAGE_FILE="$OUTPUT_DIR/$PACKAGE_ARCHIVE"
+PACKAGE_FILE="$PACKAGE_INPUT_DIR/$PACKAGE_ARCHIVE"
 QUERY_FILE="$OUTPUT_DIR/%s"
 PACKAGE_ID_FILE="$OUTPUT_DIR/%s"
 CHAINCODE_ID_FILE="$OUTPUT_DIR/%s"
@@ -1157,12 +1232,8 @@ export CORE_PEER_ADDRESS=%q
 export CORE_PEER_MSPCONFIGPATH=%q
 %s
 
-rm -rf "$PACKAGE_BUILD_DIR"
-mkdir -p "$PACKAGE_BUILD_DIR/code" "$OUTPUT_DIR"
-cp "$PACKAGE_INPUT_DIR/%s" "$PACKAGE_BUILD_DIR/metadata.json"
-cp "$PACKAGE_INPUT_DIR/%s" "$PACKAGE_BUILD_DIR/code/connection.json"
-tar -czf "$PACKAGE_BUILD_DIR/code.tar.gz" -C "$PACKAGE_BUILD_DIR/code" connection.json
-tar -czf "$PACKAGE_FILE" -C "$PACKAGE_BUILD_DIR" metadata.json code.tar.gz
+mkdir -p "$OUTPUT_DIR"
+test -f "$PACKAGE_FILE"
 
 query_installed() {
   peer lifecycle chaincode queryinstalled --output json > "$QUERY_FILE"
@@ -1190,7 +1261,6 @@ peer lifecycle chaincode install "$PACKAGE_FILE"
 query_installed
 extract_package_id
 `, chaincodePackageInputDir,
-		chaincodePackageBuildDir,
 		chaincodeOutputDir,
 		chaincodePackageLabelKey,
 		chaincodePackageFileKey,
@@ -1202,8 +1272,6 @@ extract_package_id
 		serviceDNS(peerName, namespace, peerPort),
 		chaincodeAdminMSPPath,
 		tlsEnv,
-		chaincodeMetadataKey,
-		chaincodeConnectionKey,
 	)
 }
 
@@ -1687,12 +1755,30 @@ func chaincodeConnectionAddress(serviceName string, namespace string, chaincode 
 	return serviceDNS(serviceName, namespace, chaincodeServicePort(chaincode))
 }
 
+func chaincodeConnectionAddressTemplate(
+	chaincode fabricopsv1alpha1.Chaincode,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+) (string, error) {
+	serviceName := chaincodeServiceName(chaincode, org, chaincodePeerHostnamePlaceholder)
+	if !strings.Contains(serviceName, chaincodePeerHostnamePlaceholder) {
+		return "", fmt.Errorf(
+			"chaincode service name for %q on channel %q in org %q is too long to template peer-specific CCaaS addresses",
+			chaincode.Name,
+			chaincode.Channel,
+			org.Organization.Name,
+		)
+	}
+
+	serviceName = strings.ReplaceAll(serviceName, chaincodePeerHostnamePlaceholder, chaincodePeerHostnameTemplate)
+	return chaincodeConnectionAddress(serviceName, namespace, chaincode), nil
+}
+
 func chaincodePackageConfigMapName(
 	chaincode fabricopsv1alpha1.Chaincode,
 	org fabricopsv1alpha1.Org,
-	peerName string,
 ) string {
-	return sanitizeName(fmt.Sprintf("%s-%s-%s-%s-package", chaincode.Channel, chaincode.Name, org.Organization.Name, peerName))
+	return sanitizeName(fmt.Sprintf("%s-%s-%s-package", chaincode.Channel, chaincode.Name, org.Organization.Name))
 }
 
 func chaincodePackageIDConfigMapName(
