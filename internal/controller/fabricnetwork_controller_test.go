@@ -1381,6 +1381,8 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(packageConfig.Labels[labelChaincode]).To(Equal("settlement"))
 			Expect(packageConfig.Data[chaincodePackageLabelKey]).To(Equal("settlement_settlement_0.0.1"))
 			Expect(packageConfig.Data[chaincodePackageFileKey]).To(Equal("settlement_settlement_0.0.1.tar.gz"))
+			Expect(packageConfig.BinaryData).To(HaveKey("settlement_settlement_0.0.1.tar.gz"))
+			Expect(packageConfig.BinaryData["settlement_settlement_0.0.1.tar.gz"]).NotTo(BeEmpty())
 			Expect(packageConfig.Data[chaincodeConnectionAddrKey]).To(Equal("settlement-settlement-banka-{{.peer_hostname}}-ccaas.fo-test-banka.svc.cluster.local:7052"))
 			Expect(packageConfig.Data[chaincodeMetadataKey]).To(ContainSubstring(`"type": "ccaas"`))
 			Expect(packageConfig.Data[chaincodeMetadataKey]).To(ContainSubstring(`"label": "settlement_settlement_0.0.1"`))
@@ -1918,6 +1920,10 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(chaincodeInstallJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
 			Expect(chaincodeInstallJob.Spec.Template.Spec.Containers).To(HaveLen(1))
 			Expect(configMapVolumeNames(chaincodeInstallJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodePackageVolumeName, "settlement-settlement-banka-package"))
+			Expect(configMapVolumeItems(chaincodeInstallJob.Spec.Template.Spec, chaincodePackageVolumeName)).To(ContainElement(corev1.KeyToPath{
+				Key:  "settlement_settlement_0.0.1.tar.gz",
+				Path: "settlement_settlement_0.0.1.tar.gz",
+			}))
 			Expect(secretVolumeNames(chaincodeInstallJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminMSPVolume, "banka-admin-msp"))
 			Expect(secretVolumeNames(chaincodeInstallJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminTLSVolume, "banka-admin-tls"))
 
@@ -1926,6 +1932,9 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(installContainer.Image).To(Equal("hyperledger/fabric-tools:2.5.14"))
 			Expect(installContainer.Command[2]).To(ContainSubstring("peer lifecycle chaincode install \"$PACKAGE_FILE\""))
 			Expect(installContainer.Command[2]).To(ContainSubstring("peer lifecycle chaincode queryinstalled --output json"))
+			Expect(installContainer.Command[2]).To(ContainSubstring("PACKAGE_FILE=\"$PACKAGE_INPUT_DIR/$PACKAGE_ARCHIVE\""))
+			Expect(installContainer.Command[2]).To(ContainSubstring("test -f \"$PACKAGE_FILE\""))
+			Expect(installContainer.Command[2]).NotTo(ContainSubstring("tar -czf"))
 			Expect(installContainer.Command[2]).To(ContainSubstring(".installed_chaincodes[]? | select(.label == $package_label) | .package_id"))
 			Expect(installContainer.Command[2]).To(ContainSubstring("CORE_PEER_LOCALMSPID=\"BankAMSP\""))
 			Expect(installContainer.Command[2]).To(ContainSubstring("CORE_PEER_ADDRESS=\"peer0.fo-test-banka.svc.cluster.local:7051\""))
@@ -2779,6 +2788,15 @@ func configMapVolumeNames(podSpec corev1.PodSpec) map[string]string {
 		configMaps[volume.Name] = volume.ConfigMap.Name
 	}
 	return configMaps
+}
+
+func configMapVolumeItems(podSpec corev1.PodSpec, volumeName string) []corev1.KeyToPath {
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == volumeName && volume.ConfigMap != nil {
+			return volume.ConfigMap.Items
+		}
+	}
+	return nil
 }
 
 func pvcVolumeNames(podSpec corev1.PodSpec) map[string]string {
