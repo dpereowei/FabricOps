@@ -1519,6 +1519,123 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(configMapVolumeNames(peer1InstallJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodePackageVolumeName, "settlement-settlement-banka-package"))
 		})
 
+		It("should prepare chaincode lifecycle for multi-org endorsement", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Orgs[1].Peer.Instances = 2
+			network.Spec.Orgs = append(network.Spec.Orgs, fabricopsv1alpha1.Org{
+				Organization: fabricopsv1alpha1.OrgMeta{
+					Name:    "BankB",
+					Domain:  "bankb.example.com",
+					MSPName: "BankBMSP",
+				},
+				CA: fabricopsv1alpha1.CAConfig{DB: "sqlite"},
+				Peer: &fabricopsv1alpha1.PeerConfig{
+					Instances: 1,
+					DB:        "CouchDB",
+					Prefix:    componentPeer,
+				},
+			})
+			channel := fabricopsv1alpha1.Channel{
+				Name: "settlement",
+				Orgs: []fabricopsv1alpha1.ChannelOrg{
+					{
+						Name:  "BankA",
+						Peers: []string{"peer0", "peer1"},
+					},
+					{
+						Name:  "BankB",
+						Peers: []string{"peer0"},
+					},
+				},
+			}
+			chaincode := fabricopsv1alpha1.Chaincode{
+				Name:              "settlement",
+				Version:           "0.0.1",
+				Channel:           "settlement",
+				Image:             "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0",
+				Sequence:          1,
+				EndorsementPolicy: "AND('BankAMSP.member','BankBMSP.member')",
+				CCAAS: &fabricopsv1alpha1.ChaincodeAsAService{
+					ServicePort: 7052,
+				},
+			}
+			bankAOrg := network.Spec.Orgs[1]
+			bankBOrg := network.Spec.Orgs[2]
+
+			approvalPeers := chaincodeApprovalPeers(channel)
+			Expect(approvalPeers).To(HaveKeyWithValue("BankA", "peer0"))
+			Expect(approvalPeers).To(HaveKeyWithValue("BankB", "peer0"))
+
+			peers := chaincodeLifecyclePeers(&network, channel)
+			Expect(peers).To(HaveLen(3))
+			Expect(peers[0].org.Organization.Name).To(Equal("BankA"))
+			Expect(peers[0].peerName).To(Equal("peer0"))
+			Expect(peers[0].namespace).To(Equal("fo-test-banka"))
+			Expect(peers[1].org.Organization.Name).To(Equal("BankA"))
+			Expect(peers[1].peerName).To(Equal("peer1"))
+			Expect(peers[1].namespace).To(Equal("fo-test-banka"))
+			Expect(peers[2].org.Organization.Name).To(Equal("BankB"))
+			Expect(peers[2].peerName).To(Equal("peer0"))
+			Expect(peers[2].namespace).To(Equal("fo-test-bankb"))
+
+			bankAPackage, err := buildChaincodePackageConfigMap(&network, chaincode, bankAOrg)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(bankAPackage.Namespace).To(Equal("fo-test-banka"))
+			Expect(bankAPackage.Name).To(Equal("settlement-settlement-banka-package"))
+			Expect(bankAPackage.Data[chaincodeConnectionAddrKey]).To(Equal("settlement-settlement-banka-{{.peer_hostname}}-ccaas.fo-test-banka.svc.cluster.local:7052"))
+
+			bankBPackage, err := buildChaincodePackageConfigMap(&network, chaincode, bankBOrg)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(bankBPackage.Namespace).To(Equal("fo-test-bankb"))
+			Expect(bankBPackage.Name).To(Equal("settlement-settlement-bankb-package"))
+			Expect(bankBPackage.Data[chaincodeConnectionAddrKey]).To(Equal("settlement-settlement-bankb-{{.peer_hostname}}-ccaas.fo-test-bankb.svc.cluster.local:7052"))
+
+			orderer, ok := chaincodeLifecycleOrderer(&network)
+			Expect(ok).To(BeTrue())
+			Expect(orderer.namespace).To(Equal("fo-test-orderer"))
+			packageID := "settlement_settlement_0.0.1:abc123"
+
+			bankAApproveJob := buildChaincodeApproveJob(&network, channel, chaincode, bankAOrg, "peer0", packageID, orderer)
+			Expect(bankAApproveJob.Namespace).To(Equal("fo-test-banka"))
+			Expect(bankAApproveJob.Name).To(Equal("settlement-settlement-0-0-1-abc123-banka-approve"))
+			Expect(bankAApproveJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-banka-peer0-installer"))
+			bankAApproveCommand := bankAApproveJob.Spec.Template.Spec.Containers[0].Command[2]
+			Expect(bankAApproveCommand).To(ContainSubstring("CORE_PEER_LOCALMSPID=\"BankAMSP\""))
+			Expect(bankAApproveCommand).To(ContainSubstring("CORE_PEER_ADDRESS=\"peer0.fo-test-banka.svc.cluster.local:7051\""))
+			Expect(bankAApproveCommand).To(ContainSubstring("ENDORSEMENT_POLICY=\"AND('BankAMSP.member','BankBMSP.member')\""))
+
+			bankBApproveJob := buildChaincodeApproveJob(&network, channel, chaincode, bankBOrg, "peer0", packageID, orderer)
+			Expect(bankBApproveJob.Namespace).To(Equal("fo-test-bankb"))
+			Expect(bankBApproveJob.Name).To(Equal("settlement-settlement-0-0-1-abc123-bankb-approve"))
+			Expect(bankBApproveJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-bankb-peer0-installer"))
+			Expect(secretVolumeNames(bankBApproveJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminMSPVolume, "bankb-admin-msp"))
+			Expect(secretVolumeNames(bankBApproveJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminTLSVolume, "bankb-admin-tls"))
+			bankBApproveCommand := bankBApproveJob.Spec.Template.Spec.Containers[0].Command[2]
+			Expect(bankBApproveCommand).To(ContainSubstring("CORE_PEER_LOCALMSPID=\"BankBMSP\""))
+			Expect(bankBApproveCommand).To(ContainSubstring("CORE_PEER_ADDRESS=\"peer0.fo-test-bankb.svc.cluster.local:7051\""))
+			Expect(bankBApproveCommand).To(ContainSubstring("ENDORSEMENT_POLICY=\"AND('BankAMSP.member','BankBMSP.member')\""))
+
+			commitJob := buildChaincodeCommitJob(&network, channel, chaincode, packageID, peers[0], orderer, peers)
+			Expect(commitJob.Namespace).To(Equal("fo-test-banka"))
+			Expect(commitJob.Name).To(Equal("settlement-settlement-0-0-1-abc123-commit"))
+			Expect(commitJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-committer"))
+			Expect(secretVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminMSPVolume, "banka-admin-msp"))
+			Expect(secretVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodePeerTLSVolumeName(bankAOrg, "peer0"), "settlement-settlement-0-0-1-banka-peer0-tls"))
+			Expect(secretVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodePeerTLSVolumeName(bankAOrg, "peer1"), "settlement-settlement-0-0-1-banka-peer1-tls"))
+			Expect(secretVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodePeerTLSVolumeName(bankBOrg, "peer0"), "settlement-settlement-0-0-1-bankb-peer0-tls"))
+
+			commitCommand := commitJob.Spec.Template.Spec.Containers[0].Command[2]
+			Expect(commitCommand).To(ContainSubstring("set -- \"$@\" --peerAddresses \"peer0.fo-test-banka.svc.cluster.local:7051\""))
+			Expect(commitCommand).To(ContainSubstring("set -- \"$@\" --peerAddresses \"peer1.fo-test-banka.svc.cluster.local:7051\""))
+			Expect(commitCommand).To(ContainSubstring("set -- \"$@\" --peerAddresses \"peer0.fo-test-bankb.svc.cluster.local:7051\""))
+			Expect(commitCommand).To(ContainSubstring("--tlsRootCertFiles \"/fabricops/chaincode/crypto/peers/banka/peer0/tls/ca.crt\""))
+			Expect(commitCommand).To(ContainSubstring("--tlsRootCertFiles \"/fabricops/chaincode/crypto/peers/banka/peer1/tls/ca.crt\""))
+			Expect(commitCommand).To(ContainSubstring("--tlsRootCertFiles \"/fabricops/chaincode/crypto/peers/bankb/peer0/tls/ca.crt\""))
+			Expect(commitCommand).To(ContainSubstring("ENDORSEMENT_POLICY=\"AND('BankAMSP.member','BankBMSP.member')\""))
+			Expect(volumeMountPaths(commitJob.Spec.Template.Spec.Containers[0])).To(HaveKeyWithValue(chaincodePeerTLSVolumeName(bankBOrg, "peer0"), chaincodePeerTLSPath(bankBOrg, "peer0")))
+		})
+
 		It("should generate channel config and a channel block Job after components are ready", func() {
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())

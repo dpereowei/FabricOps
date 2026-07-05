@@ -41,15 +41,30 @@ spec:
         db: CouchDb
         prefix: peer
 
+    - organization:
+        name: BankB
+        domain: bankb.example.com
+        mspName: BankBMSP
+      ca:
+        db: postgres
+      peer:
+        instances: 1
+        db: CouchDb
+        prefix: peer
+
   channels:
     - name: settlement
       orgs:
         - name: BankA
           peers: ["peer0", "peer1"]
+        - name: BankB
+          peers: ["peer0"]
     - name: audit
       orgs:
         - name: BankA
           peers: ["peer0", "peer1"]
+        - name: BankB
+          peers: ["peer0"]
 
   chaincodes:
     - name: settlement
@@ -57,6 +72,7 @@ spec:
       channel: settlement
       image: ghcr.io/dpereowei/fabricops-node-settlement:0.1.0
       sequence: 1
+      endorsementPolicy: "AND('BankAMSP.member','BankBMSP.member')"
       ccaas:
         replicas: 1
         containerPort: 7052
