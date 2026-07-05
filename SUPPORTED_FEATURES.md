@@ -10,6 +10,9 @@ The `Fablo v2` and `Fablo v3` columns describe upstream Fablo support for
 Hyperledger Fabric 2.5.x and 3.1.x. The `FabricOps status` column describes the
 current operator implementation in this repository.
 
+For PR-sized follow-up work, see
+[docs/fabric-fablo-parity-roadmap.md](docs/fabric-fablo-parity-roadmap.md).
+
 CI test links are intentionally empty for now. Fill them only after a feature
 has repeatable CI or e2e coverage in this repository.
 
@@ -50,7 +53,8 @@ has repeatable CI or e2e coverage in this repository.
 | TLS certificate rotation | n/a | n/a | Planned | | | Production hardening follow-up |
 | Operations endpoint TLS | n/a | n/a | Planned | | | Local-dev path currently uses HTTP operations endpoints |
 | NetworkPolicy generation | n/a | n/a | Supported | README, API | | Opt-in org-boundary policies via `spec.global.networkPolicy.enabled` |
-| Packaged install bundle | n/a | n/a | Planned | | | `config/default` and manager deployment scaffolding still need restoration |
+| Packaged install bundle | n/a | n/a | Supported | README | | `dist/install.yaml` is generated from `config/default` and published with releases |
+| Helm chart distribution | n/a | n/a | Supported | README | | Release artifacts include the generated `dist/chart` archive |
 
 ## Network configuration
 
@@ -81,7 +85,7 @@ has repeatable CI or e2e coverage in this repository.
 | Peer channel join | yes | yes | Supported | README | | Uses Fabric peer CLI Jobs per org namespace |
 | Anchor peer updates | yes | yes | Supported | README | | Uses config fetch/patch/update flow |
 | Channel readiness status | n/a | n/a | Supported | README | | `.status.channelStatus` and `ChannelsReady` |
-| Multiple channels | yes | yes | Partial | | | Controller iterates declared channels; only the sample channel is smoke validated |
+| Multiple channels | yes | yes | Supported | samples | | The sample declares `settlement` and `audit`; kind e2e waits for all declared channels through `Ready=True` |
 | Channel query scripts | yes | yes | Planned | | | Dedicated channel query helper scripts are not implemented yet |
 
 ## Chaincodes
@@ -142,4 +146,4 @@ has repeatable CI or e2e coverage in this repository.
 | Hooks: post-generate | yes | yes | Planned | | | No hook system yet |
 | Hooks: post-start | yes | yes | Planned | | | No hook system yet |
 | Local Docker Compose network output | yes | yes | Not applicable | | | FabricOps targets Kubernetes resources instead |
-| Terraform infrastructure examples | n/a | n/a | Planned | | | Core operator milestones come first |
+| Terraform infrastructure examples | n/a | n/a | Supported | examples/terraform | | `examples/terraform/local-kind` provisions a local kind cluster for demos |
