@@ -99,7 +99,7 @@ has repeatable CI or e2e coverage in this repository.
 | Private data collections | yes | yes | Supported | docs/private-data-collections.md, samples | | Kind e2e writes private data with transient input, confirms BankA can read it, confirms BankB cannot read the payload, and confirms BankB can query the private data hash |
 | Chaincode scripts: invoke/query | yes | yes | Partial | samples | | Node/Go/Java invoke smoke exists; list/query utilities are not generalized yet |
 | Chaincode scripts: list | yes | yes | Planned | | | Not implemented |
-| Chaincode install/upgrade commands | yes | yes | Partial | | | Install/approve/commit supported; upgrade sequencing needs dedicated validation |
+| Chaincode install/upgrade commands | yes | yes | Partial | | | Install/approve/commit supported; definition changes get fresh lifecycle Jobs, but upgrade e2e is pending |
 | Chaincode init-required lifecycle | yes | yes | Partial | API | | `initRequired` field exists; init flow is not smoke validated |
 
 ## Tools

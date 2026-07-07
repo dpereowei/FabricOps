@@ -2034,18 +2034,14 @@ func chaincodeApproveJobName(
 	packageID string,
 ) string {
 	parts := []string{chaincodePackageLabel(chaincode), chaincodePackageHash(packageID)}
-	if definitionHash := chaincodeDefinitionNameHash(chaincode); definitionHash != "" {
-		parts = append(parts, definitionHash)
-	}
+	parts = append(parts, chaincodeDefinitionNameHash(chaincode))
 	parts = append(parts, org.Organization.Name, "approve")
 	return sanitizeName(strings.Join(parts, "-"))
 }
 
 func chaincodeCommitJobName(chaincode fabricopsv1alpha1.Chaincode, packageID string) string {
 	parts := []string{chaincodePackageLabel(chaincode), chaincodePackageHash(packageID)}
-	if definitionHash := chaincodeDefinitionNameHash(chaincode); definitionHash != "" {
-		parts = append(parts, definitionHash)
-	}
+	parts = append(parts, chaincodeDefinitionNameHash(chaincode))
 	parts = append(parts, "commit")
 	return sanitizeName(strings.Join(parts, "-"))
 }
@@ -2099,10 +2095,6 @@ func chaincodePackageHash(packageID string) string {
 }
 
 func chaincodeDefinitionNameHash(chaincode fabricopsv1alpha1.Chaincode) string {
-	if len(chaincode.PrivateData) == 0 {
-		return ""
-	}
-
 	payload := struct {
 		Sequence          int32                                     `json:"sequence"`
 		EndorsementPolicy string                                    `json:"endorsementPolicy,omitempty"`
