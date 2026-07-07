@@ -773,6 +773,13 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(bootstrapSecret.Labels[labelAppComponent]).To(Equal(componentCA))
 			Expect(bootstrapSecret.Annotations[annotationOrg]).To(Equal("BankA"))
 
+			markDeploymentReady(ctx, bankNamespace, "banka-ca")
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Namespace: bankNamespace,
 				Name:      enrollmentName,
@@ -2458,6 +2465,176 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(chaincodeStatus.Targets[0].WorkloadReady).To(BeTrue())
 			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseReady))
 			Expect(network.Status.Message).To(Equal("All Fabric components, channels, and chaincodes are ready"))
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Chaincodes[0].Version = "0.0.2"
+			network.Spec.Chaincodes[0].Sequence = 2
+			network.Spec.Chaincodes[0].Image = "ghcr.io/dpereowei/fabricops-node-settlement:0.2.0"
+			Expect(k8sClient.Update(ctx, &network)).To(Succeed())
+
+			upgradedChaincode := network.Spec.Chaincodes[0]
+			upgradeDefinitionHash := chaincodeDefinitionNameHash(upgradedChaincode)
+			Expect(upgradeDefinitionHash).NotTo(Equal(definitionHash))
+			upgradeApproveJobName := "settlement-settlement-0-0-2-def456-" + upgradeDefinitionHash + "-banka-approve"
+			upgradeCommitJobName := "settlement-settlement-0-0-2-def456-" + upgradeDefinitionHash + "-commit"
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.ChaincodeStatus).To(HaveLen(1))
+			chaincodeStatus = network.Status.ChaincodeStatus[0]
+			Expect(chaincodeStatus.Version).To(Equal("0.0.2"))
+			Expect(chaincodeStatus.Sequence).To(Equal(int32(2)))
+			Expect(chaincodeStatus.PackageLabel).To(Equal("settlement_settlement_0.0.2"))
+			Expect(chaincodeStatus.PackageMetadataReady).To(BeTrue())
+			Expect(chaincodeStatus.Installed.Desired).To(Equal(int32(1)))
+			Expect(chaincodeStatus.Installed.Ready).To(Equal(int32(0)))
+			Expect(chaincodeStatus.InstalledReady).To(BeFalse())
+			Expect(chaincodeStatus.Committed).To(BeFalse())
+			Expect(chaincodeStatus.Ready).To(BeFalse())
+			Expect(chaincodeStatus.Message).To(Equal("Package metadata generated; waiting for chaincode install Jobs"))
+			Expect(chaincodeStatus.Targets).To(HaveLen(1))
+			Expect(chaincodeStatus.Targets[0].PackageConfigMapName).To(Equal("settlement-settlement-banka-package"))
+			Expect(chaincodeStatus.Targets[0].PackageIDConfigMapName).To(Equal("settlement-settlement-0-0-2-banka-peer0-package-id"))
+			Expect(chaincodeStatus.Targets[0].InstallJobName).To(Equal("settlement-settlement-0-0-2-banka-peer0-install"))
+			Expect(chaincodeStatus.Targets[0].Installed).To(BeFalse())
+
+			var upgradedPackage corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-settlement-banka-package",
+			}, &upgradedPackage)).To(Succeed())
+			Expect(upgradedPackage.Data[chaincodePackageLabelKey]).To(Equal("settlement_settlement_0.0.2"))
+			Expect(upgradedPackage.Data[chaincodePackageFileKey]).To(Equal("settlement_settlement_0.0.2.tar.gz"))
+			Expect(upgradedPackage.BinaryData).To(HaveKey("settlement_settlement_0.0.2.tar.gz"))
+			Expect(upgradedPackage.BinaryData).NotTo(HaveKey("settlement_settlement_0.0.1.tar.gz"))
+
+			var upgradeInstallJob batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-settlement-0-0-2-banka-peer0-install",
+			}, &upgradeInstallJob)).To(Succeed())
+			Expect(upgradeInstallJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-2-banka-peer0-installer"))
+			Expect(configMapVolumeItems(upgradeInstallJob.Spec.Template.Spec, chaincodePackageVolumeName)).To(ContainElement(corev1.KeyToPath{
+				Key:  "settlement_settlement_0.0.2.tar.gz",
+				Path: "settlement_settlement_0.0.2.tar.gz",
+			}))
+
+			upgradePackageIDConfigMap := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "settlement-settlement-0-0-2-banka-peer0-package-id",
+					Namespace: bankNamespace,
+				},
+				Data: map[string]string{
+					chaincodePackageIDKey:      "settlement_settlement_0.0.2:def456",
+					chaincodeChaincodeIDKey:    "settlement_settlement_0.0.2:def456",
+					chaincodePackageHashKey:    "def456",
+					chaincodeQueryInstalledKey: `{"installed_chaincodes":[{"label":"settlement_settlement_0.0.2","package_id":"settlement_settlement_0.0.2:def456"}]}`,
+				},
+			}
+			Expect(k8sClient.Create(ctx, upgradePackageIDConfigMap)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.ChaincodeStatus).To(HaveLen(1))
+			chaincodeStatus = network.Status.ChaincodeStatus[0]
+			Expect(chaincodeStatus.InstalledReady).To(BeTrue())
+			Expect(chaincodeStatus.Workloads.Desired).To(Equal(int32(1)))
+			Expect(chaincodeStatus.Workloads.Ready).To(Equal(int32(0)))
+			Expect(chaincodeStatus.WorkloadsReady).To(BeFalse())
+			Expect(chaincodeStatus.Targets[0].PackageID).To(Equal("settlement_settlement_0.0.2:def456"))
+			Expect(chaincodeStatus.Targets[0].ChaincodeID).To(Equal("settlement_settlement_0.0.2:def456"))
+			Expect(chaincodeStatus.Targets[0].ApproveJobName).To(Equal(upgradeApproveJobName))
+			Expect(chaincodeStatus.Targets[0].WorkloadReady).To(BeFalse())
+			Expect(chaincodeStatus.Message).To(Equal("Chaincode package installed; waiting for chaincode workloads and lifecycle approval Jobs"))
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-settlement-banka-peer0-ccaas",
+			}, &chaincodeDeployment)).To(Succeed())
+			chaincodeContainer = chaincodeDeployment.Spec.Template.Spec.Containers[0]
+			Expect(chaincodeContainer.Image).To(Equal("ghcr.io/dpereowei/fabricops-node-settlement:0.2.0"))
+			Expect(envMap(chaincodeContainer)[envCCAASChaincodeID]).To(Equal("settlement_settlement_0.0.2:def456"))
+			Expect(envMap(chaincodeContainer)[envCCAASCoreChaincodeIDName]).To(Equal("settlement_settlement_0.0.2:def456"))
+			Expect(chaincodeDeployment.Status.ReadyReplicas).To(Equal(int32(1)))
+			Expect(chaincodeDeployment.Status.ObservedGeneration).To(BeNumerically("<", chaincodeDeployment.Generation))
+
+			var upgradeApproveJob batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      upgradeApproveJobName,
+			}, &upgradeApproveJob)).To(Succeed())
+			Expect(upgradeApproveJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-2-banka-peer0-installer"))
+			Expect(upgradeApproveJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("SEQUENCE=2"))
+			Expect(upgradeApproveJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("--sequence \"$SEQUENCE\""))
+			Expect(upgradeApproveJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("--package-id \"$PACKAGE_ID\""))
+
+			markJobComplete(ctx, bankNamespace, upgradeApproveJobName)
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.ChaincodeStatus).To(HaveLen(1))
+			chaincodeStatus = network.Status.ChaincodeStatus[0]
+			Expect(chaincodeStatus.ApprovedReady).To(BeTrue())
+			Expect(chaincodeStatus.CommitJobName).To(Equal(upgradeCommitJobName))
+			Expect(chaincodeStatus.Committed).To(BeFalse())
+			Expect(chaincodeStatus.Ready).To(BeFalse())
+			Expect(chaincodeStatus.Message).To(Equal("Waiting for chaincode commit Job"))
+
+			var upgradeCommitJob batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      upgradeCommitJobName,
+			}, &upgradeCommitJob)).To(Succeed())
+			Expect(upgradeCommitJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-2-committer"))
+			Expect(upgradeCommitJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("SEQUENCE=2"))
+			Expect(upgradeCommitJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("--sequence \"$SEQUENCE\""))
+			Expect(upgradeCommitJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("peer lifecycle chaincode querycommitted"))
+
+			markJobComplete(ctx, bankNamespace, upgradeCommitJobName)
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.ChaincodeStatus).To(HaveLen(1))
+			chaincodeStatus = network.Status.ChaincodeStatus[0]
+			Expect(chaincodeStatus.Committed).To(BeTrue())
+			Expect(chaincodeStatus.Workloads.Ready).To(Equal(int32(0)))
+			Expect(chaincodeStatus.WorkloadsReady).To(BeFalse())
+			Expect(chaincodeStatus.Ready).To(BeFalse())
+			Expect(chaincodeStatus.Message).To(Equal("Chaincode committed; waiting for chaincode workload Deployment"))
+			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseCreating))
+
+			markDeploymentReady(ctx, bankNamespace, "settlement-settlement-banka-peer0-ccaas")
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.ChaincodeStatus).To(HaveLen(1))
+			chaincodeStatus = network.Status.ChaincodeStatus[0]
+			Expect(chaincodeStatus.Committed).To(BeTrue())
+			Expect(chaincodeStatus.Workloads.Ready).To(Equal(int32(1)))
+			Expect(chaincodeStatus.WorkloadsReady).To(BeTrue())
+			Expect(chaincodeStatus.Ready).To(BeTrue())
+			Expect(chaincodeStatus.Message).To(Equal("Chaincode committed and workload ready"))
+			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseReady))
 		})
 	})
 })
@@ -2637,6 +2814,7 @@ func markDeploymentReady(ctx context.Context, namespace, name string) {
 	deploy.Status.ReadyReplicas = *deploy.Spec.Replicas
 	deploy.Status.AvailableReplicas = *deploy.Spec.Replicas
 	deploy.Status.UpdatedReplicas = *deploy.Spec.Replicas
+	deploy.Status.ObservedGeneration = deploy.Generation
 	Expect(k8sClient.Status().Update(ctx, &deploy)).To(Succeed())
 }
 
