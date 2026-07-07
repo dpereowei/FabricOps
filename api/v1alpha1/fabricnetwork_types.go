@@ -226,10 +226,73 @@ type Chaincode struct {
 	// InitRequired controls the Fabric lifecycle --init-required flag.
 	// +optional
 	InitRequired bool `json:"initRequired,omitempty"`
+	// PrivateData declares explicit Fabric private data collections for this
+	// chaincode definition. The operator renders these entries to the Fabric
+	// collection config JSON used during approve and commit.
+	// +optional
+	PrivateData []PrivateDataCollection `json:"privateData,omitempty"`
 	// CCAAS describes the Kubernetes Chaincode-as-a-Service workload and
 	// connection package settings for this chaincode.
 	// +optional
 	CCAAS *ChaincodeAsAService `json:"ccaas,omitempty"`
+}
+
+type PrivateDataCollection struct {
+	// Name is the Fabric private data collection name.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9][A-Za-z0-9_-]*$"
+	Name string `json:"name"`
+	// OrgNames lists the channel organizations allowed to store collection data.
+	// When Policy is empty, the operator derives an OR('<MSP>.member', ...)
+	// policy from this list.
+	// +kubebuilder:validation:MinItems=1
+	OrgNames []string `json:"orgNames"`
+	// Policy overrides the derived Fabric collection distribution policy.
+	// +optional
+	// +kubebuilder:validation:MaxLength=512
+	Policy string `json:"policy,omitempty"`
+	// RequiredPeerCount is the minimum number of authorized peers that must
+	// receive private data before endorsement succeeds.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=50
+	RequiredPeerCount *int32 `json:"requiredPeerCount,omitempty"`
+	// MaxPeerCount is the maximum number of authorized peers each endorsing peer
+	// attempts to disseminate private data to.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=50
+	MaxPeerCount *int32 `json:"maxPeerCount,omitempty"`
+	// BlockToLive controls private data purging by block age. Zero keeps data
+	// indefinitely.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	BlockToLive *int64 `json:"blockToLive,omitempty"`
+	// MemberOnlyRead asks peers to enforce that only collection member
+	// organizations can read collection data.
+	// +optional
+	MemberOnlyRead *bool `json:"memberOnlyRead,omitempty"`
+	// MemberOnlyWrite asks peers to enforce that only collection member
+	// organizations can write collection data.
+	// +optional
+	MemberOnlyWrite *bool `json:"memberOnlyWrite,omitempty"`
+	// EndorsementPolicy optionally overrides the chaincode endorsement policy for
+	// this collection.
+	// +optional
+	EndorsementPolicy *PrivateDataEndorsementPolicy `json:"endorsementPolicy,omitempty"`
+}
+
+type PrivateDataEndorsementPolicy struct {
+	// SignaturePolicy is a Fabric signature policy, for example
+	// AND('BankAMSP.member','BankBMSP.member').
+	// +optional
+	// +kubebuilder:validation:MaxLength=512
+	SignaturePolicy string `json:"signaturePolicy,omitempty"`
+	// ChannelConfigPolicy references a policy from the channel configuration.
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	ChannelConfigPolicy string `json:"channelConfigPolicy,omitempty"`
 }
 
 type ChaincodeAsAService struct {
@@ -336,6 +399,8 @@ type ChaincodeStatus struct {
 	Version              string                  `json:"version"`
 	PackageLabel         string                  `json:"packageLabel,omitempty"`
 	Sequence             int32                   `json:"sequence,omitempty"`
+	CollectionConfigMap  string                  `json:"collectionConfigMap,omitempty"`
+	CollectionConfigHash string                  `json:"collectionConfigHash,omitempty"`
 	PackageMetadata      WorkloadStatus          `json:"packageMetadata,omitempty"`
 	PackageMetadataReady bool                    `json:"packageMetadataReady"`
 	Installed            WorkloadStatus          `json:"installed,omitempty"`

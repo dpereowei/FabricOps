@@ -35,10 +35,11 @@ import (
 )
 
 const (
-	managerNamespace = "fabricops-system"
-	managerName      = "fabricops-controller-manager"
-	sampleName       = "fabricnetwork-sample"
-	sampleNamespace  = "default"
+	managerNamespace           = "fabricops-system"
+	managerName                = "fabricops-controller-manager"
+	sampleName                 = "fabricnetwork-sample"
+	sampleNamespace            = "default"
+	nodeSettlementImageDefault = "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0"
 )
 
 var (
@@ -47,6 +48,7 @@ var (
 	kubectlBin   string
 	kindCluster  string
 	managerImage string
+	nodeImage    string
 )
 
 func TestE2E(t *testing.T) {
@@ -60,6 +62,7 @@ var _ = BeforeSuite(func() {
 	kubectlBin = envOrDefault("KUBECTL", "kubectl")
 	kindCluster = envOrDefault("KIND_CLUSTER", "fabricops-test-e2e")
 	managerImage = envOrDefault("IMG", "controller:latest")
+	nodeImage = envOrDefault("NODE_SETTLEMENT_IMAGE", nodeSettlementImageDefault)
 })
 
 var _ = Describe("Kind bundle install", Ordered, func() {
@@ -77,6 +80,10 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		runCommand(10*time.Minute, "make", "docker-build", "IMG="+managerImage)
 		runCommand(5*time.Minute, kindBin, "load", "docker-image", managerImage, "--name", kindCluster)
 
+		By("building and loading the local Node settlement chaincode image")
+		runCommand(10*time.Minute, "docker", "build", "-t", nodeImage, "config/samples/chaincodes/node_settlement")
+		runCommand(5*time.Minute, kindBin, "load", "docker-image", nodeImage, "--name", kindCluster)
+
 		By("generating and applying the install bundle")
 		runCommand(5*time.Minute, "make", "build-installer", "IMG="+managerImage)
 		runCommand(3*time.Minute, kubectlBin, "apply", "-f", "dist/install.yaml")
@@ -90,7 +97,10 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 
 		By("invoking and querying the sample Node CCaaS chaincode through BankA and BankB endorsement sets")
 		smokeID := fmt.Sprintf("e2e-%d", time.Now().Unix())
-		runCommandWithEnv(5*time.Minute, []string{"SMOKE_ID=" + smokeID}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+		runCommandWithEnv(5*time.Minute, []string{
+			"SMOKE_ID=" + smokeID,
+			"PRIVATE_SMOKE_ENABLED=true",
+		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
 
 		status := runCommand(30*time.Second, kubectlBin, "get", "fabricnetwork", sampleName, "-n", sampleNamespace, "-o", "jsonpath={.status.phase}{\"\\n\"}{range .status.conditions[*]}{.type}={.status} {.reason}{\"\\n\"}{end}")
 		Expect(status).To(ContainSubstring("Ready\n"))

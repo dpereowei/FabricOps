@@ -25,10 +25,12 @@ make test-e2e E2E_SKIP_CLEANUP=true
 When the test completes, it has validated:
 
 - manager image build and kind image load
+- local Node settlement chaincode image build and kind image load
 - generated install bundle deployment
 - sample `FabricNetwork` reconciliation to `Ready=True`
 - channel bootstrap, chaincode lifecycle, and CCaaS workload readiness
-- committed Node settlement chaincode invokes plus queries through both sample peers
+- committed Node settlement chaincode invokes plus queries through BankA and BankB endorsement sets
+- private data collection lifecycle wiring, transient private write, authorized private read, non-member private read rejection, and non-member private hash query
 
 Clean up a retained e2e cluster with:
 
@@ -49,6 +51,12 @@ kubectl rollout status deployment/fabricops-controller-manager -n fabricops-syst
 kubectl apply -k config/samples
 kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
 config/samples/chaincodes/node_settlement/invoke_smoke.sh
+```
+
+Enable the private-data smoke after loading a Node settlement image that includes the private settlement transactions:
+
+```bash
+PRIVATE_SMOKE_ENABLED=true config/samples/chaincodes/node_settlement/invoke_smoke.sh
 ```
 
 Remove the sample resources from the current cluster with:

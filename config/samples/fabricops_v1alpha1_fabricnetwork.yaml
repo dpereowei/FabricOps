@@ -73,6 +73,15 @@ spec:
       image: ghcr.io/dpereowei/fabricops-node-settlement:0.1.0
       sequence: 1
       endorsementPolicy: "AND('BankAMSP.member','BankBMSP.member')"
+      privateData:
+        - name: bank-a-private-settlements
+          orgNames: ["BankA"]
+          requiredPeerCount: 0
+          maxPeerCount: 1
+          memberOnlyRead: true
+          memberOnlyWrite: true
+          endorsementPolicy:
+            signaturePolicy: "OR('BankAMSP.member')"
       ccaas:
         replicas: 1
         containerPort: 7052

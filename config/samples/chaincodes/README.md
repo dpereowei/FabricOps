@@ -17,6 +17,12 @@ Each implementation exposes the same transaction names:
 - `settlementExists(id)`
 - `getAllSettlements`
 
+The Node sample also exposes private-data transactions for the sample `bank-a-private-settlements` collection:
+
+- `createPrivateSettlement(collection, id)` with transient key `settlement`
+- `readPrivateSettlement(collection, id)`
+- `readPrivateSettlementHash(collection, id)`
+
 Default images can be built with each directory's `build_and_push.sh`:
 
 ```bash
@@ -44,6 +50,14 @@ config/samples/chaincodes/node_settlement/invoke_smoke.sh
 ```
 
 The script verifies the shared CCaaS package template, creates a temporary Fabric tools Job in the BankA namespace, then invokes `createSettlement` and queries the created settlement back through both sample peers.
+
+Enable the Node private-data smoke with:
+
+```bash
+PRIVATE_SMOKE_ENABLED=true config/samples/chaincodes/node_settlement/invoke_smoke.sh
+```
+
+That path writes private settlement data with a transient payload, reads it through a BankA peer, checks that the BankB peer cannot return the private payload, and verifies the private data hash is still queryable.
 
 For the Go sample, override the transaction names used by the smoke because Go contract methods are exported:
 

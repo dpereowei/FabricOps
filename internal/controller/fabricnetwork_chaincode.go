@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -46,6 +47,7 @@ const (
 	chaincodePackageLabelKey   = "packageLabel"
 	chaincodePackageFileKey    = "packageFile"
 	chaincodeConnectionAddrKey = "address"
+	chaincodeCollectionsKey    = "collections.json"
 
 	chaincodePackageIDKey       = "packageID"
 	chaincodeChaincodeIDKey     = "chaincodeID"
@@ -63,11 +65,14 @@ const (
 	chaincodeOutputDir       = chaincodeWorkDir + "/output"
 	chaincodeAdminMSPPath    = chaincodeWorkDir + "/crypto/msp"
 	chaincodeAdminTLSPath    = chaincodeWorkDir + "/crypto/tls"
+	chaincodeCollectionsDir  = chaincodeWorkDir + "/collections"
+	chaincodeCollectionsPath = chaincodeCollectionsDir + "/" + chaincodeCollectionsKey
 
 	chaincodePackageVolumeName = "chaincode-package"
 	chaincodeOutputVolumeName  = "chaincode-output"
 	chaincodeAdminMSPVolume    = "admin-msp"
 	chaincodeAdminTLSVolume    = "admin-tls"
+	chaincodeCollectionsVolume = "chaincode-collections"
 
 	installChaincodeContainer        = "install-chaincode-package"
 	publishChaincodeInstallContainer = "publish-chaincode-package-id"
@@ -86,6 +91,7 @@ const (
 
 	chaincodePeerHostnameTemplate    = "{{.peer_hostname}}"
 	chaincodePeerHostnamePlaceholder = "fabricops-peer-hostname"
+	annotationCollectionConfigHash   = "fabricops.io/collection-config-hash"
 )
 
 type chaincodePackageMetadata struct {
@@ -97,6 +103,22 @@ type chaincodeConnection struct {
 	Address     string `json:"address"`
 	DialTimeout string `json:"dial_timeout"`
 	TLSRequired bool   `json:"tls_required"`
+}
+
+type chaincodeCollectionConfig struct {
+	Name              string                                      `json:"name"`
+	Policy            string                                      `json:"policy"`
+	RequiredPeerCount int32                                       `json:"requiredPeerCount"`
+	MaxPeerCount      int32                                       `json:"maxPeerCount"`
+	BlockToLive       int64                                       `json:"blockToLive"`
+	MemberOnlyRead    bool                                        `json:"memberOnlyRead"`
+	MemberOnlyWrite   bool                                        `json:"memberOnlyWrite"`
+	EndorsementPolicy *chaincodeCollectionEndorsementPolicyConfig `json:"endorsementPolicy,omitempty"`
+}
+
+type chaincodeCollectionEndorsementPolicyConfig struct {
+	SignaturePolicy     string `json:"signaturePolicy,omitempty"`
+	ChannelConfigPolicy string `json:"channelConfigPolicy,omitempty"`
 }
 
 type chaincodeLifecyclePeer struct {
@@ -127,6 +149,8 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 		lifecycleMessage := ""
 		approvalPeers := map[string]string{}
 		channelReady := false
+		collectionConfigJSON := ""
+		collectionConfigHash := ""
 
 		key := chaincode.Channel + "/" + chaincode.Name
 		if _, ok := seen[key]; ok {
@@ -152,6 +176,15 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 		} else {
 			channelReady = channelReadyForChaincode(channelStatuses, chaincode.Channel)
 			approvalPeers = chaincodeApprovalPeers(channel)
+			if len(chaincode.PrivateData) > 0 {
+				var err error
+				collectionConfigJSON, collectionConfigHash, err = renderChaincodeCollectionConfig(net, channel, chaincode)
+				if err != nil {
+					return statuses, err
+				}
+				status.CollectionConfigMap = chaincodeCollectionConfigMapName(chaincode)
+				status.CollectionConfigHash = collectionConfigHash
+			}
 		}
 
 		if ok {
@@ -197,6 +230,18 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 					}
 					if err := r.ensureConfigMap(ctx, configMap); err != nil {
 						return statuses, err
+					}
+					if len(chaincode.PrivateData) > 0 {
+						collectionConfigMap := buildChaincodeCollectionConfigMap(
+							net,
+							chaincode,
+							org,
+							collectionConfigJSON,
+							collectionConfigHash,
+						)
+						if err := r.ensureConfigMap(ctx, collectionConfigMap); err != nil {
+							return statuses, err
+						}
 					}
 
 					target.PackageMetadataReady = true
@@ -254,7 +299,7 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 								if !ok {
 									lifecycleMessage = "Waiting for an orderer before lifecycle approval"
 								} else {
-									if err := r.ensureChaincodeApproveInputs(ctx, net, channel, org, target.Namespace, orderer); err != nil {
+									if err := r.ensureChaincodeApproveInputs(ctx, net, channel, chaincode, org, target.Namespace, orderer); err != nil {
 										return statuses, err
 									}
 
@@ -368,6 +413,124 @@ func buildChaincodePackageConfigMap(
 			packageFile: packageArchive,
 		},
 	}, nil
+}
+
+func buildChaincodeCollectionConfigMap(
+	net *fabricopsv1alpha1.FabricNetwork,
+	chaincode fabricopsv1alpha1.Chaincode,
+	org fabricopsv1alpha1.Org,
+	collectionConfigJSON string,
+	collectionConfigHash string,
+) *corev1.ConfigMap {
+	annotations := resourceAnnotations(net, org)
+	annotations[annotationCollectionConfigHash] = collectionConfigHash
+
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        chaincodeCollectionConfigMapName(chaincode),
+			Namespace:   orgNamespaceName(net, org),
+			Labels:      chaincodeLabels(net, org, chaincode.Channel, chaincode.Name),
+			Annotations: annotations,
+		},
+		Data: map[string]string{
+			chaincodeCollectionsKey: collectionConfigJSON,
+		},
+	}
+}
+
+func renderChaincodeCollectionConfig(
+	net *fabricopsv1alpha1.FabricNetwork,
+	channel fabricopsv1alpha1.Channel,
+	chaincode fabricopsv1alpha1.Chaincode,
+) (string, string, error) {
+	orgs := orgsByName(net)
+	channelPeerCounts := channelPeerCountsByOrg(channel)
+	collections := make([]chaincodeCollectionConfig, 0, len(chaincode.PrivateData))
+
+	for _, collection := range chaincode.PrivateData {
+		config, err := renderChaincodeCollection(collection, orgs, channelPeerCounts)
+		if err != nil {
+			return "", "", err
+		}
+		collections = append(collections, config)
+	}
+
+	collectionConfigJSON, err := marshalChaincodeJSON(collections)
+	if err != nil {
+		return "", "", err
+	}
+
+	return collectionConfigJSON, shortSHA256(collectionConfigJSON), nil
+}
+
+func renderChaincodeCollection(
+	collection fabricopsv1alpha1.PrivateDataCollection,
+	orgs map[string]fabricopsv1alpha1.Org,
+	channelPeerCounts map[string]int,
+) (chaincodeCollectionConfig, error) {
+	policy := strings.TrimSpace(collection.Policy)
+	if policy == "" {
+		policyParts := make([]string, 0, len(collection.OrgNames))
+		for _, orgName := range collection.OrgNames {
+			orgName = strings.TrimSpace(orgName)
+			org, ok := orgs[orgName]
+			if !ok {
+				return chaincodeCollectionConfig{}, fmt.Errorf("private data collection %q references unknown org %q", collection.Name, orgName)
+			}
+			policyParts = append(policyParts, fmt.Sprintf("'%s.member'", org.Organization.MSPName))
+		}
+		policy = fmt.Sprintf("OR(%s)", strings.Join(policyParts, ","))
+	}
+
+	authorizedPeers := 0
+	for _, orgName := range collection.OrgNames {
+		orgName = strings.TrimSpace(orgName)
+		authorizedPeers += channelPeerCounts[orgName]
+	}
+
+	requiredPeerCount := int32(0)
+	if collection.RequiredPeerCount != nil {
+		requiredPeerCount = *collection.RequiredPeerCount
+	}
+	maxPeerCount := int32(max(authorizedPeers-1, 0))
+	if collection.MaxPeerCount != nil {
+		maxPeerCount = *collection.MaxPeerCount
+	}
+	blockToLive := int64(0)
+	if collection.BlockToLive != nil {
+		blockToLive = *collection.BlockToLive
+	}
+	memberOnlyRead := true
+	if collection.MemberOnlyRead != nil {
+		memberOnlyRead = *collection.MemberOnlyRead
+	}
+	memberOnlyWrite := true
+	if collection.MemberOnlyWrite != nil {
+		memberOnlyWrite = *collection.MemberOnlyWrite
+	}
+
+	config := chaincodeCollectionConfig{
+		Name:              collection.Name,
+		Policy:            policy,
+		RequiredPeerCount: requiredPeerCount,
+		MaxPeerCount:      maxPeerCount,
+		BlockToLive:       blockToLive,
+		MemberOnlyRead:    memberOnlyRead,
+		MemberOnlyWrite:   memberOnlyWrite,
+	}
+	if collection.EndorsementPolicy != nil {
+		signaturePolicy := strings.TrimSpace(collection.EndorsementPolicy.SignaturePolicy)
+		channelConfigPolicy := strings.TrimSpace(collection.EndorsementPolicy.ChannelConfigPolicy)
+		if signaturePolicy == "" && channelConfigPolicy == "" {
+			return config, nil
+		}
+		config.EndorsementPolicy = &chaincodeCollectionEndorsementPolicyConfig{
+			SignaturePolicy:     signaturePolicy,
+			ChannelConfigPolicy: channelConfigPolicy,
+		}
+	}
+
+	return config, nil
 }
 
 func buildChaincodePackageArchive(metadataJSON, connectionJSON string) ([]byte, error) {
@@ -756,14 +919,24 @@ func (r *FabricNetworkReconciler) ensureChaincodeApproveInputs(
 	ctx context.Context,
 	net *fabricopsv1alpha1.FabricNetwork,
 	channel fabricopsv1alpha1.Channel,
+	chaincode fabricopsv1alpha1.Chaincode,
 	org fabricopsv1alpha1.Org,
 	namespace string,
 	orderer ordererInstance,
 ) error {
+	if len(chaincode.PrivateData) > 0 {
+		collectionConfigJSON, collectionConfigHash, err := renderChaincodeCollectionConfig(net, channel, chaincode)
+		if err != nil {
+			return err
+		}
+		if err := r.ensureConfigMap(ctx, buildChaincodeCollectionConfigMap(net, chaincode, org, collectionConfigJSON, collectionConfigHash)); err != nil {
+			return err
+		}
+	}
+
 	if !net.Spec.Global.TLS {
 		return nil
 	}
-
 	source := client.ObjectKey{
 		Namespace: orderer.namespace,
 		Name:      identitySecretName(orderer.name, secretKindTLS),
@@ -805,6 +978,27 @@ func buildChaincodeApproveJob(
 				},
 			},
 		},
+	}
+
+	if len(chaincode.PrivateData) > 0 {
+		volumes = append(volumes, corev1.Volume{
+			Name: chaincodeCollectionsVolume,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: chaincodeCollectionConfigMapName(chaincode),
+					},
+					Items: []corev1.KeyToPath{
+						{Key: chaincodeCollectionsKey, Path: chaincodeCollectionsKey},
+					},
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      chaincodeCollectionsVolume,
+			MountPath: chaincodeCollectionsDir,
+			ReadOnly:  true,
+		})
 	}
 
 	if net.Spec.Global.TLS {
@@ -956,12 +1150,22 @@ func (r *FabricNetworkReconciler) ensureChaincodeCommitInputs(
 	orderer ordererInstance,
 	peers []chaincodeLifecyclePeer,
 ) error {
+	labels := chaincodeLabels(net, hostOrg, chaincode.Channel, chaincode.Name)
+	annotations := resourceAnnotations(net, hostOrg)
+
+	if len(chaincode.PrivateData) > 0 {
+		collectionConfigJSON, collectionConfigHash, err := renderChaincodeCollectionConfig(net, channel, chaincode)
+		if err != nil {
+			return err
+		}
+		if err := r.ensureConfigMap(ctx, buildChaincodeCollectionConfigMap(net, chaincode, hostOrg, collectionConfigJSON, collectionConfigHash)); err != nil {
+			return err
+		}
+	}
+
 	if !net.Spec.Global.TLS {
 		return nil
 	}
-
-	labels := chaincodeLabels(net, hostOrg, chaincode.Channel, chaincode.Name)
-	annotations := resourceAnnotations(net, hostOrg)
 
 	if err := r.ensureCopiedSecret(
 		ctx,
@@ -1038,6 +1242,27 @@ func buildChaincodeCommitJob(
 				},
 			},
 		},
+	}
+
+	if len(chaincode.PrivateData) > 0 {
+		volumes = append(volumes, corev1.Volume{
+			Name: chaincodeCollectionsVolume,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: chaincodeCollectionConfigMapName(chaincode),
+					},
+					Items: []corev1.KeyToPath{
+						{Key: chaincodeCollectionsKey, Path: chaincodeCollectionsKey},
+					},
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      chaincodeCollectionsVolume,
+			MountPath: chaincodeCollectionsDir,
+			ReadOnly:  true,
+		})
 	}
 
 	if net.Spec.Global.TLS {
@@ -1306,6 +1531,7 @@ SEQUENCE=%d
 ORDERER_ADDRESS=%q
 ENDORSEMENT_POLICY=%q
 INIT_REQUIRED=%q
+COLLECTIONS_CONFIG=%q
 QUERY_APPROVED_FILE=/tmp/fabricops-chaincode-approved.json
 
 export CORE_PEER_LOCALMSPID=%q
@@ -1339,6 +1565,9 @@ fi
 if [ "$INIT_REQUIRED" = "true" ]; then
   set -- "$@" --init-required
 fi
+if [ -n "$COLLECTIONS_CONFIG" ]; then
+  set -- "$@" --collections-config "$COLLECTIONS_CONFIG"
+fi
 
 "$@"
 `, channel.Name,
@@ -1349,6 +1578,7 @@ fi
 		ordererClientAddress(orderer),
 		chaincodeEndorsementPolicy(net, channel, chaincode),
 		boolString(chaincode.InitRequired),
+		chaincodeCollectionsConfigPath(chaincode),
 		org.Organization.MSPName,
 		serviceDNS(peerName, namespace, peerPort),
 		chaincodeAdminMSPPath,
@@ -1396,6 +1626,7 @@ SEQUENCE=%d
 ORDERER_ADDRESS=%q
 ENDORSEMENT_POLICY=%q
 INIT_REQUIRED=%q
+COLLECTIONS_CONFIG=%q
 QUERY_COMMITTED_FILE=/tmp/fabricops-chaincode-committed.json
 
 export CORE_PEER_LOCALMSPID=%q
@@ -1429,6 +1660,9 @@ fi
 if [ "$INIT_REQUIRED" = "true" ]; then
   set -- "$@" --init-required
 fi
+if [ -n "$COLLECTIONS_CONFIG" ]; then
+  set -- "$@" --collections-config "$COLLECTIONS_CONFIG"
+fi
 
 "$@"
 
@@ -1443,6 +1677,7 @@ peer lifecycle chaincode querycommitted \
 		ordererClientAddress(orderer),
 		chaincodeEndorsementPolicy(net, channel, chaincode),
 		boolString(chaincode.InitRequired),
+		chaincodeCollectionsConfigPath(chaincode),
 		submitter.org.Organization.MSPName,
 		serviceDNS(submitter.peerName, submitter.namespace, peerPort),
 		chaincodeAdminMSPPath,
@@ -1781,6 +2016,10 @@ func chaincodePackageConfigMapName(
 	return sanitizeName(fmt.Sprintf("%s-%s-%s-package", chaincode.Channel, chaincode.Name, org.Organization.Name))
 }
 
+func chaincodeCollectionConfigMapName(chaincode fabricopsv1alpha1.Chaincode) string {
+	return sanitizeName(fmt.Sprintf("%s-%s-collections", chaincode.Channel, chaincode.Name))
+}
+
 func chaincodePackageIDConfigMapName(
 	chaincode fabricopsv1alpha1.Chaincode,
 	org fabricopsv1alpha1.Org,
@@ -1794,11 +2033,21 @@ func chaincodeApproveJobName(
 	org fabricopsv1alpha1.Org,
 	packageID string,
 ) string {
-	return sanitizeName(fmt.Sprintf("%s-%s-%s-approve", chaincodePackageLabel(chaincode), chaincodePackageHash(packageID), org.Organization.Name))
+	parts := []string{chaincodePackageLabel(chaincode), chaincodePackageHash(packageID)}
+	if definitionHash := chaincodeDefinitionNameHash(chaincode); definitionHash != "" {
+		parts = append(parts, definitionHash)
+	}
+	parts = append(parts, org.Organization.Name, "approve")
+	return sanitizeName(strings.Join(parts, "-"))
 }
 
 func chaincodeCommitJobName(chaincode fabricopsv1alpha1.Chaincode, packageID string) string {
-	return sanitizeName(fmt.Sprintf("%s-%s-commit", chaincodePackageLabel(chaincode), chaincodePackageHash(packageID)))
+	parts := []string{chaincodePackageLabel(chaincode), chaincodePackageHash(packageID)}
+	if definitionHash := chaincodeDefinitionNameHash(chaincode); definitionHash != "" {
+		parts = append(parts, definitionHash)
+	}
+	parts = append(parts, "commit")
+	return sanitizeName(strings.Join(parts, "-"))
 }
 
 func chaincodeInstallJobName(
@@ -1847,6 +2096,42 @@ func chaincodePackageHash(packageID string) string {
 		return parts[1]
 	}
 	return "pending"
+}
+
+func chaincodeDefinitionNameHash(chaincode fabricopsv1alpha1.Chaincode) string {
+	if len(chaincode.PrivateData) == 0 {
+		return ""
+	}
+
+	payload := struct {
+		Sequence          int32                                     `json:"sequence"`
+		EndorsementPolicy string                                    `json:"endorsementPolicy,omitempty"`
+		InitRequired      bool                                      `json:"initRequired,omitempty"`
+		PrivateData       []fabricopsv1alpha1.PrivateDataCollection `json:"privateData,omitempty"`
+	}{
+		Sequence:          chaincodeSequence(chaincode),
+		EndorsementPolicy: strings.TrimSpace(chaincode.EndorsementPolicy),
+		InitRequired:      chaincode.InitRequired,
+		PrivateData:       chaincode.PrivateData,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "definition"
+	}
+
+	return shortSHA256(string(encoded))
+}
+
+func chaincodeCollectionsConfigPath(chaincode fabricopsv1alpha1.Chaincode) string {
+	if len(chaincode.PrivateData) == 0 {
+		return ""
+	}
+	return chaincodeCollectionsPath
+}
+
+func shortSHA256(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum)[:12]
 }
 
 func chaincodeLabels(
