@@ -340,6 +340,89 @@ spec:
                       minLength: 1
                       pattern: ^[A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?$
                       type: string
+                    privateData:
+                      description: |-
+                        PrivateData declares explicit Fabric private data collections for this
+                        chaincode definition. The operator renders these entries to the Fabric
+                        collection config JSON used during approve and commit.
+                      items:
+                        properties:
+                          blockToLive:
+                            description: |-
+                              BlockToLive controls private data purging by block age. Zero keeps data
+                              indefinitely.
+                            format: int64
+                            minimum: 0
+                            type: integer
+                          endorsementPolicy:
+                            description: |-
+                              EndorsementPolicy optionally overrides the chaincode endorsement policy for
+                              this collection.
+                            properties:
+                              channelConfigPolicy:
+                                description: ChannelConfigPolicy references a policy
+                                  from the channel configuration.
+                                maxLength: 256
+                                type: string
+                              signaturePolicy:
+                                description: |-
+                                  SignaturePolicy is a Fabric signature policy, for example
+                                  AND('BankAMSP.member','BankBMSP.member').
+                                maxLength: 512
+                                type: string
+                            type: object
+                          maxPeerCount:
+                            description: |-
+                              MaxPeerCount is the maximum number of authorized peers each endorsing peer
+                              attempts to disseminate private data to.
+                            format: int32
+                            maximum: 50
+                            minimum: 0
+                            type: integer
+                          memberOnlyRead:
+                            description: |-
+                              MemberOnlyRead asks peers to enforce that only collection member
+                              organizations can read collection data.
+                            type: boolean
+                          memberOnlyWrite:
+                            description: |-
+                              MemberOnlyWrite asks peers to enforce that only collection member
+                              organizations can write collection data.
+                            type: boolean
+                          name:
+                            description: Name is the Fabric private data collection
+                              name.
+                            maxLength: 64
+                            minLength: 1
+                            pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                            type: string
+                          orgNames:
+                            description: |-
+                              OrgNames lists the channel organizations allowed to store collection data.
+                              When Policy is empty, the operator derives an OR('<MSP>.member', ...)
+                              policy from this list.
+                            items:
+                              type: string
+                            minItems: 1
+                            type: array
+                          policy:
+                            description: Policy overrides the derived Fabric collection
+                              distribution policy.
+                            maxLength: 512
+                            type: string
+                          requiredPeerCount:
+                            description: |-
+                              RequiredPeerCount is the minimum number of authorized peers that must
+                              receive private data before endorsement succeeds.
+                            format: int32
+                            maximum: 50
+                            minimum: 0
+                            type: integer
+                        required:
+                        - name
+                        - orgNames
+                        type: object
+                      type: array
                     sequence:
                       default: 1
                       description: |-
@@ -620,6 +703,10 @@ spec:
                     approvedReady:
                       type: boolean
                     channel:
+                      type: string
+                    collectionConfigHash:
+                      type: string
+                    collectionConfigMap:
                       type: string
                     commitJobName:
                       type: string
