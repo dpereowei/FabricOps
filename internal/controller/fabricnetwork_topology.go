@@ -18,10 +18,13 @@ package controller
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	fabricopsv1alpha1 "github.com/dpereowei/fabricops/api/v1alpha1"
 )
+
+var signaturePolicyPrincipalPattern = regexp.MustCompile(`'([^']+)'`)
 
 func validateFabricNetworkTopology(net *fabricopsv1alpha1.FabricNetwork) []string {
 	problems := []string{}
@@ -123,11 +126,30 @@ func validateFabricNetworkTopology(net *fabricopsv1alpha1.FabricNetwork) []strin
 		seenChaincodePackageLabels[packageLabel] = chaincodeRef
 
 		if channelKnown {
+			problems = append(problems, validateChaincodeEndorsementPolicyTopology(chaincode, channel, orgs)...)
 			problems = append(problems, validateChaincodePrivateDataTopology(chaincode, channel, orgs)...)
 		}
 	}
 
 	return problems
+}
+
+func validateChaincodeEndorsementPolicyTopology(
+	chaincode fabricopsv1alpha1.Chaincode,
+	channel fabricopsv1alpha1.Channel,
+	orgs map[string]fabricopsv1alpha1.Org,
+) []string {
+	policy := strings.TrimSpace(chaincode.EndorsementPolicy)
+	if policy == "" {
+		return nil
+	}
+
+	return validateSignaturePolicyMSPReferences(
+		policy,
+		fmt.Sprintf("chaincode %q endorsementPolicy", chaincode.Name),
+		channel,
+		orgs,
+	)
 }
 
 func validateChaincodePrivateDataTopology(
@@ -243,10 +265,90 @@ func validateChaincodePrivateDataTopology(
 	return problems
 }
 
+func validateSignaturePolicyMSPReferences(
+	policy string,
+	context string,
+	channel fabricopsv1alpha1.Channel,
+	orgs map[string]fabricopsv1alpha1.Org,
+) []string {
+	problems := []string{}
+	allMSPs := orgMSPNames(orgs)
+	channelMSPs := channelMSPNames(channel, orgs)
+	matches := signaturePolicyPrincipalPattern.FindAllStringSubmatch(policy, -1)
+	if len(matches) == 0 {
+		return append(problems, fmt.Sprintf("%s must reference at least one MSP principal", context))
+	}
+
+	seenProblems := map[string]struct{}{}
+	for _, match := range matches {
+		principal := strings.TrimSpace(match[1])
+		parts := strings.SplitN(principal, ".", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			key := "principal:" + principal
+			if _, ok := seenProblems[key]; ok {
+				continue
+			}
+			seenProblems[key] = struct{}{}
+			problems = append(problems, fmt.Sprintf("%s principal %q must use MSP.role format", context, principal))
+			continue
+		}
+
+		mspName := strings.TrimSpace(parts[0])
+		if _, ok := allMSPs[mspName]; !ok {
+			key := "unknown:" + mspName
+			if _, duplicate := seenProblems[key]; duplicate {
+				continue
+			}
+			seenProblems[key] = struct{}{}
+			problems = append(problems, fmt.Sprintf("%s references unknown MSP %q", context, mspName))
+			continue
+		}
+		if _, ok := channelMSPs[mspName]; !ok {
+			key := "outside:" + mspName
+			if _, duplicate := seenProblems[key]; duplicate {
+				continue
+			}
+			seenProblems[key] = struct{}{}
+			problems = append(problems, fmt.Sprintf("%s references MSP %q outside channel %q", context, mspName, channel.Name))
+		}
+	}
+
+	return problems
+}
+
 func channelPeerCountsByOrg(channel fabricopsv1alpha1.Channel) map[string]int {
 	counts := map[string]int{}
 	for _, org := range channel.Orgs {
 		counts[org.Name] = len(org.Peers)
 	}
 	return counts
+}
+
+func orgMSPNames(orgs map[string]fabricopsv1alpha1.Org) map[string]struct{} {
+	mspNames := map[string]struct{}{}
+	for _, org := range orgs {
+		mspName := strings.TrimSpace(org.Organization.MSPName)
+		if mspName != "" {
+			mspNames[mspName] = struct{}{}
+		}
+	}
+	return mspNames
+}
+
+func channelMSPNames(
+	channel fabricopsv1alpha1.Channel,
+	orgs map[string]fabricopsv1alpha1.Org,
+) map[string]struct{} {
+	mspNames := map[string]struct{}{}
+	for _, channelOrg := range channel.Orgs {
+		org, ok := orgs[strings.TrimSpace(channelOrg.Name)]
+		if !ok {
+			continue
+		}
+		mspName := strings.TrimSpace(org.Organization.MSPName)
+		if mspName != "" {
+			mspNames[mspName] = struct{}{}
+		}
+	}
+	return mspNames
 }

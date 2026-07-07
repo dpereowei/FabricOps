@@ -1212,6 +1212,19 @@ var _ = Describe("FabricNetwork Controller", func() {
 						Prefix:    componentPeer,
 					},
 				},
+				{
+					Organization: fabricopsv1alpha1.OrgMeta{
+						Name:    "BankC",
+						Domain:  "bankc.example.com",
+						MSPName: "BankCMSP",
+					},
+					CA: fabricopsv1alpha1.CAConfig{DB: "sqlite"},
+					Peer: &fabricopsv1alpha1.PeerConfig{
+						Instances: 1,
+						DB:        "CouchDB",
+						Prefix:    componentPeer,
+					},
+				},
 			}
 			network.Spec.Channels = []fabricopsv1alpha1.Channel{
 				{
@@ -1241,6 +1254,12 @@ var _ = Describe("FabricNetwork Controller", func() {
 					Channel:      "settlement",
 					Image:        "ghcr.io/dpereowei/fabricops-node-audit:0.1.0",
 					PackageLabel: "shared-package",
+					EndorsementPolicy: "AND(" +
+						"'BankAMSP.member'," +
+						"'BankCMSP.member'," +
+						"'MissingMSP.member'," +
+						"'BrokenPrincipal'" +
+						")",
 					PrivateData: []fabricopsv1alpha1.PrivateDataCollection{
 						{
 							Name:              "bad-collection",
@@ -1282,6 +1301,9 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.Message).To(ContainSubstring(`channel "settlement" references unknown org "MissingOrg"`))
 			Expect(network.Status.Message).To(ContainSubstring(`chaincode "settlement" references unknown channel "payments"`))
 			Expect(network.Status.Message).To(ContainSubstring(`chaincode package label "shared-package" is used by both "settlement/audit" and "settlement/risk"`))
+			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" endorsementPolicy references MSP "BankCMSP" outside channel "settlement"`))
+			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" endorsementPolicy references unknown MSP "MissingMSP"`))
+			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" endorsementPolicy principal "BrokenPrincipal" must use MSP.role format`))
 			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" private data collection "bad-collection" references unknown org "MissingOrg"`))
 			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" private data collection "bad-collection" maxPeerCount 1 exceeds available authorized peers 0`))
 			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" private data collection "bad-collection" requiredPeerCount 2 exceeds maxPeerCount 1`))

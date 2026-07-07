@@ -94,7 +94,7 @@ has repeatable CI or e2e coverage in this repository.
 | Java chaincode | yes | yes | Supported | samples | | Java CCaaS sample image is invoked successfully in OrbStack |
 | Chaincode-as-a-Service (CCaaS) | yes | yes | Supported | README, samples | | Package metadata, install, approve, commit, and workloads are reconciled |
 | CCaaS hot reload | yes | yes | Planned | | | Not modelled yet |
-| Endorsement policies | yes | yes | Partial | samples | | `AND(...)` is validated by the multi-org sample; broader policy validation is still pending |
+| Endorsement policies | yes | yes | Supported | samples | | `AND(...)` is validated by kind e2e; topology validation catches unknown, malformed, and outside-channel MSP references |
 | Multi-org endorsements | yes | yes | Supported | samples | | Kind e2e invokes through BankA+BankB endorsement sets and queries both orgs |
 | Private data collections | yes | yes | Supported | docs/private-data-collections.md, samples | | Kind e2e writes private data with transient input, confirms BankA can read it, confirms BankB cannot read the payload, and confirms BankB can query the private data hash |
 | Chaincode scripts: invoke/query | yes | yes | Partial | samples | | Node/Go/Java invoke smoke exists; list/query utilities are not generalized yet |
