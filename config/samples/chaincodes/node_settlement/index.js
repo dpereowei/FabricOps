@@ -2,6 +2,9 @@
 
 const { Contract } = require("fabric-contract-api");
 
+const DEFAULT_PRIVATE_COLLECTION = "bank-a-private-settlements";
+const PRIVATE_TRANSIENT_KEY = "settlement";
+
 class SettlementContract extends Contract {
   constructor() {
     super("SettlementContract");
@@ -83,6 +86,65 @@ class SettlementContract extends Contract {
     return settlement;
   }
 
+  async createPrivateSettlement(ctx, collection, id) {
+    collection = this.collectionOrDefault(collection);
+    this.requireText(id, "id");
+
+    const transientMap = ctx.stub.getTransient();
+    const settlementBytes = transientMap.get(PRIVATE_TRANSIENT_KEY);
+    if (!settlementBytes || settlementBytes.length === 0) {
+      throw new Error(`Transient field ${PRIVATE_TRANSIENT_KEY} is required`);
+    }
+
+    const settlement = JSON.parse(settlementBytes.toString("utf8"));
+    settlement.id = id;
+    this.requireText(settlement.debtor, "debtor");
+    this.requireText(settlement.creditor, "creditor");
+    this.requireText(settlement.amount, "amount");
+    this.requireText(settlement.currency, "currency");
+    settlement.status = settlement.status || "PENDING";
+
+    const existing = await ctx.stub.getPrivateData(collection, id);
+    if (existing && existing.length > 0) {
+      throw new Error(`Private settlement ${id} already exists in ${collection}`);
+    }
+
+    await ctx.stub.putPrivateData(collection, id, Buffer.from(JSON.stringify(settlement)));
+    return {
+      id,
+      collection,
+      status: settlement.status,
+    };
+  }
+
+  async readPrivateSettlement(ctx, collection, id) {
+    collection = this.collectionOrDefault(collection);
+    this.requireText(id, "id");
+
+    const bytes = await ctx.stub.getPrivateData(collection, id);
+    if (!bytes || bytes.length === 0) {
+      throw new Error(`Private settlement ${id} does not exist in ${collection}`);
+    }
+
+    return JSON.parse(bytes.toString("utf8"));
+  }
+
+  async readPrivateSettlementHash(ctx, collection, id) {
+    collection = this.collectionOrDefault(collection);
+    this.requireText(id, "id");
+
+    const hash = await ctx.stub.getPrivateDataHash(collection, id);
+    if (!hash || hash.length === 0) {
+      throw new Error(`Private settlement hash ${id} does not exist in ${collection}`);
+    }
+
+    return {
+      id,
+      collection,
+      hash: hash.toString("hex"),
+    };
+  }
+
   async getAllSettlements(ctx) {
     const iterator = await ctx.stub.getStateByRange("", "");
     const settlements = [];
@@ -106,6 +168,10 @@ class SettlementContract extends Contract {
     if (!value || `${value}`.trim() === "") {
       throw new Error(`${name} is required`);
     }
+  }
+
+  collectionOrDefault(collection) {
+    return collection && `${collection}`.trim() !== "" ? collection : DEFAULT_PRIVATE_COLLECTION;
   }
 }
 

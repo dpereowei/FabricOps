@@ -96,7 +96,7 @@ has repeatable CI or e2e coverage in this repository.
 | CCaaS hot reload | yes | yes | Planned | | | Not modelled yet |
 | Endorsement policies | yes | yes | Partial | samples | | `AND(...)` is validated by the multi-org sample; broader policy validation is still pending |
 | Multi-org endorsements | yes | yes | Supported | samples | | Kind e2e invokes through BankA+BankB endorsement sets and queries both orgs |
-| Private data collections | yes | yes | Planned | | | Collection package/config modelling is not implemented |
+| Private data collections | yes | yes | Supported | docs/private-data-collections.md, samples | | Kind e2e writes private data with transient input, confirms BankA can read it, confirms BankB cannot read the payload, and confirms BankB can query the private data hash |
 | Chaincode scripts: invoke/query | yes | yes | Partial | samples | | Node/Go/Java invoke smoke exists; list/query utilities are not generalized yet |
 | Chaincode scripts: list | yes | yes | Planned | | | Not implemented |
 | Chaincode install/upgrade commands | yes | yes | Partial | | | Install/approve/commit supported; upgrade sequencing needs dedicated validation |

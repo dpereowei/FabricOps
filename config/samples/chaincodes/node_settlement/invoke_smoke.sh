@@ -17,6 +17,14 @@ ADMIN_TLS_SECRET="${ADMIN_TLS_SECRET:-banka-admin-tls}"
 SMOKE_ID="${SMOKE_ID:-smoke-$(date +%s)}"
 CREATE_FUNCTION="${CREATE_FUNCTION:-createSettlement}"
 READ_FUNCTION="${READ_FUNCTION:-readSettlement}"
+PRIVATE_SMOKE_ENABLED="${PRIVATE_SMOKE_ENABLED:-false}"
+PRIVATE_COLLECTION="${PRIVATE_COLLECTION:-bank-a-private-settlements}"
+PRIVATE_CREATE_FUNCTION="${PRIVATE_CREATE_FUNCTION:-createPrivateSettlement}"
+PRIVATE_READ_FUNCTION="${PRIVATE_READ_FUNCTION:-readPrivateSettlement}"
+PRIVATE_HASH_FUNCTION="${PRIVATE_HASH_FUNCTION:-readPrivateSettlementHash}"
+PRIVATE_TRANSIENT_KEY="${PRIVATE_TRANSIENT_KEY:-settlement}"
+PRIVATE_AUTHORIZED_PEER_INDEX="${PRIVATE_AUTHORIZED_PEER_INDEX:-1}"
+PRIVATE_UNAUTHORIZED_PEER_INDEX="${PRIVATE_UNAUTHORIZED_PEER_INDEX:-3}"
 RETRY_ATTEMPTS="${RETRY_ATTEMPTS:-6}"
 RETRY_DELAY_SECONDS="${RETRY_DELAY_SECONDS:-10}"
 CHAINCODE_SERVICE_PORT="${CHAINCODE_SERVICE_PORT:-7052}"
@@ -193,6 +201,25 @@ for endorsement_set in "${endorsement_sets[@]}"; do
   done
 done
 
+validate_peer_index() {
+  local value="$1"
+  local name="$2"
+
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "$name must be a 1-based numeric peer index, got $value" >&2
+    exit 1
+  fi
+  if ((value < 1 || value > ${#peer_addresses[@]})); then
+    echo "$name index $value is outside the PEER_ADDRESSES range" >&2
+    exit 1
+  fi
+}
+
+if [[ "$PRIVATE_SMOKE_ENABLED" = "true" ]]; then
+  validate_peer_index "$PRIVATE_AUTHORIZED_PEER_INDEX" PRIVATE_AUTHORIZED_PEER_INDEX
+  validate_peer_index "$PRIVATE_UNAUTHORIZED_PEER_INDEX" PRIVATE_UNAUTHORIZED_PEER_INDEX
+fi
+
 kubectl -n "$NAMESPACE" delete job "$JOB_NAME" --ignore-not-found
 
 kubectl -n "$NAMESPACE" apply -f - <<YAML
@@ -226,6 +253,22 @@ spec:
               value: "${CREATE_FUNCTION}"
             - name: FABRICOPS_READ_FUNCTION
               value: "${READ_FUNCTION}"
+            - name: FABRICOPS_PRIVATE_SMOKE_ENABLED
+              value: "${PRIVATE_SMOKE_ENABLED}"
+            - name: FABRICOPS_PRIVATE_COLLECTION
+              value: "${PRIVATE_COLLECTION}"
+            - name: FABRICOPS_PRIVATE_CREATE_FUNCTION
+              value: "${PRIVATE_CREATE_FUNCTION}"
+            - name: FABRICOPS_PRIVATE_READ_FUNCTION
+              value: "${PRIVATE_READ_FUNCTION}"
+            - name: FABRICOPS_PRIVATE_HASH_FUNCTION
+              value: "${PRIVATE_HASH_FUNCTION}"
+            - name: FABRICOPS_PRIVATE_TRANSIENT_KEY
+              value: "${PRIVATE_TRANSIENT_KEY}"
+            - name: FABRICOPS_PRIVATE_AUTHORIZED_PEER_INDEX
+              value: "${PRIVATE_AUTHORIZED_PEER_INDEX}"
+            - name: FABRICOPS_PRIVATE_UNAUTHORIZED_PEER_INDEX
+              value: "${PRIVATE_UNAUTHORIZED_PEER_INDEX}"
             - name: FABRICOPS_ORDERER_ADDRESS
               value: "${ORDERER_ADDRESS}"
             - name: FABRICOPS_PEER_ADDRESSES
@@ -346,6 +389,70 @@ spec:
                 IFS="\$old_ifs"
                 set_index=\$((set_index + 1))
               done
+
+              if [ "\$FABRICOPS_PRIVATE_SMOKE_ENABLED" = "true" ]; then
+                private_id="\${FABRICOPS_SMOKE_ID}-private"
+                private_payload="{\"debtor\":\"BankA\",\"creditor\":\"BankB\",\"amount\":\"250\",\"currency\":\"USD\",\"status\":\"PENDING\",\"instructionRef\":\"wire-\${private_id}\"}"
+                transient_value="\$(printf '%s' "\$private_payload" | base64 | tr -d '\n')"
+                transient_payload="{\"\$FABRICOPS_PRIVATE_TRANSIENT_KEY\":\"\$transient_value\"}"
+
+                authorized_peer_address="\$(csv_item "\$FABRICOPS_PEER_ADDRESSES" "\$FABRICOPS_PRIVATE_AUTHORIZED_PEER_INDEX")"
+                authorized_peer_tls_root="\$(csv_item "\$FABRICOPS_PEER_TLS_ROOTS" "\$FABRICOPS_PRIVATE_AUTHORIZED_PEER_INDEX")"
+                authorized_peer_label="\$(csv_item "\$FABRICOPS_PEER_LABELS" "\$FABRICOPS_PRIVATE_AUTHORIZED_PEER_INDEX")"
+                unauthorized_peer_address="\$(csv_item "\$FABRICOPS_PEER_ADDRESSES" "\$FABRICOPS_PRIVATE_UNAUTHORIZED_PEER_INDEX")"
+                unauthorized_peer_tls_root="\$(csv_item "\$FABRICOPS_PEER_TLS_ROOTS" "\$FABRICOPS_PRIVATE_UNAUTHORIZED_PEER_INDEX")"
+                unauthorized_peer_label="\$(csv_item "\$FABRICOPS_PEER_LABELS" "\$FABRICOPS_PRIVATE_UNAUTHORIZED_PEER_INDEX")"
+
+                export CORE_PEER_ADDRESS="\$authorized_peer_address"
+                export CORE_PEER_TLS_ROOTCERT_FILE="\$authorized_peer_tls_root"
+
+                PRIVATE_INVOKE_PAYLOAD="{\"Args\":[\"\$FABRICOPS_PRIVATE_CREATE_FUNCTION\",\"\$FABRICOPS_PRIVATE_COLLECTION\",\"\$private_id\"]}"
+                PRIVATE_QUERY_PAYLOAD="{\"Args\":[\"\$FABRICOPS_PRIVATE_READ_FUNCTION\",\"\$FABRICOPS_PRIVATE_COLLECTION\",\"\$private_id\"]}"
+                PRIVATE_HASH_PAYLOAD="{\"Args\":[\"\$FABRICOPS_PRIVATE_HASH_FUNCTION\",\"\$FABRICOPS_PRIVATE_COLLECTION\",\"\$private_id\"]}"
+
+                echo "Writing private settlement \$private_id to \$FABRICOPS_PRIVATE_COLLECTION through \$authorized_peer_label"
+                peer chaincode invoke \
+                  -o "\$FABRICOPS_ORDERER_ADDRESS" \
+                  --tls \
+                  --cafile /fabricops/smoke/orderer-tls/ca.crt \
+                  -C "\$FABRICOPS_CHANNEL" \
+                  -n "\$FABRICOPS_CHAINCODE" \
+                  -c "\$PRIVATE_INVOKE_PAYLOAD" \
+                  --transient "\$transient_payload" \
+                  --peerAddresses "\$authorized_peer_address" \
+                  --tlsRootCertFiles "\$authorized_peer_tls_root" \
+                  --waitForEvent
+
+                echo "Reading private settlement \$private_id through authorized peer \$authorized_peer_label"
+                peer chaincode query \
+                  -C "\$FABRICOPS_CHANNEL" \
+                  -n "\$FABRICOPS_CHAINCODE" \
+                  -c "\$PRIVATE_QUERY_PAYLOAD" | tee /tmp/fabricops-private-query.out
+                grep "\$private_id" /tmp/fabricops-private-query.out
+                grep "wire-\$private_id" /tmp/fabricops-private-query.out
+
+                export CORE_PEER_ADDRESS="\$unauthorized_peer_address"
+                export CORE_PEER_TLS_ROOTCERT_FILE="\$unauthorized_peer_tls_root"
+
+                echo "Verifying non-member peer \$unauthorized_peer_label cannot read private settlement \$private_id"
+                if peer chaincode query \
+                  -C "\$FABRICOPS_CHANNEL" \
+                  -n "\$FABRICOPS_CHAINCODE" \
+                  -c "\$PRIVATE_QUERY_PAYLOAD" > /tmp/fabricops-private-unauthorized.out 2>&1 &&
+                  grep "\$private_id" /tmp/fabricops-private-unauthorized.out; then
+                  cat /tmp/fabricops-private-unauthorized.out
+                  echo "Expected non-member peer \$unauthorized_peer_label not to return private data" >&2
+                  exit 1
+                fi
+                cat /tmp/fabricops-private-unauthorized.out
+
+                echo "Reading private data hash for \$private_id through non-member peer \$unauthorized_peer_label"
+                peer chaincode query \
+                  -C "\$FABRICOPS_CHANNEL" \
+                  -n "\$FABRICOPS_CHAINCODE" \
+                  -c "\$PRIVATE_HASH_PAYLOAD" | tee /tmp/fabricops-private-hash.out
+                grep "\"hash\"" /tmp/fabricops-private-hash.out
+              fi
           volumeMounts:
             - name: admin-msp
               mountPath: /fabricops/smoke/admin-msp

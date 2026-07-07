@@ -107,7 +107,8 @@ func validateFabricNetworkTopology(net *fabricopsv1alpha1.FabricNetwork) []strin
 		}
 		seenChaincodes[key] = struct{}{}
 
-		if _, ok := channels[channelName]; !ok {
+		channel, channelKnown := channels[channelName]
+		if !channelKnown {
 			problems = append(problems, fmt.Sprintf("chaincode %q references unknown channel %q", chaincodeName, channelName))
 		}
 
@@ -120,7 +121,132 @@ func validateFabricNetworkTopology(net *fabricopsv1alpha1.FabricNetwork) []strin
 			)
 		}
 		seenChaincodePackageLabels[packageLabel] = chaincodeRef
+
+		if channelKnown {
+			problems = append(problems, validateChaincodePrivateDataTopology(chaincode, channel, orgs)...)
+		}
 	}
 
 	return problems
+}
+
+func validateChaincodePrivateDataTopology(
+	chaincode fabricopsv1alpha1.Chaincode,
+	channel fabricopsv1alpha1.Channel,
+	orgs map[string]fabricopsv1alpha1.Org,
+) []string {
+	problems := []string{}
+	seenCollections := map[string]struct{}{}
+	channelPeerCounts := channelPeerCountsByOrg(channel)
+
+	for _, collection := range chaincode.PrivateData {
+		collectionName := strings.TrimSpace(collection.Name)
+		if collectionName == "" {
+			problems = append(problems, fmt.Sprintf("chaincode %q private data collection name is required", chaincode.Name))
+			continue
+		}
+		if strings.HasPrefix(collectionName, "_") {
+			problems = append(
+				problems,
+				fmt.Sprintf("chaincode %q private data collection %q must not start with _", chaincode.Name, collectionName),
+			)
+		}
+		if _, ok := seenCollections[collectionName]; ok {
+			problems = append(
+				problems,
+				fmt.Sprintf("chaincode %q private data collection %q is declared more than once", chaincode.Name, collectionName),
+			)
+		}
+		seenCollections[collectionName] = struct{}{}
+
+		if len(collection.OrgNames) == 0 {
+			problems = append(
+				problems,
+				fmt.Sprintf("chaincode %q private data collection %q must include at least one org", chaincode.Name, collectionName),
+			)
+		}
+
+		authorizedPeers := 0
+		for _, orgName := range collection.OrgNames {
+			orgName = strings.TrimSpace(orgName)
+			if _, ok := orgs[orgName]; !ok {
+				problems = append(
+					problems,
+					fmt.Sprintf("chaincode %q private data collection %q references unknown org %q", chaincode.Name, collectionName, orgName),
+				)
+				continue
+			}
+			peerCount, ok := channelPeerCounts[orgName]
+			if !ok {
+				problems = append(
+					problems,
+					fmt.Sprintf(
+						"chaincode %q private data collection %q references org %q outside channel %q",
+						chaincode.Name,
+						collectionName,
+						orgName,
+						channel.Name,
+					),
+				)
+				continue
+			}
+			authorizedPeers += peerCount
+		}
+
+		maxPeerCount := int32(max(authorizedPeers-1, 0))
+		if collection.MaxPeerCount != nil {
+			maxPeerCount = *collection.MaxPeerCount
+			if maxPeerCount > int32(max(authorizedPeers-1, 0)) {
+				problems = append(
+					problems,
+					fmt.Sprintf(
+						"chaincode %q private data collection %q maxPeerCount %d exceeds available authorized peers %d",
+						chaincode.Name,
+						collectionName,
+						maxPeerCount,
+						max(authorizedPeers-1, 0),
+					),
+				)
+			}
+		}
+		requiredPeerCount := int32(0)
+		if collection.RequiredPeerCount != nil {
+			requiredPeerCount = *collection.RequiredPeerCount
+		}
+		if requiredPeerCount > maxPeerCount {
+			problems = append(
+				problems,
+				fmt.Sprintf(
+					"chaincode %q private data collection %q requiredPeerCount %d exceeds maxPeerCount %d",
+					chaincode.Name,
+					collectionName,
+					requiredPeerCount,
+					maxPeerCount,
+				),
+			)
+		}
+
+		if collection.EndorsementPolicy != nil &&
+			strings.TrimSpace(collection.EndorsementPolicy.SignaturePolicy) != "" &&
+			strings.TrimSpace(collection.EndorsementPolicy.ChannelConfigPolicy) != "" {
+			problems = append(
+				problems,
+				fmt.Sprintf(
+					"chaincode %q private data collection %q must use only one endorsementPolicy field",
+					chaincode.Name,
+					collectionName,
+				),
+			)
+		}
+	}
+
+	return problems
+}
+
+func channelPeerCountsByOrg(channel fabricopsv1alpha1.Channel) map[string]int {
+	counts := map[string]int{}
+	for _, org := range channel.Orgs {
+		counts[org.Name] = len(org.Peers)
+	}
+	return counts
 }

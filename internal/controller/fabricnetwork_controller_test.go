@@ -1241,6 +1241,18 @@ var _ = Describe("FabricNetwork Controller", func() {
 					Channel:      "settlement",
 					Image:        "ghcr.io/dpereowei/fabricops-node-audit:0.1.0",
 					PackageLabel: "shared-package",
+					PrivateData: []fabricopsv1alpha1.PrivateDataCollection{
+						{
+							Name:              "bad-collection",
+							OrgNames:          []string{"MissingOrg"},
+							RequiredPeerCount: int32Ptr(2),
+							MaxPeerCount:      int32Ptr(1),
+							EndorsementPolicy: &fabricopsv1alpha1.PrivateDataEndorsementPolicy{
+								SignaturePolicy:     "OR('BankAMSP.member')",
+								ChannelConfigPolicy: "Admins",
+							},
+						},
+					},
 				},
 				{
 					Name:         "risk",
@@ -1270,6 +1282,10 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.Message).To(ContainSubstring(`channel "settlement" references unknown org "MissingOrg"`))
 			Expect(network.Status.Message).To(ContainSubstring(`chaincode "settlement" references unknown channel "payments"`))
 			Expect(network.Status.Message).To(ContainSubstring(`chaincode package label "shared-package" is used by both "settlement/audit" and "settlement/risk"`))
+			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" private data collection "bad-collection" references unknown org "MissingOrg"`))
+			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" private data collection "bad-collection" maxPeerCount 1 exceeds available authorized peers 0`))
+			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" private data collection "bad-collection" requiredPeerCount 2 exceeds maxPeerCount 1`))
+			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" private data collection "bad-collection" must use only one endorsementPolicy field`))
 			Expect(network.Status.OrgStatus).To(BeEmpty())
 			Expect(network.Status.ChannelStatus).To(BeEmpty())
 			Expect(network.Status.ChaincodeStatus).To(BeEmpty())
@@ -1634,6 +1650,110 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(commitCommand).To(ContainSubstring("--tlsRootCertFiles \"/fabricops/chaincode/crypto/peers/bankb/peer0/tls/ca.crt\""))
 			Expect(commitCommand).To(ContainSubstring("ENDORSEMENT_POLICY=\"AND('BankAMSP.member','BankBMSP.member')\""))
 			Expect(volumeMountPaths(commitJob.Spec.Template.Spec.Containers[0])).To(HaveKeyWithValue(chaincodePeerTLSVolumeName(bankBOrg, "peer0"), chaincodePeerTLSPath(bankBOrg, "peer0")))
+		})
+
+		It("should render private data collections and mount them into lifecycle jobs", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Orgs[1].Peer.Instances = 2
+			channel := fabricopsv1alpha1.Channel{
+				Name: "settlement",
+				Orgs: []fabricopsv1alpha1.ChannelOrg{
+					{
+						Name:  "BankA",
+						Peers: []string{"peer0", "peer1"},
+					},
+				},
+			}
+			chaincode := fabricopsv1alpha1.Chaincode{
+				Name:     "settlement",
+				Version:  "0.0.1",
+				Channel:  "settlement",
+				Image:    "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0",
+				Sequence: 1,
+				PrivateData: []fabricopsv1alpha1.PrivateDataCollection{
+					{
+						Name:     "bank-a-collection",
+						OrgNames: []string{"BankA"},
+					},
+					{
+						Name:              "bank-a-short-lived",
+						OrgNames:          []string{"BankA"},
+						RequiredPeerCount: int32Ptr(1),
+						MaxPeerCount:      int32Ptr(1),
+						BlockToLive:       int64Ptr(5),
+						MemberOnlyWrite:   boolPtr(false),
+						EndorsementPolicy: &fabricopsv1alpha1.PrivateDataEndorsementPolicy{
+							SignaturePolicy: "OR('BankAMSP.member')",
+						},
+					},
+				},
+				CCAAS: &fabricopsv1alpha1.ChaincodeAsAService{
+					ServicePort: 7052,
+				},
+			}
+			network.Spec.Channels = []fabricopsv1alpha1.Channel{channel}
+			network.Spec.Chaincodes = []fabricopsv1alpha1.Chaincode{chaincode}
+			Expect(k8sClient.Update(ctx, &network)).To(Succeed())
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			collectionConfigJSON, collectionConfigHash, err := renderChaincodeCollectionConfig(&network, channel, chaincode)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(collectionConfigJSON).To(ContainSubstring(`"name": "bank-a-collection"`))
+			Expect(collectionConfigJSON).To(ContainSubstring(`"policy": "OR('BankAMSP.member')"`))
+			Expect(collectionConfigJSON).To(ContainSubstring(`"requiredPeerCount": 0`))
+			Expect(collectionConfigJSON).To(ContainSubstring(`"maxPeerCount": 1`))
+			Expect(collectionConfigJSON).To(ContainSubstring(`"blockToLive": 5`))
+			Expect(collectionConfigJSON).To(ContainSubstring(`"memberOnlyWrite": false`))
+			Expect(collectionConfigJSON).To(ContainSubstring(`"signaturePolicy": "OR('BankAMSP.member')"`))
+
+			var collectionConfigMap corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: "fo-test-banka",
+				Name:      "settlement-settlement-collections",
+			}, &collectionConfigMap)).To(Succeed())
+			Expect(collectionConfigMap.Labels[labelAppComponent]).To(Equal(componentChaincode))
+			Expect(collectionConfigMap.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(collectionConfigMap.Labels[labelChaincode]).To(Equal("settlement"))
+			Expect(collectionConfigMap.Annotations[annotationCollectionConfigHash]).To(Equal(collectionConfigHash))
+			Expect(collectionConfigMap.Data[chaincodeCollectionsKey]).To(Equal(collectionConfigJSON))
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.ChaincodeStatus).To(HaveLen(1))
+			Expect(network.Status.ChaincodeStatus[0].CollectionConfigMap).To(Equal("settlement-settlement-collections"))
+			Expect(network.Status.ChaincodeStatus[0].CollectionConfigHash).To(Equal(collectionConfigHash))
+
+			bankOrg := network.Spec.Orgs[1]
+			orderer, ok := chaincodeLifecycleOrderer(&network)
+			Expect(ok).To(BeTrue())
+			packageID := "settlement_settlement_0.0.1:abc123"
+			definitionHash := chaincodeDefinitionNameHash(chaincode)
+			Expect(definitionHash).NotTo(BeEmpty())
+
+			approveJob := buildChaincodeApproveJob(&network, channel, chaincode, bankOrg, "peer0", packageID, orderer)
+			Expect(approveJob.Name).To(Equal("settlement-settlement-0-0-1-abc123-" + definitionHash + "-banka-approve"))
+			Expect(configMapVolumeNames(approveJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeCollectionsVolume, "settlement-settlement-collections"))
+			approveContainer := approveJob.Spec.Template.Spec.Containers[0]
+			Expect(volumeMountPaths(approveContainer)).To(HaveKeyWithValue(chaincodeCollectionsVolume, chaincodeCollectionsDir))
+			Expect(approveContainer.Command[2]).To(ContainSubstring("COLLECTIONS_CONFIG=\"/fabricops/chaincode/collections/collections.json\""))
+			Expect(approveContainer.Command[2]).To(ContainSubstring("--collections-config \"$COLLECTIONS_CONFIG\""))
+
+			peers := chaincodeLifecyclePeers(&network, channel)
+			commitJob := buildChaincodeCommitJob(&network, channel, chaincode, packageID, peers[0], orderer, peers)
+			Expect(commitJob.Name).To(Equal("settlement-settlement-0-0-1-abc123-" + definitionHash + "-commit"))
+			Expect(configMapVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeCollectionsVolume, "settlement-settlement-collections"))
+			commitContainer := commitJob.Spec.Template.Spec.Containers[0]
+			Expect(volumeMountPaths(commitContainer)).To(HaveKeyWithValue(chaincodeCollectionsVolume, chaincodeCollectionsDir))
+			Expect(commitContainer.Command[2]).To(ContainSubstring("COLLECTIONS_CONFIG=\"/fabricops/chaincode/collections/collections.json\""))
+			Expect(commitContainer.Command[2]).To(ContainSubstring("--collections-config \"$COLLECTIONS_CONFIG\""))
 		})
 
 		It("should generate channel config and a channel block Job after components are ready", func() {
@@ -3052,5 +3172,17 @@ func servicePorts(service corev1.Service) []int32 {
 }
 
 func stringPtr(value string) *string {
+	return &value
+}
+
+func int32Ptr(value int32) *int32 {
+	return &value
+}
+
+func int64Ptr(value int64) *int64 {
+	return &value
+}
+
+func boolPtr(value bool) *bool {
 	return &value
 }

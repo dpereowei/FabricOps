@@ -113,7 +113,7 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 .PHONY: cleanup-sample
 cleanup-sample: ## Delete the sample FabricNetwork and generated sample namespaces from the current cluster.
 	-$(KUBECTL) delete fabricnetwork fabricnetwork-sample -n default --ignore-not-found
-	-$(KUBECTL) delete namespace fo-sample-orderer fo-sample-banka --ignore-not-found
+	-$(KUBECTL) delete namespace fo-sample-orderer fo-sample-banka fo-sample-bankb --ignore-not-found
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
