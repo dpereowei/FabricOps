@@ -1328,9 +1328,16 @@ func (r *FabricNetworkReconciler) deploymentWorkloadStatus(
 		return fabricopsv1alpha1.WorkloadStatus{}, nil
 	}
 
+	ready := deploy.Status.ReadyReplicas
+	if deploy.Status.ObservedGeneration < deploy.Generation ||
+		deploy.Status.UpdatedReplicas < *deploy.Spec.Replicas ||
+		deploy.Status.AvailableReplicas < *deploy.Spec.Replicas {
+		ready = 0
+	}
+
 	return fabricopsv1alpha1.WorkloadStatus{
 		Desired: *deploy.Spec.Replicas,
-		Ready:   deploy.Status.ReadyReplicas,
+		Ready:   ready,
 	}, nil
 }
 
