@@ -17,6 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -25,6 +28,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"time"
 
@@ -297,6 +301,12 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.OrgStatus[0].IdentityError).To(ContainSubstring("orderer-admin-msp"))
 			Expect(network.Status.OrgStatus[0].IdentityError).To(ContainSubstring("orderer0-msp"))
 			Expect(network.Status.OrgStatus[0].CAReady).To(BeFalse())
+			Expect(network.Status.OrgStatus[0].CAEndpoint).To(Equal("http://orderer-ca.fo-test-orderer.svc.cluster.local:7054"))
+			Expect(network.Status.OrgStatus[0].OrdererEndpoints).To(HaveLen(1))
+			Expect(network.Status.OrgStatus[0].OrdererEndpoints[0].Name).To(Equal("orderer0"))
+			Expect(network.Status.OrgStatus[0].OrdererEndpoints[0].ClientAddress).To(Equal("orderer0.fo-test-orderer.svc.cluster.local:7050"))
+			Expect(network.Status.OrgStatus[0].OrdererEndpoints[0].AdminAddress).To(Equal("orderer0.fo-test-orderer.svc.cluster.local:9443"))
+			Expect(network.Status.OrgStatus[0].OrdererEndpoints[0].OperationsAddress).To(Equal("http://orderer0-operations.fo-test-orderer.svc.cluster.local:8443"))
 			Expect(network.Status.OrgStatus[0].Orderers.Desired).To(Equal(int32(1)))
 			Expect(network.Status.OrgStatus[0].Orderers.Ready).To(Equal(int32(0)))
 			Expect(network.Status.OrgStatus[0].OrderersReady).To(BeFalse())
@@ -310,9 +320,15 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.OrgStatus[1].IdentityError).To(ContainSubstring("banka-admin-msp"))
 			Expect(network.Status.OrgStatus[1].IdentityError).To(ContainSubstring("peer0-msp"))
 			Expect(network.Status.OrgStatus[1].CAReady).To(BeFalse())
+			Expect(network.Status.OrgStatus[1].CAEndpoint).To(Equal("http://banka-ca.fo-test-banka.svc.cluster.local:7054"))
 			Expect(network.Status.OrgStatus[1].Orderers.Desired).To(Equal(int32(0)))
 			Expect(network.Status.OrgStatus[1].Orderers.Ready).To(Equal(int32(0)))
 			Expect(network.Status.OrgStatus[1].OrderersReady).To(BeTrue())
+			Expect(network.Status.OrgStatus[1].PeerEndpoints).To(HaveLen(1))
+			Expect(network.Status.OrgStatus[1].PeerEndpoints[0].Name).To(Equal("peer0"))
+			Expect(network.Status.OrgStatus[1].PeerEndpoints[0].Address).To(Equal("peer0.fo-test-banka.svc.cluster.local:7051"))
+			Expect(network.Status.OrgStatus[1].PeerEndpoints[0].ChaincodeAddress).To(Equal("peer0.fo-test-banka.svc.cluster.local:7052"))
+			Expect(network.Status.OrgStatus[1].PeerEndpoints[0].OperationsAddress).To(Equal("http://peer0-operations.fo-test-banka.svc.cluster.local:9443"))
 			Expect(network.Status.OrgStatus[1].Peers.Desired).To(Equal(int32(1)))
 			Expect(network.Status.OrgStatus[1].Peers.Ready).To(Equal(int32(0)))
 			Expect(network.Status.OrgStatus[1].PeersReady).To(BeFalse())
@@ -1117,11 +1133,13 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.OrgStatus[0].Ready).To(BeTrue())
 			Expect(network.Status.OrgStatus[0].IdentityReady).To(BeTrue())
 			Expect(network.Status.OrgStatus[0].CAReady).To(BeTrue())
+			Expect(network.Status.OrgStatus[0].OrdererEndpoints[0].ClientAddress).To(Equal("orderer0.fo-test-orderer.svc.cluster.local:7050"))
 			Expect(network.Status.OrgStatus[0].Orderers.Ready).To(Equal(int32(1)))
 			Expect(network.Status.OrgStatus[0].OrderersReady).To(BeTrue())
 			Expect(network.Status.OrgStatus[1].Ready).To(BeTrue())
 			Expect(network.Status.OrgStatus[1].IdentityReady).To(BeTrue())
 			Expect(network.Status.OrgStatus[1].CAReady).To(BeTrue())
+			Expect(network.Status.OrgStatus[1].PeerEndpoints[0].Address).To(Equal("peer0.fo-test-banka.svc.cluster.local:7051"))
 			Expect(network.Status.OrgStatus[1].Peers.Ready).To(Equal(int32(1)))
 			Expect(network.Status.OrgStatus[1].PeersReady).To(BeTrue())
 
@@ -1279,6 +1297,21 @@ var _ = Describe("FabricNetwork Controller", func() {
 							},
 						},
 					},
+					CouchDBIndexes: []fabricopsv1alpha1.CouchDBIndex{
+						{
+							Name:   "by-owner",
+							Fields: []string{"docType", "owner"},
+						},
+						{
+							Name:   "by-owner",
+							Fields: []string{""},
+						},
+						{
+							Name:       "by-private-owner",
+							Fields:     []string{"owner"},
+							Collection: "missing-collection",
+						},
+					},
 				},
 				{
 					Name:         "risk",
@@ -1315,6 +1348,9 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" private data collection "bad-collection" maxPeerCount 1 exceeds available authorized peers 0`))
 			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" private data collection "bad-collection" requiredPeerCount 2 exceeds maxPeerCount 1`))
 			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" private data collection "bad-collection" must use only one endorsementPolicy field`))
+			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" CouchDB index "by-owner" has an empty field`))
+			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" CouchDB index "by-private-owner" references unknown private data collection "missing-collection"`))
+			Expect(network.Status.Message).To(ContainSubstring(`chaincode "audit" CouchDB index package path "metadata/META-INF/statedb/couchdb/indexes/by-owner.json" is declared more than once`))
 			Expect(network.Status.OrgStatus).To(BeEmpty())
 			Expect(network.Status.ChannelStatus).To(BeEmpty())
 			Expect(network.Status.ChaincodeStatus).To(BeEmpty())
@@ -1398,6 +1434,13 @@ var _ = Describe("FabricNetwork Controller", func() {
 					Channel:  "settlement",
 					Image:    "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0",
 					Sequence: 1,
+					CouchDBIndexes: []fabricopsv1alpha1.CouchDBIndex{
+						{
+							Name:           "indexOwner",
+							Fields:         []string{"docType", "owner"},
+							DesignDocument: "indexOwnerDoc",
+						},
+					},
 					CCAAS: &fabricopsv1alpha1.ChaincodeAsAService{
 						ServicePort: 7052,
 						DialTimeout: "10s",
@@ -1428,6 +1471,18 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(packageConfig.Data[chaincodePackageFileKey]).To(Equal("settlement_settlement_0.0.1.tar.gz"))
 			Expect(packageConfig.BinaryData).To(HaveKey("settlement_settlement_0.0.1.tar.gz"))
 			Expect(packageConfig.BinaryData["settlement_settlement_0.0.1.tar.gz"]).NotTo(BeEmpty())
+			packageArchive := readTarGz(packageConfig.BinaryData["settlement_settlement_0.0.1.tar.gz"])
+			Expect(packageArchive).To(HaveKey(chaincodeMetadataKey))
+			Expect(packageArchive).To(HaveKey("code.tar.gz"))
+			codeArchive := readTarGz(packageArchive["code.tar.gz"])
+			Expect(codeArchive).To(HaveKey(chaincodeConnectionKey))
+			Expect(codeArchive).To(HaveKey("metadata/META-INF/statedb/couchdb/indexes/indexowner.json"))
+			Expect(string(codeArchive["metadata/META-INF/statedb/couchdb/indexes/indexowner.json"])).To(ContainSubstring(`"fields": [`))
+			Expect(string(codeArchive["metadata/META-INF/statedb/couchdb/indexes/indexowner.json"])).To(ContainSubstring(`"docType"`))
+			Expect(string(codeArchive["metadata/META-INF/statedb/couchdb/indexes/indexowner.json"])).To(ContainSubstring(`"owner"`))
+			Expect(string(codeArchive["metadata/META-INF/statedb/couchdb/indexes/indexowner.json"])).To(ContainSubstring(`"ddoc": "indexOwnerDoc"`))
+			Expect(string(codeArchive["metadata/META-INF/statedb/couchdb/indexes/indexowner.json"])).To(ContainSubstring(`"name": "indexOwner"`))
+			Expect(string(codeArchive["metadata/META-INF/statedb/couchdb/indexes/indexowner.json"])).To(ContainSubstring(`"type": "json"`))
 			Expect(packageConfig.Data[chaincodeConnectionAddrKey]).To(Equal("settlement-settlement-banka-{{.peer_hostname}}-ccaas.fo-test-banka.svc.cluster.local:7052"))
 			Expect(packageConfig.Data[chaincodeMetadataKey]).To(ContainSubstring(`"type": "ccaas"`))
 			Expect(packageConfig.Data[chaincodeMetadataKey]).To(ContainSubstring(`"label": "settlement_settlement_0.0.1"`))
@@ -1722,6 +1777,13 @@ var _ = Describe("FabricNetwork Controller", func() {
 						},
 					},
 				},
+				CouchDBIndexes: []fabricopsv1alpha1.CouchDBIndex{
+					{
+						Name:       "privateOwner",
+						Fields:     []string{"owner", "status"},
+						Collection: "bank-a-collection",
+					},
+				},
 				CCAAS: &fabricopsv1alpha1.ChaincodeAsAService{
 					ServicePort: 7052,
 				},
@@ -1764,6 +1826,19 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.ChaincodeStatus).To(HaveLen(1))
 			Expect(network.Status.ChaincodeStatus[0].CollectionConfigMap).To(Equal("settlement-settlement-collections"))
 			Expect(network.Status.ChaincodeStatus[0].CollectionConfigHash).To(Equal(collectionConfigHash))
+
+			var packageConfig corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: "fo-test-banka",
+				Name:      "settlement-settlement-banka-package",
+			}, &packageConfig)).To(Succeed())
+			packageArchive := readTarGz(packageConfig.BinaryData["settlement_settlement_0.0.1.tar.gz"])
+			codeArchive := readTarGz(packageArchive["code.tar.gz"])
+			indexPath := "metadata/META-INF/statedb/couchdb/collections/bank-a-collection/indexes/privateowner.json"
+			Expect(codeArchive).To(HaveKey(indexPath))
+			Expect(string(codeArchive[indexPath])).To(ContainSubstring(`"owner"`))
+			Expect(string(codeArchive[indexPath])).To(ContainSubstring(`"status"`))
+			Expect(string(codeArchive[indexPath])).To(ContainSubstring(`"name": "privateOwner"`))
 
 			bankOrg := network.Spec.Orgs[1]
 			orderer, ok := chaincodeLifecycleOrderer(&network)
@@ -1876,6 +1951,28 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("Host: peer0.fo-test-banka.svc.cluster.local"))
 			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("Port: 7051"))
 			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("ClientTLSCert: /fabricops/channel/crypto/orderers/orderer0/tls/server.crt"))
+
+			var connectionProfile corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      connectionProfileConfigMapName(&network),
+			}, &connectionProfile)).To(Succeed())
+			Expect(connectionProfile.Labels[labelAppComponent]).To(Equal(componentConnectionProfile))
+			Expect(connectionProfile.Data).To(HaveKey(connectionProfileJSONKey))
+			Expect(connectionProfile.Data).To(HaveKey(connectionProfileYAMLKey))
+			Expect(connectionProfile.Data[connectionProfileJSONKey]).To(ContainSubstring(`"organization": "BankA"`))
+			Expect(connectionProfile.Data[connectionProfileJSONKey]).To(ContainSubstring(`"peer0.banka"`))
+			Expect(connectionProfile.Data[connectionProfileJSONKey]).To(ContainSubstring(`"orderer0.orderer"`))
+			Expect(connectionProfile.Data[connectionProfileJSONKey]).To(ContainSubstring(`"grpcs://peer0.fo-test-banka.svc.cluster.local:7051"`))
+			Expect(connectionProfile.Data[connectionProfileJSONKey]).To(ContainSubstring(`"grpcs://orderer0.fo-test-orderer.svc.cluster.local:7050"`))
+			Expect(connectionProfile.Data[connectionProfileJSONKey]).To(ContainSubstring(`"http://banka-ca.fo-test-banka.svc.cluster.local:7054"`))
+			Expect(connectionProfile.Data[connectionProfileJSONKey]).To(ContainSubstring(`"ssl-target-name-override": "peer0.fo-test-banka.svc.cluster.local"`))
+			Expect(connectionProfile.Data[connectionProfileJSONKey]).To(ContainSubstring("BEGIN CERTIFICATE"))
+			Expect(connectionProfile.Data[connectionProfileYAMLKey]).To(ContainSubstring("client:"))
+			Expect(connectionProfile.Data[connectionProfileYAMLKey]).To(ContainSubstring("organization: BankA"))
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			Expect(network.Status.OrgStatus[1].ConnectionProfileConfigMapName).To(Equal(connectionProfileConfigMapName(&network)))
 
 			var sourceBankAdminMSP corev1.Secret
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -3312,6 +3409,34 @@ func expectContainerResources(container corev1.Container, requestCPU, requestMem
 	Expect(requestedMemory.Cmp(resource.MustParse(requestMemory))).To(Equal(0))
 	Expect(limitedCPU.Cmp(resource.MustParse(limitCPU))).To(Equal(0))
 	Expect(limitedMemory.Cmp(resource.MustParse(limitMemory))).To(Equal(0))
+}
+
+func readTarGz(contents []byte) map[string][]byte {
+	GinkgoHelper()
+
+	gzipReader, err := gzip.NewReader(bytes.NewReader(contents))
+	Expect(err).NotTo(HaveOccurred())
+	defer func() {
+		Expect(gzipReader.Close()).To(Succeed())
+	}()
+
+	tarReader := tar.NewReader(gzipReader)
+	files := map[string][]byte{}
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		Expect(err).NotTo(HaveOccurred())
+		if header.Typeflag == tar.TypeDir {
+			continue
+		}
+		data, err := io.ReadAll(tarReader)
+		Expect(err).NotTo(HaveOccurred())
+		files[header.Name] = data
+	}
+
+	return files
 }
 
 func expectPersistentVolumeClaim(ctx context.Context, namespace, name, size, storageClassName string) {

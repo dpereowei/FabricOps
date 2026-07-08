@@ -90,6 +90,22 @@ kubectl get pods -n fo-sample-banka
 kubectl get pods -n fo-sample-bankb
 ```
 
+FabricOps generates an in-cluster client connection profile for each peer org. For the sample BankA org:
+
+```bash
+kubectl get configmap fabricnetwork-sample-connection-profile -n fo-sample-banka -o jsonpath='{.data.connection\.yaml}'
+kubectl get fabricnetwork fabricnetwork-sample -n default -o jsonpath='{.status.orgStatus[?(@.name=="BankA")].connectionProfileConfigMapName}'
+kubectl get fabricnetwork fabricnetwork-sample -n default -o jsonpath='{.status.orgStatus[?(@.name=="BankA")].peerEndpoints}'
+```
+
+When building from source, `fabricopsctl` wraps the same status and profile lookup:
+
+```bash
+make build-fabricopsctl
+bin/fabricopsctl status fabricnetwork-sample -n default
+bin/fabricopsctl connection-profile fabricnetwork-sample -n default --org BankA --format yaml
+```
+
 ### Uninstall
 
 Delete `FabricNetwork` resources before removing the operator so FabricOps finalizers can clean up generated org namespaces:
@@ -129,6 +145,9 @@ FabricOps supports:
 - Persistent storage and resource defaults for Fabric workloads
 - Declarative channel config generation, channel block generation, orderer joins, peer joins, and anchor peer updates
 - CCaaS package metadata generation, install, approve, commit, and chaincode server workloads
+- Per-peer-org client connection profile ConfigMaps for in-cluster Gateway/application clients
+- Endpoint discovery in status for Fabric CAs, peers, orderers, operations Services, and peer chaincode Services
+- `fabricopsctl` helper commands for status and connection profile lookup when built from source
 - Kubernetes status conditions for component, identity, channel, chaincode, and observability readiness
 - Fabric peer/orderer operations endpoints and optional Prometheus Operator `ServiceMonitor` resources
 - Optional org-boundary NetworkPolicies for FabricOps-managed pods

@@ -82,6 +82,13 @@ spec:
           memberOnlyWrite: true
           endorsementPolicy:
             signaturePolicy: "OR('BankAMSP.member')"
+      couchdbIndexes:
+        - name: indexOwner
+          fields: ["docType", "owner"]
+          designDocument: indexOwnerDoc
+        - name: privateOwner
+          fields: ["owner", "status"]
+          collection: bank-a-private-settlements
       ccaas:
         replicas: 1
         containerPort: 7052

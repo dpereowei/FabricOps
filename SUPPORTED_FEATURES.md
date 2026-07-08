@@ -43,6 +43,7 @@ has repeatable CI or e2e coverage in this repository.
 | Persistent data for CAs/orderers/peers | n/a | n/a | Supported | README | | One PVC per Fabric component instance |
 | Resource request/limit defaults | n/a | n/a | Supported | README | | Applies to Fabric workloads and helper Jobs |
 | Status conditions | n/a | n/a | Supported | README | | `Ready`, `IdentityMaterialReady`, `ChannelsReady`, and `ObservabilityReady` |
+| Endpoint discovery status | n/a | n/a | Supported | README, API | | Org status exposes CA, orderer, peer, chaincode, and operations endpoint addresses |
 | Kubernetes Events | n/a | n/a | Supported | | | Ready and failure transitions emit events |
 | Finalizer cleanup | n/a | n/a | Supported | README | | Deletes owned org namespaces after ownership-label checks |
 | Fabric operations endpoints | n/a | n/a | Supported | README | | Peer/orderer `/healthz` and `/metrics` Services |
@@ -97,6 +98,7 @@ has repeatable CI or e2e coverage in this repository.
 | Endorsement policies | yes | yes | Supported | samples | | `AND(...)` is validated by kind e2e; topology validation catches unknown, malformed, and outside-channel MSP references |
 | Multi-org endorsements | yes | yes | Supported | samples | | Kind e2e invokes through BankA+BankB endorsement sets and queries both orgs |
 | Private data collections | yes | yes | Supported | docs/private-data-collections.md, samples | | Kind e2e writes private data with transient input, confirms BankA can read it, confirms BankB cannot read the payload, and confirms BankB can query the private data hash |
+| CouchDB index packaging | yes | yes | Supported | API, samples | | Public and private-collection JSON indexes are packaged with CCaaS install archives |
 | Chaincode scripts: invoke/query | yes | yes | Partial | samples | | Node/Go/Java invoke smoke exists; list/query utilities are not generalized yet |
 | Chaincode scripts: list | yes | yes | Planned | | | Not implemented |
 | Chaincode install/upgrade commands | yes | yes | Supported | samples | | Kind e2e proves install/approve/commit, version+sequence upgrade, workload rollout, and post-upgrade invoke/query |
@@ -108,8 +110,8 @@ has repeatable CI or e2e coverage in this repository.
 |---------|----------|----------|------------------|------------|----------|-------|
 | Fablo REST | yes | yes | Planned | | | Could become a Kubernetes-native gateway/helper workload later |
 | Explorer | yes | no | Planned | | | Not implemented |
-| Gateway client helper | n/a | n/a | Planned | | | Client material exists; gateway helper output is not implemented |
-| Connection profiles | yes | yes | Planned | | | MSP/TLS and service DNS data exist, but profiles are not generated yet |
+| Gateway client helper | n/a | n/a | Partial | README | | `fabricopsctl` can read status and generated connection profiles; invoke/query helpers are not implemented yet |
+| Connection profiles | yes | yes | Supported | README, API | | Per-peer-org ConfigMaps contain JSON/YAML in-cluster Gateway/client profiles and status exposes the ConfigMap name |
 | Export network topology to Mermaid | yes | yes | Planned | | | Not implemented |
 | Other `init` options | n/a | n/a | Planned | | | Not implemented |
 

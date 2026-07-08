@@ -24,6 +24,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -42,12 +43,13 @@ import (
 )
 
 const (
-	chaincodeMetadataKey       = "metadata.json"
-	chaincodeConnectionKey     = "connection.json"
-	chaincodePackageLabelKey   = "packageLabel"
-	chaincodePackageFileKey    = "packageFile"
-	chaincodeConnectionAddrKey = "address"
-	chaincodeCollectionsKey    = "collections.json"
+	chaincodeMetadataKey        = "metadata.json"
+	chaincodeConnectionKey      = "connection.json"
+	chaincodePackageLabelKey    = "packageLabel"
+	chaincodePackageFileKey     = "packageFile"
+	chaincodeConnectionAddrKey  = "address"
+	chaincodeCollectionsKey     = "collections.json"
+	chaincodePackageMetadataDir = "metadata/META-INF"
 
 	chaincodePackageIDKey       = "packageID"
 	chaincodeChaincodeIDKey     = "chaincodeID"
@@ -119,6 +121,17 @@ type chaincodeCollectionConfig struct {
 type chaincodeCollectionEndorsementPolicyConfig struct {
 	SignaturePolicy     string `json:"signaturePolicy,omitempty"`
 	ChannelConfigPolicy string `json:"channelConfigPolicy,omitempty"`
+}
+
+type chaincodeCouchDBIndexConfig struct {
+	Index          chaincodeCouchDBIndexFields `json:"index"`
+	DesignDocument string                      `json:"ddoc,omitempty"`
+	Name           string                      `json:"name"`
+	Type           string                      `json:"type"`
+}
+
+type chaincodeCouchDBIndexFields struct {
+	Fields []string `json:"fields"`
 }
 
 type chaincodeLifecyclePeer struct {
@@ -388,7 +401,11 @@ func buildChaincodePackageConfigMap(
 		return nil, err
 	}
 	packageFile := label + ".tar.gz"
-	packageArchive, err := buildChaincodePackageArchive(metadataJSON, connectionJSON)
+	couchDBIndexFiles, err := renderChaincodeCouchDBIndexes(chaincode)
+	if err != nil {
+		return nil, err
+	}
+	packageArchive, err := buildChaincodePackageArchive(metadataJSON, connectionJSON, couchDBIndexFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -533,10 +550,55 @@ func renderChaincodeCollection(
 	return config, nil
 }
 
-func buildChaincodePackageArchive(metadataJSON, connectionJSON string) ([]byte, error) {
-	codeArchive, err := gzipTar(map[string][]byte{
+func renderChaincodeCouchDBIndexes(chaincode fabricopsv1alpha1.Chaincode) (map[string][]byte, error) {
+	indexFiles := map[string][]byte{}
+	for _, index := range chaincode.CouchDBIndexes {
+		name := strings.TrimSpace(index.Name)
+		if name == "" {
+			return nil, fmt.Errorf("chaincode %q has a CouchDB index without a name", chaincode.Name)
+		}
+		if len(index.Fields) == 0 {
+			return nil, fmt.Errorf("CouchDB index %q must declare at least one field", name)
+		}
+
+		fields := make([]string, 0, len(index.Fields))
+		for _, field := range index.Fields {
+			field = strings.TrimSpace(field)
+			if field == "" {
+				return nil, fmt.Errorf("CouchDB index %q has an empty field", name)
+			}
+			fields = append(fields, field)
+		}
+
+		indexJSON, err := marshalChaincodeJSON(chaincodeCouchDBIndexConfig{
+			Index: chaincodeCouchDBIndexFields{
+				Fields: fields,
+			},
+			DesignDocument: strings.TrimSpace(index.DesignDocument),
+			Name:           name,
+			Type:           "json",
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		path := chaincodeCouchDBIndexPath(index)
+		if _, exists := indexFiles[path]; exists {
+			return nil, fmt.Errorf("duplicate CouchDB index package path %q", path)
+		}
+		indexFiles[path] = []byte(indexJSON)
+	}
+
+	return indexFiles, nil
+}
+
+func buildChaincodePackageArchive(metadataJSON, connectionJSON string, couchDBIndexFiles map[string][]byte) ([]byte, error) {
+	codeFiles := map[string][]byte{
 		chaincodeConnectionKey: []byte(connectionJSON),
-	})
+	}
+	maps.Copy(codeFiles, couchDBIndexFiles)
+
+	codeArchive, err := gzipTar(codeFiles)
 	if err != nil {
 		return nil, err
 	}
@@ -545,6 +607,15 @@ func buildChaincodePackageArchive(metadataJSON, connectionJSON string) ([]byte, 
 		chaincodeMetadataKey: []byte(metadataJSON),
 		"code.tar.gz":        codeArchive,
 	})
+}
+
+func chaincodeCouchDBIndexPath(index fabricopsv1alpha1.CouchDBIndex) string {
+	fileName := sanitizeName(index.Name) + ".json"
+	collection := strings.TrimSpace(index.Collection)
+	if collection != "" {
+		return fmt.Sprintf("%s/statedb/couchdb/collections/%s/indexes/%s", chaincodePackageMetadataDir, collection, fileName)
+	}
+	return fmt.Sprintf("%s/statedb/couchdb/indexes/%s", chaincodePackageMetadataDir, fileName)
 }
 
 func gzipTar(files map[string][]byte) ([]byte, error) {

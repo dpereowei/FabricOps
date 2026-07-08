@@ -341,6 +341,7 @@ func (r *FabricNetworkReconciler) reconcileOrg(
 		Name:      org.Organization.Name,
 		Namespace: namespace,
 	}
+	status.CAEndpoint, status.OrdererEndpoints, status.PeerEndpoints = orgEndpointStatus(org, namespace)
 
 	if err := r.ensureNamespace(ctx, buildOrgNamespace(net, org)); err != nil {
 		return status, err
@@ -865,6 +866,42 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				metav1.ConditionUnknown,
 				"ReconcileError",
 				"Failed to reconcile chaincodes: "+err.Error(),
+			),
+		)
+
+		return ctrl.Result{}, err
+	}
+
+	orgStatuses, err = r.reconcileConnectionProfiles(ctx, &network, orgStatuses)
+	if err != nil {
+		log.Error(err, "Failed to reconcile connection profiles")
+
+		_ = r.updateStatus(
+			ctx,
+			&network,
+			fabricopsv1alpha1.PhaseFailed,
+			"Failed to reconcile connection profiles: "+err.Error(),
+			orgStatuses,
+			channelStatuses,
+			chaincodeStatuses,
+			observabilityReadyCondition(
+				&network,
+				channelsReadyCondition(
+					&network,
+					identityMaterialCondition(
+						&network,
+						readyCondition(&network, metav1.ConditionFalse, "ReconcileError", "Failed to reconcile connection profiles: "+err.Error()),
+						metav1.ConditionUnknown,
+						"ReconcileError",
+						"Failed to check identity material: "+err.Error(),
+					),
+					channelsStatus,
+					channelsReason,
+					channelsMessage,
+				),
+				metav1.ConditionUnknown,
+				"ReconcileError",
+				"Failed to reconcile connection profiles: "+err.Error(),
 			),
 		)
 
