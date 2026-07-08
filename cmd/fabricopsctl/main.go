@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -83,6 +84,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runStatus(args[1:], stdout, stderr)
 	case "connection-profile":
 		return runConnectionProfile(args[1:], stdout, stderr)
+	case "invoke":
+		return runChaincodeOperation(args[1:], stdout, stderr, chaincodeOperationInvoke)
+	case "query":
+		return runChaincodeOperation(args[1:], stdout, stderr, chaincodeOperationQuery)
 	default:
 		printUsage(stderr)
 		return fmt.Errorf("%w: unknown command %q", errUsage, args[0])
@@ -196,6 +201,15 @@ func getFabricNetwork(ctx context.Context, kube kubeOptions, name string) (*fabr
 }
 
 func newClient(kube kubeOptions) (ctrlclient.Client, error) {
+	config, err := newRESTConfig(kube)
+	if err != nil {
+		return nil, err
+	}
+
+	return ctrlclient.New(config, ctrlclient.Options{Scheme: cliScheme})
+}
+
+func newRESTConfig(kube kubeOptions) (*rest.Config, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if kube.kubeconfig != "" {
 		rules.ExplicitPath = kube.kubeconfig
@@ -209,7 +223,7 @@ func newClient(kube kubeOptions) (ctrlclient.Client, error) {
 		return nil, err
 	}
 
-	return ctrlclient.New(config, ctrlclient.Options{Scheme: cliScheme})
+	return config, nil
 }
 
 func printStatus(out io.Writer, network *fabricopsv1alpha1.FabricNetwork) {
@@ -429,6 +443,8 @@ func printUsage(out io.Writer) {
 	printLine(out, `Usage:
   fabricopsctl status [flags] <fabricnetwork>
   fabricopsctl connection-profile [flags] <fabricnetwork>
+  fabricopsctl invoke [flags] <fabricnetwork>
+  fabricopsctl query [flags] <fabricnetwork>
 
 Common flags:
   -n, --namespace string   FabricNetwork namespace (default "default")
@@ -439,5 +455,10 @@ Examples:
   fabricopsctl status fabricnetwork-sample
   fabricopsctl status -n default -o json fabricnetwork-sample
   fabricopsctl connection-profile fabricnetwork-sample --org BankA --format yaml
-  fabricopsctl connection-profile fabricnetwork-sample --org BankA --format json --out connection-banka.json`)
+  fabricopsctl connection-profile fabricnetwork-sample --org BankA --format json --out connection-banka.json
+  fabricopsctl query fabricnetwork-sample --org BankA --channel settlement \
+    --chaincode settlement --function readSettlement --args '["id1"]'
+  fabricopsctl invoke fabricnetwork-sample --org BankA --peer BankA/peer0 --peer BankB/peer0 \
+    --channel settlement --chaincode settlement --function createSettlement \
+    --args '["id1","alice","bob","100","USD"]'`)
 }
