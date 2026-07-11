@@ -231,10 +231,39 @@ type Chaincode struct {
 	// collection config JSON used during approve and commit.
 	// +optional
 	PrivateData []PrivateDataCollection `json:"privateData,omitempty"`
+	// CouchDBIndexes declares JSON CouchDB indexes that should be packaged
+	// with this chaincode. Public indexes are rendered under
+	// metadata/META-INF/statedb/couchdb/indexes; collection-scoped indexes are
+	// rendered under metadata/META-INF/statedb/couchdb/collections/<collection>/indexes.
+	// +optional
+	CouchDBIndexes []CouchDBIndex `json:"couchdbIndexes,omitempty"`
 	// CCAAS describes the Kubernetes Chaincode-as-a-Service workload and
 	// connection package settings for this chaincode.
 	// +optional
 	CCAAS *ChaincodeAsAService `json:"ccaas,omitempty"`
+}
+
+type CouchDBIndex struct {
+	// Name is the CouchDB index name and the basis for the packaged file name.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+	Name string `json:"name"`
+	// Fields is the ordered list of JSON document fields indexed by CouchDB.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
+	Fields []string `json:"fields"`
+	// DesignDocument optionally sets the CouchDB design document (`ddoc`).
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+	DesignDocument string `json:"designDocument,omitempty"`
+	// Collection optionally scopes the index to a private data collection.
+	// When empty, the index is packaged for the chaincode public state.
+	// +optional
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern="^[A-Za-z0-9][A-Za-z0-9_-]*$"
+	Collection string `json:"collection,omitempty"`
 }
 
 type PrivateDataCollection struct {
@@ -336,17 +365,46 @@ type WorkloadStatus struct {
 	Ready   int32 `json:"ready"`
 }
 
+type OrdererEndpointStatus struct {
+	Name              string `json:"name"`
+	ClientAddress     string `json:"clientAddress,omitempty"`
+	AdminAddress      string `json:"adminAddress,omitempty"`
+	OperationsAddress string `json:"operationsAddress,omitempty"`
+}
+
+type PeerEndpointStatus struct {
+	Name              string `json:"name"`
+	Address           string `json:"address,omitempty"`
+	ChaincodeAddress  string `json:"chaincodeAddress,omitempty"`
+	OperationsAddress string `json:"operationsAddress,omitempty"`
+}
+
 type OrgStatus struct {
-	Name          string         `json:"name"`
-	Namespace     string         `json:"namespace,omitempty"`
-	IdentityReady bool           `json:"identityReady"`
-	IdentityError string         `json:"identityError,omitempty"`
-	CAReady       bool           `json:"caReady"`
-	Orderers      WorkloadStatus `json:"orderers,omitempty"`
-	OrderersReady bool           `json:"orderersReady"`
-	Peers         WorkloadStatus `json:"peers,omitempty"`
-	PeersReady    bool           `json:"peersReady"`
-	Ready         bool           `json:"ready"`
+	Name          string `json:"name"`
+	Namespace     string `json:"namespace,omitempty"`
+	IdentityReady bool   `json:"identityReady"`
+	IdentityError string `json:"identityError,omitempty"`
+	CAReady       bool   `json:"caReady"`
+	// CAEndpoint is the in-cluster Fabric CA endpoint for this org.
+	// +optional
+	CAEndpoint string `json:"caEndpoint,omitempty"`
+	// OrdererEndpoints lists in-cluster client, admin, and operations
+	// endpoints for desired orderer workloads in this org.
+	// +optional
+	OrdererEndpoints []OrdererEndpointStatus `json:"ordererEndpoints,omitempty"`
+	Orderers         WorkloadStatus          `json:"orderers,omitempty"`
+	OrderersReady    bool                    `json:"orderersReady"`
+	// PeerEndpoints lists in-cluster client, chaincode, and operations
+	// endpoints for desired peer workloads in this org.
+	// +optional
+	PeerEndpoints []PeerEndpointStatus `json:"peerEndpoints,omitempty"`
+	Peers         WorkloadStatus       `json:"peers,omitempty"`
+	PeersReady    bool                 `json:"peersReady"`
+	// ConnectionProfileConfigMapName points application clients at the
+	// generated Fabric connection profile ConfigMap for this org.
+	// +optional
+	ConnectionProfileConfigMapName string `json:"connectionProfileConfigMapName,omitempty"`
+	Ready                          bool   `json:"ready"`
 }
 
 type ChannelOrgStatus struct {

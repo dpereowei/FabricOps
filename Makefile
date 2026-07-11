@@ -133,6 +133,10 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
+.PHONY: build-fabricopsctl
+build-fabricopsctl: fmt vet ## Build fabricopsctl helper binary.
+	go build -o bin/fabricopsctl ./cmd/fabricopsctl
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go

@@ -128,6 +128,7 @@ func validateFabricNetworkTopology(net *fabricopsv1alpha1.FabricNetwork) []strin
 		if channelKnown {
 			problems = append(problems, validateChaincodeEndorsementPolicyTopology(chaincode, channel, orgs)...)
 			problems = append(problems, validateChaincodePrivateDataTopology(chaincode, channel, orgs)...)
+			problems = append(problems, validateChaincodeCouchDBIndexes(chaincode)...)
 		}
 	}
 
@@ -260,6 +261,52 @@ func validateChaincodePrivateDataTopology(
 				),
 			)
 		}
+	}
+
+	return problems
+}
+
+func validateChaincodeCouchDBIndexes(chaincode fabricopsv1alpha1.Chaincode) []string {
+	problems := []string{}
+	collections := map[string]struct{}{}
+	for _, collection := range chaincode.PrivateData {
+		collectionName := strings.TrimSpace(collection.Name)
+		if collectionName != "" {
+			collections[collectionName] = struct{}{}
+		}
+	}
+
+	seenPaths := map[string]struct{}{}
+	for _, index := range chaincode.CouchDBIndexes {
+		indexName := strings.TrimSpace(index.Name)
+		if indexName == "" {
+			problems = append(problems, fmt.Sprintf("chaincode %q CouchDB index name is required", chaincode.Name))
+			continue
+		}
+		if len(index.Fields) == 0 {
+			problems = append(problems, fmt.Sprintf("chaincode %q CouchDB index %q must include at least one field", chaincode.Name, indexName))
+		}
+		for _, field := range index.Fields {
+			if strings.TrimSpace(field) == "" {
+				problems = append(problems, fmt.Sprintf("chaincode %q CouchDB index %q has an empty field", chaincode.Name, indexName))
+			}
+		}
+
+		collectionName := strings.TrimSpace(index.Collection)
+		if collectionName != "" {
+			if _, ok := collections[collectionName]; !ok {
+				problems = append(
+					problems,
+					fmt.Sprintf("chaincode %q CouchDB index %q references unknown private data collection %q", chaincode.Name, indexName, collectionName),
+				)
+			}
+		}
+
+		path := chaincodeCouchDBIndexPath(index)
+		if _, ok := seenPaths[path]; ok {
+			problems = append(problems, fmt.Sprintf("chaincode %q CouchDB index package path %q is declared more than once", chaincode.Name, path))
+		}
+		seenPaths[path] = struct{}{}
 	}
 
 	return problems

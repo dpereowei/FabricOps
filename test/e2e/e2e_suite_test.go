@@ -21,6 +21,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,20 +36,22 @@ import (
 )
 
 const (
-	managerNamespace           = "fabricops-system"
-	managerName                = "fabricops-controller-manager"
-	sampleName                 = "fabricnetwork-sample"
-	sampleNamespace            = "default"
-	nodeSettlementImageDefault = "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0"
+	managerNamespace                  = "fabricops-system"
+	managerName                       = "fabricops-controller-manager"
+	sampleName                        = "fabricnetwork-sample"
+	sampleNamespace                   = "default"
+	nodeSettlementImageDefault        = "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0"
+	nodeSettlementUpgradeImageDefault = "ghcr.io/dpereowei/fabricops-node-settlement:0.2.0"
 )
 
 var (
-	repoRoot     string
-	kindBin      string
-	kubectlBin   string
-	kindCluster  string
-	managerImage string
-	nodeImage    string
+	repoRoot         string
+	kindBin          string
+	kubectlBin       string
+	kindCluster      string
+	managerImage     string
+	nodeImage        string
+	nodeUpgradeImage string
 )
 
 func TestE2E(t *testing.T) {
@@ -63,6 +66,7 @@ var _ = BeforeSuite(func() {
 	kindCluster = envOrDefault("KIND_CLUSTER", "fabricops-test-e2e")
 	managerImage = envOrDefault("IMG", "controller:latest")
 	nodeImage = envOrDefault("NODE_SETTLEMENT_IMAGE", nodeSettlementImageDefault)
+	nodeUpgradeImage = envOrDefault("NODE_SETTLEMENT_UPGRADE_IMAGE", nodeSettlementUpgradeImageDefault)
 })
 
 var _ = Describe("Kind bundle install", Ordered, func() {
@@ -80,9 +84,10 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		runCommand(10*time.Minute, "make", "docker-build", "IMG="+managerImage)
 		runCommand(5*time.Minute, kindBin, "load", "docker-image", managerImage, "--name", kindCluster)
 
-		By("building and loading the local Node settlement chaincode image")
-		runCommand(10*time.Minute, "docker", "build", "-t", nodeImage, "config/samples/chaincodes/node_settlement")
+		By("building and loading the local Node settlement chaincode images")
+		runCommand(10*time.Minute, "docker", "build", "-t", nodeImage, "-t", nodeUpgradeImage, "config/samples/chaincodes/node_settlement")
 		runCommand(5*time.Minute, kindBin, "load", "docker-image", nodeImage, "--name", kindCluster)
+		runCommand(5*time.Minute, kindBin, "load", "docker-image", nodeUpgradeImage, "--name", kindCluster)
 
 		By("generating and applying the install bundle")
 		runCommand(5*time.Minute, "make", "build-installer", "IMG="+managerImage)
@@ -105,8 +110,103 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		status := runCommand(30*time.Second, kubectlBin, "get", "fabricnetwork", sampleName, "-n", sampleNamespace, "-o", "jsonpath={.status.phase}{\"\\n\"}{range .status.conditions[*]}{.type}={.status} {.reason}{\"\\n\"}{end}")
 		Expect(status).To(ContainSubstring("Ready\n"))
 		Expect(status).To(ContainSubstring("Ready=True FabricNetworkReady"))
+
+		By("upgrading the sample chaincode declaratively")
+		patch := fmt.Sprintf(
+			`[{"op":"replace","path":"/spec/chaincodes/0/version","value":"0.0.2"},{"op":"replace","path":"/spec/chaincodes/0/sequence","value":2},{"op":"replace","path":"/spec/chaincodes/0/image","value":%q}]`,
+			nodeUpgradeImage,
+		)
+		runCommand(2*time.Minute, kubectlBin, "patch", "fabricnetwork", sampleName, "-n", sampleNamespace, "--type=json", "-p", patch)
+		upgradedGeneration := getFabricNetworkProbe().Metadata.Generation
+
+		By("waiting for FabricOps to complete the chaincode upgrade")
+		waitForFabricNetworkReadyGeneration(upgradedGeneration, 25*time.Minute)
+
+		By("verifying the upgraded chaincode status and workload image")
+		upgraded := getFabricNetworkProbe()
+		Expect(upgraded.Status.ChaincodeStatus).To(HaveLen(1))
+		Expect(upgraded.Status.ChaincodeStatus[0].Version).To(Equal("0.0.2"))
+		Expect(upgraded.Status.ChaincodeStatus[0].Sequence).To(Equal(int32(2)))
+		Expect(upgraded.Status.ChaincodeStatus[0].PackageLabel).To(Equal("settlement_settlement_0.0.2"))
+		Expect(upgraded.Status.ChaincodeStatus[0].Ready).To(BeTrue())
+		for _, item := range []struct {
+			namespace string
+			name      string
+		}{
+			{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer0-ccaas"},
+			{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer1-ccaas"},
+			{namespace: "fo-sample-bankb", name: "settlement-settlement-bankb-peer0-ccaas"},
+		} {
+			image := strings.TrimSpace(runCommand(
+				30*time.Second,
+				kubectlBin,
+				"get",
+				"deployment",
+				item.name,
+				"-n",
+				item.namespace,
+				"-o",
+				"jsonpath={.spec.template.spec.containers[?(@.name==\"chaincode\")].image}",
+			))
+			Expect(image).To(Equal(nodeUpgradeImage))
+		}
+
+		By("invoking and querying the upgraded chaincode")
+		upgradeSmokeID := smokeID + "-upgrade"
+		runCommandWithEnv(5*time.Minute, []string{
+			"SMOKE_ID=" + upgradeSmokeID,
+		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
 	})
 })
+
+type fabricNetworkProbe struct {
+	Metadata struct {
+		Generation int64 `json:"generation"`
+	} `json:"metadata"`
+	Status struct {
+		Phase      string `json:"phase"`
+		Conditions []struct {
+			Type               string `json:"type"`
+			Status             string `json:"status"`
+			Reason             string `json:"reason"`
+			ObservedGeneration int64  `json:"observedGeneration"`
+		} `json:"conditions"`
+		ChaincodeStatus []struct {
+			Name         string `json:"name"`
+			Version      string `json:"version"`
+			PackageLabel string `json:"packageLabel"`
+			Sequence     int32  `json:"sequence"`
+			Ready        bool   `json:"ready"`
+		} `json:"chaincodeStatus"`
+	} `json:"status"`
+}
+
+func getFabricNetworkProbe() fabricNetworkProbe {
+	GinkgoHelper()
+
+	output := runCommand(30*time.Second, kubectlBin, "get", "fabricnetwork", sampleName, "-n", sampleNamespace, "-o", "json")
+	var probe fabricNetworkProbe
+	Expect(json.Unmarshal([]byte(output), &probe)).To(Succeed())
+	return probe
+}
+
+func waitForFabricNetworkReadyGeneration(generation int64, timeout time.Duration) {
+	GinkgoHelper()
+
+	Eventually(func(g Gomega) {
+		probe := getFabricNetworkProbe()
+		g.Expect(probe.Status.Phase).To(Equal("Ready"))
+		for _, condition := range probe.Status.Conditions {
+			if condition.Type == "Ready" {
+				g.Expect(condition.Status).To(Equal("True"))
+				g.Expect(condition.Reason).To(Equal("FabricNetworkReady"))
+				g.Expect(condition.ObservedGeneration).To(Equal(generation))
+				return
+			}
+		}
+		g.Expect(probe.Status.Conditions).To(ContainElement(HaveField("Type", "Ready")))
+	}, timeout, 10*time.Second).Should(Succeed())
+}
 
 func runCommand(timeout time.Duration, name string, args ...string) string {
 	return runCommandWithEnv(timeout, nil, name, args...)
