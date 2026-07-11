@@ -318,6 +318,47 @@ spec:
                       minLength: 1
                       pattern: ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$
                       type: string
+                    couchdbIndexes:
+                      description: |-
+                        CouchDBIndexes declares JSON CouchDB indexes that should be packaged
+                        with this chaincode. Public indexes are rendered under
+                        metadata/META-INF/statedb/couchdb/indexes; collection-scoped indexes are
+                        rendered under metadata/META-INF/statedb/couchdb/collections/<collection>/indexes.
+                      items:
+                        properties:
+                          collection:
+                            description: |-
+                              Collection optionally scopes the index to a private data collection.
+                              When empty, the index is packaged for the chaincode public state.
+                            maxLength: 64
+                            pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                            type: string
+                          designDocument:
+                            description: DesignDocument optionally sets the CouchDB
+                              design document (`ddoc`).
+                            maxLength: 128
+                            pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+                            type: string
+                          fields:
+                            description: Fields is the ordered list of JSON document
+                              fields indexed by CouchDB.
+                            items:
+                              type: string
+                            maxItems: 32
+                            minItems: 1
+                            type: array
+                          name:
+                            description: Name is the CouchDB index name and the basis
+                              for the packaged file name.
+                            maxLength: 128
+                            minLength: 1
+                            pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+                            type: string
+                        required:
+                        - fields
+                        - name
+                        type: object
+                      type: array
                     endorsementPolicy:
                       description: |-
                         EndorsementPolicy is passed as a Fabric signature policy during approve
@@ -988,8 +1029,17 @@ spec:
               orgStatus:
                 items:
                   properties:
+                    caEndpoint:
+                      description: CAEndpoint is the in-cluster Fabric CA endpoint
+                        for this org.
+                      type: string
                     caReady:
                       type: boolean
+                    connectionProfileConfigMapName:
+                      description: |-
+                        ConnectionProfileConfigMapName points application clients at the
+                        generated Fabric connection profile ConfigMap for this org.
+                      type: string
                     identityError:
                       type: string
                     identityReady:
@@ -998,6 +1048,24 @@ spec:
                       type: string
                     namespace:
                       type: string
+                    ordererEndpoints:
+                      description: |-
+                        OrdererEndpoints lists in-cluster client, admin, and operations
+                        endpoints for desired orderer workloads in this org.
+                      items:
+                        properties:
+                          adminAddress:
+                            type: string
+                          clientAddress:
+                            type: string
+                          name:
+                            type: string
+                          operationsAddress:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      type: array
                     orderers:
                       properties:
                         desired:
@@ -1012,6 +1080,24 @@ spec:
                       type: object
                     orderersReady:
                       type: boolean
+                    peerEndpoints:
+                      description: |-
+                        PeerEndpoints lists in-cluster client, chaincode, and operations
+                        endpoints for desired peer workloads in this org.
+                      items:
+                        properties:
+                          address:
+                            type: string
+                          chaincodeAddress:
+                            type: string
+                          name:
+                            type: string
+                          operationsAddress:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      type: array
                     peers:
                       properties:
                         desired:

@@ -1,6 +1,6 @@
 # E2E Validation
 
-FabricOps e2e validation provisions a real kind cluster, installs the in-cluster manager, applies the sample `FabricNetwork`, waits for `Ready=True`, and invokes the Node settlement CCaaS chaincode.
+FabricOps e2e validation provisions a real kind cluster, installs the in-cluster manager, applies the sample `FabricNetwork`, waits for `Ready=True`, and invokes the sample settlement CCaaS chaincode across Node, Go, and Java runtimes.
 
 ## Kind
 
@@ -25,12 +25,14 @@ make test-e2e E2E_SKIP_CLEANUP=true
 When the test completes, it has validated:
 
 - manager image build and kind image load
-- local Node settlement chaincode image build and kind image load
+- local Node, Go, and Java settlement chaincode image builds and kind image loads
 - generated install bundle deployment
 - sample `FabricNetwork` reconciliation to `Ready=True`
 - channel bootstrap, chaincode lifecycle, and CCaaS workload readiness
 - committed Node settlement chaincode invokes plus queries through BankA and BankB endorsement sets
 - private data collection lifecycle wiring, transient private write, authorized private read, non-member private read rejection, and non-member private hash query
+- declarative sequence upgrades from the Node image to the Go image and then the Java image
+- committed Go and Java settlement chaincode invokes plus queries through BankA and BankB endorsement sets
 
 Clean up a retained e2e cluster with:
 
@@ -69,7 +71,7 @@ make cleanup-sample
 
 The repository has two kind-backed CI smokes:
 
-- `.github/workflows/test-e2e.yml` runs `make test-e2e` against the generated install bundle.
+- `.github/workflows/test-e2e.yml` runs `make test-e2e` against the generated install bundle and the Node, Go, and Java sample chaincodes.
 - `.github/workflows/test-chart.yml` installs the Helm chart, applies the sample network, waits for `Ready=True`, and runs the Node settlement invoke smoke.
 
 The unit/envtest workflow also runs `go mod tidy` and generated-file drift checks before the repository is ready to release.

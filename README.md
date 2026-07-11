@@ -310,7 +310,7 @@ Run the repeatable kind-based e2e proof with:
 make test-e2e
 ```
 
-The e2e target builds the local manager and Node settlement chaincode images, loads them into kind, installs the generated bundle, applies the sample network, waits for `Ready=True`, and runs the Node settlement invoke/private-data smoke. See [docs/e2e-validation.md](docs/e2e-validation.md) for kind, OrbStack, and cleanup notes.
+The e2e target builds the local manager plus Node, Go, and Java settlement chaincode images, loads them into kind, installs the generated bundle, applies the sample network, waits for `Ready=True`, runs the Node invoke/private-data smoke, then declaratively rolls the same chaincode through Go and Java runtime images with invoke/query checks. See [docs/e2e-validation.md](docs/e2e-validation.md) for kind, OrbStack, and cleanup notes.
 
 ## Identity Secrets
 

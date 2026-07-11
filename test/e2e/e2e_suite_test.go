@@ -42,6 +42,8 @@ const (
 	sampleNamespace                   = "default"
 	nodeSettlementImageDefault        = "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0"
 	nodeSettlementUpgradeImageDefault = "ghcr.io/dpereowei/fabricops-node-settlement:0.2.0"
+	goSettlementImageDefault          = "ghcr.io/dpereowei/fabricops-go-settlement:0.1.0"
+	javaSettlementImageDefault        = "ghcr.io/dpereowei/fabricops-java-settlement:0.1.0"
 )
 
 var (
@@ -52,6 +54,8 @@ var (
 	managerImage     string
 	nodeImage        string
 	nodeUpgradeImage string
+	goImage          string
+	javaImage        string
 )
 
 func TestE2E(t *testing.T) {
@@ -67,6 +71,8 @@ var _ = BeforeSuite(func() {
 	managerImage = envOrDefault("IMG", "controller:latest")
 	nodeImage = envOrDefault("NODE_SETTLEMENT_IMAGE", nodeSettlementImageDefault)
 	nodeUpgradeImage = envOrDefault("NODE_SETTLEMENT_UPGRADE_IMAGE", nodeSettlementUpgradeImageDefault)
+	goImage = envOrDefault("GO_SETTLEMENT_IMAGE", goSettlementImageDefault)
+	javaImage = envOrDefault("JAVA_SETTLEMENT_IMAGE", javaSettlementImageDefault)
 })
 
 var _ = Describe("Kind bundle install", Ordered, func() {
@@ -76,7 +82,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		}
 	})
 
-	It("reconciles the sample network and invokes the Node CCaaS chaincode", func() {
+	It("reconciles the sample network and invokes the Node, Go, and Java CCaaS chaincodes", func() {
 		By("using the target kind context")
 		runCommand(30*time.Second, kubectlBin, "config", "use-context", "kind-"+kindCluster)
 
@@ -84,10 +90,14 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		runCommand(10*time.Minute, "make", "docker-build", "IMG="+managerImage)
 		runCommand(5*time.Minute, kindBin, "load", "docker-image", managerImage, "--name", kindCluster)
 
-		By("building and loading the local Node settlement chaincode images")
+		By("building and loading the local settlement chaincode images")
 		runCommand(10*time.Minute, "docker", "build", "-t", nodeImage, "-t", nodeUpgradeImage, "config/samples/chaincodes/node_settlement")
+		runCommand(10*time.Minute, "docker", "build", "-t", goImage, "config/samples/chaincodes/go_settlement")
+		runCommand(10*time.Minute, "docker", "build", "-t", javaImage, "config/samples/chaincodes/java_settlement")
 		runCommand(5*time.Minute, kindBin, "load", "docker-image", nodeImage, "--name", kindCluster)
 		runCommand(5*time.Minute, kindBin, "load", "docker-image", nodeUpgradeImage, "--name", kindCluster)
+		runCommand(5*time.Minute, kindBin, "load", "docker-image", goImage, "--name", kindCluster)
+		runCommand(5*time.Minute, kindBin, "load", "docker-image", javaImage, "--name", kindCluster)
 
 		By("generating and applying the install bundle")
 		runCommand(5*time.Minute, "make", "build-installer", "IMG="+managerImage)
@@ -112,49 +122,42 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		Expect(status).To(ContainSubstring("Ready=True FabricNetworkReady"))
 
 		By("upgrading the sample chaincode declaratively")
-		patch := fmt.Sprintf(
-			`[{"op":"replace","path":"/spec/chaincodes/0/version","value":"0.0.2"},{"op":"replace","path":"/spec/chaincodes/0/sequence","value":2},{"op":"replace","path":"/spec/chaincodes/0/image","value":%q}]`,
-			nodeUpgradeImage,
-		)
-		runCommand(2*time.Minute, kubectlBin, "patch", "fabricnetwork", sampleName, "-n", sampleNamespace, "--type=json", "-p", patch)
-		upgradedGeneration := getFabricNetworkProbe().Metadata.Generation
+		upgradedGeneration := patchSampleChaincode("0.0.2", 2, nodeUpgradeImage)
 
 		By("waiting for FabricOps to complete the chaincode upgrade")
 		waitForFabricNetworkReadyGeneration(upgradedGeneration, 25*time.Minute)
 
 		By("verifying the upgraded chaincode status and workload image")
-		upgraded := getFabricNetworkProbe()
-		Expect(upgraded.Status.ChaincodeStatus).To(HaveLen(1))
-		Expect(upgraded.Status.ChaincodeStatus[0].Version).To(Equal("0.0.2"))
-		Expect(upgraded.Status.ChaincodeStatus[0].Sequence).To(Equal(int32(2)))
-		Expect(upgraded.Status.ChaincodeStatus[0].PackageLabel).To(Equal("settlement_settlement_0.0.2"))
-		Expect(upgraded.Status.ChaincodeStatus[0].Ready).To(BeTrue())
-		for _, item := range []struct {
-			namespace string
-			name      string
-		}{
-			{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer0-ccaas"},
-			{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer1-ccaas"},
-			{namespace: "fo-sample-bankb", name: "settlement-settlement-bankb-peer0-ccaas"},
-		} {
-			image := strings.TrimSpace(runCommand(
-				30*time.Second,
-				kubectlBin,
-				"get",
-				"deployment",
-				item.name,
-				"-n",
-				item.namespace,
-				"-o",
-				"jsonpath={.spec.template.spec.containers[?(@.name==\"chaincode\")].image}",
-			))
-			Expect(image).To(Equal(nodeUpgradeImage))
-		}
+		expectSampleChaincodeReady("0.0.2", 2, nodeUpgradeImage)
 
 		By("invoking and querying the upgraded chaincode")
 		upgradeSmokeID := smokeID + "-upgrade"
 		runCommandWithEnv(5*time.Minute, []string{
 			"SMOKE_ID=" + upgradeSmokeID,
+		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+
+		By("switching the same Fabric chaincode definition to the Go CCaaS sample")
+		goGeneration := patchSampleChaincode("0.0.3", 3, goImage)
+		waitForFabricNetworkReadyGeneration(goGeneration, 25*time.Minute)
+		expectSampleChaincodeReady("0.0.3", 3, goImage)
+
+		By("invoking and querying the Go CCaaS sample")
+		runCommandWithEnv(5*time.Minute, []string{
+			"JOB_NAME=fabricops-go-settlement-invoke-smoke",
+			"SMOKE_ID=" + smokeID + "-go",
+			"CREATE_FUNCTION=CreateSettlement",
+			"READ_FUNCTION=ReadSettlement",
+		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+
+		By("switching the same Fabric chaincode definition to the Java CCaaS sample")
+		javaGeneration := patchSampleChaincode("0.0.4", 4, javaImage)
+		waitForFabricNetworkReadyGeneration(javaGeneration, 25*time.Minute)
+		expectSampleChaincodeReady("0.0.4", 4, javaImage)
+
+		By("invoking and querying the Java CCaaS sample")
+		runCommandWithEnv(5*time.Minute, []string{
+			"JOB_NAME=fabricops-java-settlement-invoke-smoke",
+			"SMOKE_ID=" + smokeID + "-java",
 		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
 	})
 })
@@ -184,7 +187,7 @@ type fabricNetworkProbe struct {
 func getFabricNetworkProbe() fabricNetworkProbe {
 	GinkgoHelper()
 
-	output := runCommand(30*time.Second, kubectlBin, "get", "fabricnetwork", sampleName, "-n", sampleNamespace, "-o", "json")
+	output := runCommandQuiet(30*time.Second, kubectlBin, "get", "fabricnetwork", sampleName, "-n", sampleNamespace, "-o", "json")
 	var probe fabricNetworkProbe
 	Expect(json.Unmarshal([]byte(output), &probe)).To(Succeed())
 	return probe
@@ -208,11 +211,64 @@ func waitForFabricNetworkReadyGeneration(generation int64, timeout time.Duration
 	}, timeout, 10*time.Second).Should(Succeed())
 }
 
+func patchSampleChaincode(version string, sequence int32, image string) int64 {
+	GinkgoHelper()
+
+	patch := fmt.Sprintf(
+		`[{"op":"replace","path":"/spec/chaincodes/0/version","value":%q},{"op":"replace","path":"/spec/chaincodes/0/sequence","value":%d},{"op":"replace","path":"/spec/chaincodes/0/image","value":%q}]`,
+		version,
+		sequence,
+		image,
+	)
+	runCommand(2*time.Minute, kubectlBin, "patch", "fabricnetwork", sampleName, "-n", sampleNamespace, "--type=json", "-p", patch)
+	return getFabricNetworkProbe().Metadata.Generation
+}
+
+func expectSampleChaincodeReady(version string, sequence int32, image string) {
+	GinkgoHelper()
+
+	probe := getFabricNetworkProbe()
+	Expect(probe.Status.ChaincodeStatus).To(HaveLen(1))
+	Expect(probe.Status.ChaincodeStatus[0].Version).To(Equal(version))
+	Expect(probe.Status.ChaincodeStatus[0].Sequence).To(Equal(sequence))
+	Expect(probe.Status.ChaincodeStatus[0].PackageLabel).To(Equal("settlement_settlement_" + version))
+	Expect(probe.Status.ChaincodeStatus[0].Ready).To(BeTrue())
+	for _, item := range []struct {
+		namespace string
+		name      string
+	}{
+		{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer0-ccaas"},
+		{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer1-ccaas"},
+		{namespace: "fo-sample-bankb", name: "settlement-settlement-bankb-peer0-ccaas"},
+	} {
+		deploymentImage := strings.TrimSpace(runCommand(
+			30*time.Second,
+			kubectlBin,
+			"get",
+			"deployment",
+			item.name,
+			"-n",
+			item.namespace,
+			"-o",
+			"jsonpath={.spec.template.spec.containers[?(@.name==\"chaincode\")].image}",
+		))
+		Expect(deploymentImage).To(Equal(image))
+	}
+}
+
 func runCommand(timeout time.Duration, name string, args ...string) string {
 	return runCommandWithEnv(timeout, nil, name, args...)
 }
 
+func runCommandQuiet(timeout time.Duration, name string, args ...string) string {
+	return runCommandWithEnvAndLogging(timeout, nil, false, name, args...)
+}
+
 func runCommandWithEnv(timeout time.Duration, extraEnv []string, name string, args ...string) string {
+	return runCommandWithEnvAndLogging(timeout, extraEnv, true, name, args...)
+}
+
+func runCommandWithEnvAndLogging(timeout time.Duration, extraEnv []string, logOutput bool, name string, args ...string) string {
 	GinkgoHelper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -227,18 +283,32 @@ func runCommandWithEnv(timeout time.Duration, extraEnv []string, name string, ar
 	cmd.Stderr = &output
 
 	commandLine := strings.Join(append([]string{name}, args...), " ")
-	fmt.Fprintf(GinkgoWriter, "\n$ %s\n", commandLine)
+	if logOutput {
+		fmt.Fprintf(GinkgoWriter, "\n$ %s\n", commandLine)
+	}
 
 	err := cmd.Run()
 	text := output.String()
-	if text != "" {
+	if logOutput && text != "" {
 		fmt.Fprintln(GinkgoWriter, text)
 	}
 
 	if ctx.Err() == context.DeadlineExceeded {
+		if !logOutput {
+			fmt.Fprintf(GinkgoWriter, "\n$ %s\n", commandLine)
+			if text != "" {
+				fmt.Fprintln(GinkgoWriter, text)
+			}
+		}
 		Fail(fmt.Sprintf("command timed out after %s: %s\n%s", timeout, commandLine, text))
 	}
 
+	if err != nil && !logOutput {
+		fmt.Fprintf(GinkgoWriter, "\n$ %s\n", commandLine)
+		if text != "" {
+			fmt.Fprintln(GinkgoWriter, text)
+		}
+	}
 	Expect(err).NotTo(HaveOccurred(), "command failed: %s\n%s", commandLine, text)
 	return text
 }

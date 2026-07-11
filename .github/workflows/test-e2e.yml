@@ -12,7 +12,7 @@ jobs:
       contents: read
     name: Bundle smoke on kind
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       KIND_CLUSTER: fabricops-ci-e2e
       KIND_VERSION: v0.31.0
