@@ -98,12 +98,16 @@ kubectl get fabricnetwork fabricnetwork-sample -n default -o jsonpath='{.status.
 kubectl get fabricnetwork fabricnetwork-sample -n default -o jsonpath='{.status.orgStatus[?(@.name=="BankA")].peerEndpoints}'
 ```
 
-When building from source, `fabricopsctl` wraps the same status and profile lookup:
+When building from source, `fabricopsctl` wraps status, profile lookup, and
+short-lived chaincode operation Jobs:
 
 ```bash
 make build-fabricopsctl
 bin/fabricopsctl status fabricnetwork-sample -n default
 bin/fabricopsctl connection-profile fabricnetwork-sample -n default --org BankA --format yaml
+bin/fabricopsctl query fabricnetwork-sample -n default --org BankA \
+  --channel settlement --chaincode settlement --function readSettlement \
+  --args '["settlement-001"]'
 ```
 
 ### Uninstall
@@ -147,7 +151,7 @@ FabricOps supports:
 - CCaaS package metadata generation, install, approve, commit, and chaincode server workloads
 - Per-peer-org client connection profile ConfigMaps for in-cluster Gateway/application clients
 - Endpoint discovery in status for Fabric CAs, peers, orderers, operations Services, and peer chaincode Services
-- `fabricopsctl` helper commands for status and connection profile lookup when built from source
+- `fabricopsctl` helper commands for status, connection profile lookup, and chaincode invoke/query when built from source
 - Kubernetes status conditions for component, identity, channel, chaincode, and observability readiness
 - Fabric peer/orderer operations endpoints and optional Prometheus Operator `ServiceMonitor` resources
 - Optional org-boundary NetworkPolicies for FabricOps-managed pods
