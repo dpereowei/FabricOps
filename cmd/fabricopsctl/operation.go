@@ -42,6 +42,9 @@ const (
 	chaincodeOperationInvoke = "invoke"
 	chaincodeOperationQuery  = "query"
 
+	operationOutputText = "text"
+	operationOutputJSON = "json"
+
 	operationAdminMSPPath = "/fabricops/operation/admin-msp"
 	operationAdminTLSPath = "/fabricops/operation/admin-tls"
 	operationTLSRootPath  = "/fabricops/operation/tls-roots"
@@ -67,6 +70,7 @@ type chaincodeOperationOptions struct {
 	argsJSON     string
 	transient    string
 	timeout      string
+	output       string
 	waitForEvent bool
 	keepJob      bool
 }
@@ -75,6 +79,32 @@ type operationPeerTarget struct {
 	orgName  string
 	status   fabricopsv1alpha1.OrgStatus
 	endpoint fabricopsv1alpha1.PeerEndpointStatus
+}
+
+type operationResult struct {
+	Operation   string                `json:"operation"`
+	Network     string                `json:"network"`
+	Namespace   string                `json:"namespace"`
+	Channel     string                `json:"channel"`
+	Chaincode   string                `json:"chaincode"`
+	Function    string                `json:"function"`
+	Org         string                `json:"org"`
+	Job         operationResultJob    `json:"job"`
+	Peers       []operationResultPeer `json:"peers"`
+	Succeeded   bool                  `json:"succeeded"`
+	JobRetained bool                  `json:"jobRetained"`
+	Logs        string                `json:"logs,omitempty"`
+}
+
+type operationResultJob struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+type operationResultPeer struct {
+	Org     string `json:"org"`
+	Name    string `json:"name"`
+	Address string `json:"address,omitempty"`
 }
 
 func runChaincodeOperation(args []string, stdout, stderr io.Writer, operation string) error {
@@ -90,6 +120,8 @@ func runChaincodeOperation(args []string, stdout, stderr io.Writer, operation st
 	flags.StringVar(&options.argsJSON, "args", "[]", "JSON array of string arguments")
 	flags.StringVar(&options.transient, "transient", "", "Raw transient JSON for invoke operations")
 	flags.StringVar(&options.timeout, "timeout", "180s", "How long to wait for the operation Job")
+	flags.StringVar(&options.output, "o", operationOutputText, "Output format: text or json")
+	flags.StringVar(&options.output, "output", operationOutputText, "Output format: text or json")
 	flags.BoolVar(&options.waitForEvent, "wait-for-event", true, "Pass --waitForEvent to invoke")
 	flags.BoolVar(&options.keepJob, "keep-job", false, "Keep the operation Job and temporary Secret")
 	if err := flags.Parse(args); err != nil {
@@ -122,6 +154,9 @@ func validateOperationOptions(operation string, options chaincodeOperationOption
 	}
 	if operation == chaincodeOperationQuery && options.transient != "" {
 		return fmt.Errorf("--transient is only supported for invoke")
+	}
+	if err := validateOperationOutput(options.output); err != nil {
+		return err
 	}
 	return nil
 }
@@ -204,12 +239,16 @@ func runChaincodeOperationWithOptions(
 	}
 
 	completed, err := waitForOperationJob(ctx, ctrlClient, job.Namespace, job.Name, timeout)
-	logErr := printOperationLogs(ctx, kubeClient, stdout, job.Namespace, job.Name)
+	logs, logErr := operationLogs(ctx, kubeClient, job.Namespace, job.Name)
 	if err != nil {
 		return err
 	}
 	if logErr != nil {
 		return logErr
+	}
+	result := buildOperationResult(operation, network, options, job, submitter, targets, completed, logs)
+	if err := writeOperationResult(stdout, options.output, result); err != nil {
+		return err
 	}
 	if !completed {
 		return fmt.Errorf("operation job %s/%s failed", job.Namespace, job.Name)
@@ -219,6 +258,15 @@ func runChaincodeOperationWithOptions(
 	}
 
 	return nil
+}
+
+func validateOperationOutput(output string) error {
+	switch output {
+	case "", operationOutputText, operationOutputJSON:
+		return nil
+	default:
+		return fmt.Errorf("unsupported output format %q", output)
+	}
 }
 
 func parseChaincodeArgs(argsJSON string) ([]string, error) {
@@ -665,34 +713,85 @@ func waitForOperationJob(
 	}
 }
 
-func printOperationLogs(
+func operationLogs(
 	ctx context.Context,
 	kubeClient kubernetes.Interface,
-	out io.Writer,
 	namespace string,
 	jobName string,
-) error {
+) ([]byte, error) {
 	pods, err := kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: "job-name=" + jobName,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(pods.Items) == 0 {
-		return fmt.Errorf("no pods found for operation job %s/%s", namespace, jobName)
+		return nil, fmt.Errorf("no pods found for operation job %s/%s", namespace, jobName)
 	}
 	logs, err := kubeClient.CoreV1().Pods(namespace).GetLogs(pods.Items[0].Name, &corev1.PodLogOptions{}).Do(ctx).Raw()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = out.Write(logs)
-	if err != nil {
-		return err
+	return logs, nil
+}
+
+func buildOperationResult(
+	operation string,
+	network *fabricopsv1alpha1.FabricNetwork,
+	options chaincodeOperationOptions,
+	job *batchv1.Job,
+	submitter fabricopsv1alpha1.OrgStatus,
+	targets []operationPeerTarget,
+	succeeded bool,
+	logs []byte,
+) operationResult {
+	return operationResult{
+		Operation: operation,
+		Network:   network.Name,
+		Namespace: network.Namespace,
+		Channel:   options.channel,
+		Chaincode: options.chaincode,
+		Function:  options.function,
+		Org:       submitter.Name,
+		Job: operationResultJob{
+			Namespace: job.Namespace,
+			Name:      job.Name,
+		},
+		Peers:       operationResultPeers(targets),
+		Succeeded:   succeeded,
+		JobRetained: options.keepJob || !succeeded,
+		Logs:        string(logs),
 	}
-	if len(logs) > 0 && logs[len(logs)-1] != '\n' {
-		printLine(out)
+}
+
+func operationResultPeers(targets []operationPeerTarget) []operationResultPeer {
+	peers := make([]operationResultPeer, 0, len(targets))
+	for _, target := range targets {
+		peers = append(peers, operationResultPeer{
+			Org:     target.orgName,
+			Name:    target.endpoint.Name,
+			Address: target.endpoint.Address,
+		})
 	}
-	return nil
+	return peers
+}
+
+func writeOperationResult(out io.Writer, output string, result operationResult) error {
+	switch output {
+	case operationOutputJSON:
+		return writeJSON(out, result)
+	case "", operationOutputText:
+		_, err := out.Write([]byte(result.Logs))
+		if err != nil {
+			return err
+		}
+		if result.Logs != "" && !strings.HasSuffix(result.Logs, "\n") {
+			printLine(out)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported output format %q", output)
+	}
 }
 
 func cleanupOperationObjects(

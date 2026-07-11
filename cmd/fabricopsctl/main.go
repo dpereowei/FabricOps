@@ -457,7 +457,7 @@ Examples:
   fabricopsctl connection-profile fabricnetwork-sample --org BankA --format yaml
   fabricopsctl connection-profile fabricnetwork-sample --org BankA --format json --out connection-banka.json
   fabricopsctl query fabricnetwork-sample --org BankA --channel settlement \
-    --chaincode settlement --function readSettlement --args '["id1"]'
+    --chaincode settlement --function readSettlement --args '["id1"]' -o json
   fabricopsctl invoke fabricnetwork-sample --org BankA --peer BankA/peer0 --peer BankB/peer0 \
     --channel settlement --chaincode settlement --function createSettlement \
     --args '["id1","alice","bob","100","USD"]'`)

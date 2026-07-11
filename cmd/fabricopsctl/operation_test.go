@@ -17,6 +17,8 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -151,6 +153,94 @@ func TestParseChaincodeArgsRequiresStringArray(t *testing.T) {
 	}
 	if _, err := parseChaincodeArgs(`["id1",100]`); err == nil {
 		t.Fatal("parseChaincodeArgs() error = nil, want non-string rejection")
+	}
+}
+
+func TestWriteOperationResultSupportsJSONOutput(t *testing.T) {
+	var out bytes.Buffer
+	result := operationResult{
+		Operation: chaincodeOperationQuery,
+		Network:   "sample",
+		Namespace: "default",
+		Channel:   "settlement",
+		Chaincode: "settlement",
+		Function:  "readSettlement",
+		Org:       "BankA",
+		Job: operationResultJob{
+			Namespace: "fo-test-banka",
+			Name:      "sample-query",
+		},
+		Peers: []operationResultPeer{
+			{Org: "BankA", Name: "peer0", Address: "peer0.fo-test-banka.svc.cluster.local:7051"},
+		},
+		Succeeded:   true,
+		JobRetained: false,
+		Logs:        "query response\n",
+	}
+
+	if err := writeOperationResult(&out, operationOutputJSON, result); err != nil {
+		t.Fatalf("writeOperationResult() error = %v", err)
+	}
+
+	var decoded operationResult
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v; output = %s", err, out.String())
+	}
+	if decoded.Operation != chaincodeOperationQuery {
+		t.Fatalf("decoded.Operation = %q, want %q", decoded.Operation, chaincodeOperationQuery)
+	}
+	if decoded.Job.Name != "sample-query" {
+		t.Fatalf("decoded.Job.Name = %q, want sample-query", decoded.Job.Name)
+	}
+	if decoded.Logs != "query response\n" {
+		t.Fatalf("decoded.Logs = %q, want query response newline", decoded.Logs)
+	}
+	if decoded.JobRetained {
+		t.Fatal("decoded.JobRetained = true, want false")
+	}
+}
+
+func TestBuildOperationResultMarksFailedJobRetained(t *testing.T) {
+	network := operationTestNetwork()
+	statuses := operationTestOrgStatuses()
+	targets, submitter, err := selectOperationTargets(statuses, "BankA", []string{"peer0"})
+	if err != nil {
+		t.Fatalf("selectOperationTargets() error = %v", err)
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "sample-query", Namespace: "fo-test-banka"}}
+
+	result := buildOperationResult(
+		chaincodeOperationQuery,
+		network,
+		chaincodeOperationOptions{
+			channel:   "settlement",
+			chaincode: "settlement",
+			function:  "readSettlement",
+		},
+		job,
+		submitter,
+		targets,
+		false,
+		[]byte("failed\n"),
+	)
+
+	if result.Succeeded {
+		t.Fatal("result.Succeeded = true, want false")
+	}
+	if !result.JobRetained {
+		t.Fatal("result.JobRetained = false, want true for failed operation")
+	}
+	if result.Peers[0].Name != "peer0" {
+		t.Fatalf("result.Peers[0].Name = %q, want peer0", result.Peers[0].Name)
+	}
+}
+
+func TestValidateOperationOutputRejectsUnsupportedFormat(t *testing.T) {
+	if err := validateOperationOutput(operationOutputJSON); err != nil {
+		t.Fatalf("validateOperationOutput(json) error = %v", err)
+	}
+	if err := validateOperationOutput("yaml"); err == nil {
+		t.Fatal("validateOperationOutput(yaml) error = nil, want rejection")
 	}
 }
 
