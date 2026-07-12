@@ -139,6 +139,12 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 			"ENDORSEMENT_SETS=1+2",
 		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
 
+		By("scaling BankB back down while retaining peer state")
+		scaledDownGeneration := patchSampleBankBPeerScaleDown()
+		waitForFabricNetworkReadyGeneration(scaledDownGeneration, 25*time.Minute)
+		expectSampleChaincodeReady("0.0.1", 1, nodeImage, baseSampleChaincodeTargets())
+		expectSampleBankBPeer1ScaledDown()
+
 		status := runCommand(30*time.Second, kubectlBin, "get", "fabricnetwork", sampleName, "-n", sampleNamespace, "-o", "jsonpath={.status.phase}{\"\\n\"}{range .status.conditions[*]}{.type}={.status} {.reason}{\"\\n\"}{end}")
 		Expect(status).To(ContainSubstring("Ready\n"))
 		Expect(status).To(ContainSubstring("Ready=True FabricNetworkReady"))
@@ -150,7 +156,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		waitForFabricNetworkReadyGeneration(upgradedGeneration, 25*time.Minute)
 
 		By("verifying the upgraded chaincode status and workload image")
-		expectSampleChaincodeReady("0.0.2", 2, nodeUpgradeImage, scaledSampleChaincodeTargets())
+		expectSampleChaincodeReady("0.0.2", 2, nodeUpgradeImage, baseSampleChaincodeTargets())
 
 		By("invoking and querying the upgraded chaincode")
 		upgradeSmokeID := smokeID + "-upgrade"
@@ -161,7 +167,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		By("switching the same Fabric chaincode definition to the Go CCaaS sample")
 		goGeneration := patchSampleChaincode("0.0.3", 3, goImage)
 		waitForFabricNetworkReadyGeneration(goGeneration, 25*time.Minute)
-		expectSampleChaincodeReady("0.0.3", 3, goImage, scaledSampleChaincodeTargets())
+		expectSampleChaincodeReady("0.0.3", 3, goImage, baseSampleChaincodeTargets())
 
 		By("invoking and querying the Go CCaaS sample")
 		runCommandWithEnv(5*time.Minute, []string{
@@ -174,7 +180,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		By("switching the same Fabric chaincode definition to the Java CCaaS sample")
 		javaGeneration := patchSampleChaincode("0.0.4", 4, javaImage)
 		waitForFabricNetworkReadyGeneration(javaGeneration, 25*time.Minute)
-		expectSampleChaincodeReady("0.0.4", 4, javaImage, scaledSampleChaincodeTargets())
+		expectSampleChaincodeReady("0.0.4", 4, javaImage, baseSampleChaincodeTargets())
 
 		By("invoking and querying the Java CCaaS sample")
 		runCommandWithEnv(5*time.Minute, []string{
@@ -270,6 +276,18 @@ func patchSampleBankBPeerScaleUp() int64 {
 	return getFabricNetworkProbe().Metadata.Generation
 }
 
+func patchSampleBankBPeerScaleDown() int64 {
+	GinkgoHelper()
+
+	patch := `[` +
+		`{"op":"replace","path":"/spec/orgs/2/peer/instances","value":1},` +
+		`{"op":"remove","path":"/spec/channels/0/orgs/1/peers/1"},` +
+		`{"op":"remove","path":"/spec/channels/1/orgs/1/peers/1"}` +
+		`]`
+	runCommand(2*time.Minute, kubectlBin, "patch", "fabricnetwork", sampleName, "-n", sampleNamespace, "--type=json", "-p", patch)
+	return getFabricNetworkProbe().Metadata.Generation
+}
+
 func baseSampleChaincodeTargets() []sampleChaincodeTarget {
 	return []sampleChaincodeTarget{
 		{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer0-ccaas", orgName: "BankA", peerName: "peer0"},
@@ -287,6 +305,17 @@ func scaledSampleChaincodeTargets() []sampleChaincodeTarget {
 		peerName:  "peer1",
 	})
 	return targets
+}
+
+func expectSampleBankBPeer1ScaledDown() {
+	GinkgoHelper()
+
+	runCommand(30*time.Second, kubectlBin, "get", "pvc", "peer1-data", "-n", "fo-sample-bankb")
+	expectCommandFailure(30*time.Second, kubectlBin, "get", "deployment", "peer1", "-n", "fo-sample-bankb")
+	expectCommandFailure(30*time.Second, kubectlBin, "get", "service", "peer1", "-n", "fo-sample-bankb")
+	expectCommandFailure(30*time.Second, kubectlBin, "get", "service", "peer1-operations", "-n", "fo-sample-bankb")
+	expectCommandFailure(30*time.Second, kubectlBin, "get", "deployment", "settlement-settlement-bankb-peer1-ccaas", "-n", "fo-sample-bankb")
+	expectCommandFailure(30*time.Second, kubectlBin, "get", "service", "settlement-settlement-bankb-peer1-ccaas", "-n", "fo-sample-bankb")
 }
 
 func expectSampleChaincodeReady(version string, sequence int32, image string, targets []sampleChaincodeTarget) {
@@ -332,6 +361,31 @@ func runCommand(timeout time.Duration, name string, args ...string) string {
 
 func runCommandQuiet(timeout time.Duration, name string, args ...string) string {
 	return runCommandWithEnvAndLogging(timeout, nil, false, name, args...)
+}
+
+func expectCommandFailure(timeout time.Duration, name string, args ...string) string {
+	GinkgoHelper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = repoRoot
+	cmd.Env = os.Environ()
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	commandLine := strings.Join(append([]string{name}, args...), " ")
+	err := cmd.Run()
+	text := output.String()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		Fail(fmt.Sprintf("command timed out after %s: %s\n%s", timeout, commandLine, text))
+	}
+	Expect(err).To(HaveOccurred(), "expected command to fail: %s\n%s", commandLine, text)
+	return text
 }
 
 func runCommandWithEnv(timeout time.Duration, extraEnv []string, name string, args ...string) string {

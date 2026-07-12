@@ -164,6 +164,7 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 		channelReady := false
 		collectionConfigJSON := ""
 		collectionConfigHash := ""
+		desiredWorkloads := map[string]struct{}{}
 
 		key := chaincode.Channel + "/" + chaincode.Name
 		if _, ok := seen[key]; ok {
@@ -230,6 +231,7 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 						status.Targets = append(status.Targets, target)
 						continue
 					}
+					desiredWorkloads[target.WorkloadName] = struct{}{}
 					if len(messages) > 0 {
 						target.Message = "Waiting for valid chaincode configuration"
 						status.Targets = append(status.Targets, target)
@@ -341,6 +343,10 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 			}
 		}
 
+		if err := r.cleanupRemovedChaincodeWorkloads(ctx, net, chaincode, ok && len(messages) == 0, desiredWorkloads); err != nil {
+			return statuses, err
+		}
+
 		status.PackageMetadataReady = status.PackageMetadata.Desired > 0 &&
 			status.PackageMetadata.Ready >= status.PackageMetadata.Desired
 		status.InstalledReady = status.Installed.Desired > 0 &&
@@ -371,6 +377,69 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 	}
 
 	return statuses, nil
+}
+
+func (r *FabricNetworkReconciler) cleanupRemovedChaincodeWorkloads(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	chaincode fabricopsv1alpha1.Chaincode,
+	enabled bool,
+	desiredWorkloads map[string]struct{},
+) error {
+	if !enabled {
+		return nil
+	}
+
+	for _, org := range net.Spec.Orgs {
+		namespace := orgNamespaceName(net, org)
+		selector := client.MatchingLabels{
+			labelFabricNetwork:          sanitizeName(net.Name),
+			labelFabricNetworkNamespace: sanitizeName(net.Namespace),
+			labelOrg:                    sanitizeName(org.Organization.Name),
+			labelComponent:              componentChaincode,
+			labelChannel:                sanitizeName(chaincode.Channel),
+			labelChaincode:              sanitizeName(chaincode.Name),
+		}
+		expectedOwner := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace:   namespace,
+				Labels:      chaincodeLabels(net, org, chaincode.Channel, chaincode.Name),
+				Annotations: resourceAnnotations(net, org),
+			},
+		}
+
+		var deployments appsv1.DeploymentList
+		if err := r.List(ctx, &deployments, client.InNamespace(namespace), selector); err != nil {
+			return err
+		}
+		for i := range deployments.Items {
+			deployment := &deployments.Items[i]
+			if _, ok := desiredWorkloads[deployment.Name]; ok {
+				continue
+			}
+			expectedOwner.Name = deployment.Name
+			if err := r.deleteOwnedObject(ctx, deployment, expectedOwner); err != nil {
+				return err
+			}
+		}
+
+		var services corev1.ServiceList
+		if err := r.List(ctx, &services, client.InNamespace(namespace), selector); err != nil {
+			return err
+		}
+		for i := range services.Items {
+			service := &services.Items[i]
+			if _, ok := desiredWorkloads[service.Name]; ok {
+				continue
+			}
+			expectedOwner.Name = service.Name
+			if err := r.deleteOwnedObject(ctx, service, expectedOwner); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func buildChaincodePackageConfigMap(

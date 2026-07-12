@@ -1790,6 +1790,100 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(peer1InstallJob.Spec.Template.Spec.InitContainers[0].Command[2]).To(ContainSubstring("CORE_PEER_ADDRESS=\"peer1.fo-test-banka.svc.cluster.local:7051\""))
 		})
 
+		It("should stop scaled-down peer workloads without deleting peer state", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			bankNamespace := "fo-test-banka"
+			bankOrg := network.Spec.Orgs[1]
+			bankOrg.Peer.Instances = 2
+			Expect(controllerReconciler.ensureNamespace(ctx, buildOrgNamespace(&network, bankOrg))).To(Succeed())
+
+			peer1Deploy := buildPeerDeployment(&network, bankOrg, 1, bankNamespace)
+			peer1PVC, err := buildDataPVC(&network, bankOrg, bankNamespace, peer1Deploy.Name, componentPeer)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Create(ctx, peer1PVC)).To(Succeed())
+			Expect(k8sClient.Create(ctx, peer1Deploy)).To(Succeed())
+			Expect(k8sClient.Create(ctx, buildPeerService(&network, bankOrg, 1, bankNamespace))).To(Succeed())
+			Expect(k8sClient.Create(ctx, buildPeerOperationsService(&network, bankOrg, 1, bankNamespace))).To(Succeed())
+
+			bankOrg.Peer.Instances = 1
+			status, err := controllerReconciler.reconcilePeers(ctx, &network, bankOrg, bankNamespace)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status.Desired).To(Equal(int32(1)))
+
+			var peer0Deploy appsv1.Deployment
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "peer0",
+			}, &peer0Deploy)).To(Succeed())
+			var peer0Service corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "peer0",
+			}, &peer0Service)).To(Succeed())
+
+			expectDeploymentNotFound(ctx, bankNamespace, "peer1")
+			expectServiceNotFound(ctx, bankNamespace, "peer1")
+			expectServiceNotFound(ctx, bankNamespace, "peer1-operations")
+			expectPersistentVolumeClaim(ctx, bankNamespace, "peer1-data", "12Gi", "fabricops-peer")
+		})
+
+		It("should remove stale CCaaS workloads when a peer leaves chaincode targets", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			bankNamespace := "fo-test-banka"
+			bankOrg := network.Spec.Orgs[1]
+			Expect(controllerReconciler.ensureNamespace(ctx, buildOrgNamespace(&network, bankOrg))).To(Succeed())
+
+			channel := fabricopsv1alpha1.Channel{
+				Name: "settlement",
+				Orgs: []fabricopsv1alpha1.ChannelOrg{
+					{
+						Name:  "BankA",
+						Peers: []string{"peer0"},
+					},
+				},
+			}
+			chaincode := fabricopsv1alpha1.Chaincode{
+				Name:    "settlement",
+				Version: "0.0.1",
+				Channel: "settlement",
+				Image:   "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0",
+				CCAAS: &fabricopsv1alpha1.ChaincodeAsAService{
+					ServicePort: 7052,
+				},
+			}
+			network.Spec.Channels = []fabricopsv1alpha1.Channel{channel}
+			network.Spec.Chaincodes = []fabricopsv1alpha1.Chaincode{chaincode}
+
+			Expect(k8sClient.Create(ctx, buildChaincodeDeployment(&network, chaincode, bankOrg, "peer1", "settlement_settlement_0.0.1:abc123"))).To(Succeed())
+			Expect(k8sClient.Create(ctx, buildChaincodeService(&network, chaincode, bankOrg, "peer1"))).To(Succeed())
+
+			statuses, err := controllerReconciler.reconcileChaincodes(ctx, &network, []fabricopsv1alpha1.ChannelStatus{
+				{
+					Name:  "settlement",
+					Ready: true,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(statuses).To(HaveLen(1))
+			Expect(statuses[0].Targets).To(HaveLen(1))
+			Expect(statuses[0].Targets[0].PeerName).To(Equal("peer0"))
+
+			expectDeploymentNotFound(ctx, bankNamespace, "settlement-settlement-banka-peer1-ccaas")
+			expectServiceNotFound(ctx, bankNamespace, "settlement-settlement-banka-peer1-ccaas")
+		})
+
 		It("should render private data collections and mount them into lifecycle jobs", func() {
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
