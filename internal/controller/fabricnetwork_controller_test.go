@@ -2249,22 +2249,34 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(ordererJoinJob.Labels[labelAppComponent]).To(Equal(componentChannel))
 			Expect(ordererJoinJob.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(ordererJoinJob.Labels[labelWorkload]).To(Equal("orderer0"))
+			Expect(ordererJoinJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(ordererJoinJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-channel-bootstrapper"))
 			Expect(ordererJoinJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(ordererJoinJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
 			Expect(ordererJoinJob.Spec.Template.Spec.Containers).To(HaveLen(1))
 			Expect(configMapVolumeNames(ordererJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue(channelBlockVolumeName, "settlement-channel-block"))
 			Expect(secretVolumeNames(ordererJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue("admin-tls-orderer", "settlement-orderer-admin-tls"))
 
-			joinContainer := ordererJoinJob.Spec.Template.Spec.Containers[0]
+			joinContainer := ordererJoinJob.Spec.Template.Spec.InitContainers[0]
 			Expect(joinContainer.Name).To(Equal(joinOrdererContainer))
 			Expect(joinContainer.Image).To(Equal("hyperledger/fabric-tools:2.5.14"))
 			Expect(joinContainer.Command[2]).To(ContainSubstring("osnadmin channel join"))
+			Expect(joinContainer.Command[2]).To(ContainSubstring("osnadmin channel list"))
 			Expect(joinContainer.Command[2]).To(ContainSubstring("orderer0.fo-test-orderer.svc.cluster.local:9443"))
 			Expect(joinContainer.Command[2]).To(ContainSubstring("--client-cert \"$ADMIN_TLS_DIR/client.crt\""))
+			Expect(volumeMountPaths(joinContainer)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
 			Expect(volumeMountPaths(joinContainer)).To(HaveKeyWithValue(channelBlockVolumeName, channelBlockDir))
 			Expect(volumeMountPaths(joinContainer)).To(HaveKeyWithValue("admin-tls-orderer", channelOrdererAdminTLSPath(network.Spec.Orgs[0])))
 
+			joinPublisher := ordererJoinJob.Spec.Template.Spec.Containers[0]
+			Expect(joinPublisher.Name).To(Equal(publishOrdererJoinContainer))
+			Expect(joinPublisher.Image).To(Equal(kubectlImage()))
+			Expect(envMap(joinPublisher)[envOrdererJoinResultConfigMap]).To(Equal("settlement-orderer-orderer0-orderer-join-result"))
+			Expect(envMap(joinPublisher)[envOrdererJoinResultKey]).To(Equal(channelOrdererJoinResultKey))
+			Expect(volumeMountPaths(joinPublisher)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
+
 			markJobComplete(ctx, ordererNamespace, "settlement-orderer-orderer0-orderer-join")
+			createOrdererJoinResultConfigMap(ctx, ordererNamespace, "settlement-orderer-orderer0-orderer-join-result", "settlement")
 
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -2277,6 +2289,31 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.ChannelStatus[0].Orderers.Ready).To(Equal(int32(1)))
 			Expect(network.Status.ChannelStatus[0].Ready).To(BeFalse())
 			Expect(network.Status.ChannelStatus[0].Message).To(Equal("Waiting for peer join Jobs"))
+
+			By("Deleting the cleanup-eligible orderer join Job after durable result evidence exists")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "settlement-orderer-orderer0-orderer-join",
+			}, &ordererJoinJob)).To(Succeed())
+			propagation := metav1.DeletePropagationBackground
+			Expect(k8sClient.Delete(ctx, &ordererJoinJob, &client.DeleteOptions{PropagationPolicy: &propagation})).To(Succeed())
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: ordererNamespace,
+					Name:      "settlement-orderer-orderer0-orderer-join",
+				}, &ordererJoinJob)
+				return errors.IsNotFound(err)
+			}).Should(BeTrue())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "settlement-orderer-orderer0-orderer-join",
+			}, &ordererJoinJob)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
 
 			var peerBlockConfigMap corev1.ConfigMap
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -2958,6 +2995,44 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "eligible-failed"}, &retained)).To(Succeed())
 		})
 
+		It("should not retroactively mark existing Jobs as cleanup eligible", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Global.Jobs = &fabricopsv1alpha1.JobCleanupConfig{
+				SucceededHistoryTTLSeconds: int32Ptr(0),
+			}
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			bankOrg := network.Spec.Orgs[1]
+			namespace := orgNamespaceName(&network, bankOrg)
+			Expect(controllerReconciler.ensureNamespace(ctx, buildOrgNamespace(&network, bankOrg))).To(Succeed())
+
+			createCleanupTestJob(ctx, &network, bankOrg, namespace, "legacy-succeeded", false)
+			markJobComplete(ctx, namespace, "legacy-succeeded")
+
+			desired := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "legacy-succeeded",
+					Namespace:   namespace,
+					Labels:      orgLabels(&network, bankOrg, componentChannel),
+					Annotations: succeededJobCleanupAnnotations(resourceAnnotations(&network, bankOrg)),
+				},
+			}
+			Expect(controllerReconciler.ensureJob(ctx, desired)).To(Succeed())
+
+			var job batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "legacy-succeeded"}, &job)).To(Succeed())
+			Expect(job.Annotations).NotTo(HaveKey(annotationSucceededJobCleanup))
+
+			cleanupAfter, err := controllerReconciler.cleanupSucceededJobs(ctx, &network)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cleanupAfter).To(Equal(time.Duration(0)))
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "legacy-succeeded"}, &job)).To(Succeed())
+		})
+
 		It("should requeue cleanup when an eligible succeeded Job is newer than the configured history TTL", func() {
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
@@ -3283,6 +3358,19 @@ func createChaincodeLifecycleResultConfigMap(
 		},
 		Data: map[string]string{
 			key: fmt.Sprintf(`{"sequence":%d}`, sequence),
+		},
+	}
+	Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
+}
+
+func createOrdererJoinResultConfigMap(ctx context.Context, namespace, name, channelName string) {
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			channelOrdererJoinResultKey: fmt.Sprintf("Status: 200\n{\"channels\":[{\"name\":%q}]}", channelName),
 		},
 	}
 	Expect(k8sClient.Create(ctx, configMap)).To(Succeed())

@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 
@@ -885,7 +886,11 @@ func (r *FabricNetworkReconciler) ensureJob(ctx context.Context, desired *batchv
 	return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
 		existing := object.(*batchv1.Job)
 		changed := mergeLabels(&existing.Labels, desired.Labels)
-		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+		desiredAnnotations := maps.Clone(desired.Annotations)
+		if existing.Annotations[annotationSucceededJobCleanup] != "true" {
+			delete(desiredAnnotations, annotationSucceededJobCleanup)
+		}
+		if mergeAnnotations(&existing.Annotations, desiredAnnotations) {
 			changed = true
 		}
 		if !changed {
