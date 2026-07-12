@@ -1741,6 +1741,55 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(volumeMountPaths(commitJob.Spec.Template.Spec.Containers[0])).To(HaveKeyWithValue(chaincodePeerTLSVolumeName(bankBOrg, "peer0"), chaincodePeerTLSPath(bankBOrg, "peer0")))
 		})
 
+		It("should model post-bootstrap peer scale-up as explicit channel membership", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+
+			bankAOrg := network.Spec.Orgs[1]
+			channel := fabricopsv1alpha1.Channel{
+				Name: "settlement",
+				Orgs: []fabricopsv1alpha1.ChannelOrg{
+					{
+						Name:  "BankA",
+						Peers: []string{"peer0"},
+					},
+				},
+			}
+
+			Expect(desiredPeerNames(bankAOrg)).To(HaveKey("peer0"))
+			Expect(desiredPeerNames(bankAOrg)).NotTo(HaveKey("peer1"))
+			Expect(chaincodeLifecyclePeers(&network, channel)).To(HaveLen(1))
+
+			network.Spec.Orgs[1].Peer.Instances = 2
+			bankAOrg = network.Spec.Orgs[1]
+
+			Expect(desiredPeerNames(bankAOrg)).To(HaveKey("peer1"))
+			Expect(unknownChannelPeers(bankAOrg, []string{"peer0", "peer1"})).To(BeEmpty())
+			Expect(chaincodeLifecyclePeers(&network, channel)).To(HaveLen(1))
+			Expect(channelPeerCountsByOrg(channel)).To(HaveKeyWithValue("BankA", 1))
+
+			channel.Orgs[0].Peers = append(channel.Orgs[0].Peers, "peer1")
+
+			peers := chaincodeLifecyclePeers(&network, channel)
+			Expect(peers).To(HaveLen(2))
+			Expect(peers[0].peerName).To(Equal("peer0"))
+			Expect(peers[1].peerName).To(Equal("peer1"))
+			Expect(peers[1].namespace).To(Equal("fo-test-banka"))
+			Expect(channelPeerCountsByOrg(channel)).To(HaveKeyWithValue("BankA", 2))
+			Expect(chaincodeApprovalPeers(channel)).To(HaveKeyWithValue("BankA", "peer0"))
+
+			chaincode := fabricopsv1alpha1.Chaincode{
+				Name:    "settlement",
+				Version: "0.0.1",
+				Channel: "settlement",
+				Image:   "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0",
+			}
+			peer1InstallJob := buildChaincodeInstallJob(&network, chaincode, bankAOrg, "peer1")
+			Expect(peer1InstallJob.Name).To(Equal("settlement-settlement-0-0-1-banka-peer1-install"))
+			Expect(peer1InstallJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-banka-peer1-installer"))
+			Expect(peer1InstallJob.Spec.Template.Spec.InitContainers[0].Command[2]).To(ContainSubstring("CORE_PEER_ADDRESS=\"peer1.fo-test-banka.svc.cluster.local:7051\""))
+		})
+
 		It("should render private data collections and mount them into lifecycle jobs", func() {
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())

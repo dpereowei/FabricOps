@@ -65,6 +65,8 @@ that proof is already present.
 | TLS | yes | yes | Supported | README | | Workload TLS and orderer admin TLS are enabled when `spec.global.tls=true` |
 | Orderer groups | no | no | Partial | README | | CRD models groups; one group is validated in the sample |
 | Peer dev mode | yes | no | Planned | | | Kubernetes workflow still undecided |
+| Post-bootstrap peer scale-up | n/a | n/a | Supported | samples | | Kind e2e patches a ready network to add a new peer, joins it to declared channels, installs CCaaS packages, and invokes through the new peer |
+| Safe peer scale-down | n/a | n/a | Planned | | | Needs explicit retention/deletion semantics for peer state PVCs and channel membership expectations |
 | Peer DB - LevelDB | yes | yes | Supported | | | Default Fabric peer state database path; explicitly documented support still needed |
 | Peer DB - CouchDB | yes | yes | Planned | | | `spec.orgs[].peer.db` exists but CouchDB sidecars/services are not wired yet |
 | CA DB - SQLite | yes | yes | Supported | README | | Fabric CA default path used by current workloads |

@@ -58,6 +58,13 @@ var (
 	javaImage        string
 )
 
+type sampleChaincodeTarget struct {
+	namespace string
+	name      string
+	orgName   string
+	peerName  string
+}
+
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "FabricOps E2E Suite")
@@ -117,6 +124,21 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 			"PRIVATE_SMOKE_ENABLED=true",
 		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
 
+		By("scaling BankB with a new explicit channel peer")
+		scaledGeneration := patchSampleBankBPeerScaleUp()
+		waitForFabricNetworkReadyGeneration(scaledGeneration, 25*time.Minute)
+		expectSampleChaincodeReady("0.0.1", 1, nodeImage, scaledSampleChaincodeTargets())
+
+		By("invoking through the newly joined BankB peer")
+		runCommandWithEnv(5*time.Minute, []string{
+			"JOB_NAME=fabricops-scaled-bankb-peer-smoke",
+			"SMOKE_ID=" + smokeID + "-scale",
+			"PEER_ADDRESSES=peer0.fo-sample-banka.svc.cluster.local:7051,peer1.fo-sample-bankb.svc.cluster.local:7051",
+			"PEER_NAMESPACES=fo-sample-banka,fo-sample-bankb",
+			"PEER_ORG_SLUGS=banka,bankb",
+			"ENDORSEMENT_SETS=1+2",
+		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+
 		status := runCommand(30*time.Second, kubectlBin, "get", "fabricnetwork", sampleName, "-n", sampleNamespace, "-o", "jsonpath={.status.phase}{\"\\n\"}{range .status.conditions[*]}{.type}={.status} {.reason}{\"\\n\"}{end}")
 		Expect(status).To(ContainSubstring("Ready\n"))
 		Expect(status).To(ContainSubstring("Ready=True FabricNetworkReady"))
@@ -128,7 +150,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		waitForFabricNetworkReadyGeneration(upgradedGeneration, 25*time.Minute)
 
 		By("verifying the upgraded chaincode status and workload image")
-		expectSampleChaincodeReady("0.0.2", 2, nodeUpgradeImage)
+		expectSampleChaincodeReady("0.0.2", 2, nodeUpgradeImage, scaledSampleChaincodeTargets())
 
 		By("invoking and querying the upgraded chaincode")
 		upgradeSmokeID := smokeID + "-upgrade"
@@ -139,7 +161,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		By("switching the same Fabric chaincode definition to the Go CCaaS sample")
 		goGeneration := patchSampleChaincode("0.0.3", 3, goImage)
 		waitForFabricNetworkReadyGeneration(goGeneration, 25*time.Minute)
-		expectSampleChaincodeReady("0.0.3", 3, goImage)
+		expectSampleChaincodeReady("0.0.3", 3, goImage, scaledSampleChaincodeTargets())
 
 		By("invoking and querying the Go CCaaS sample")
 		runCommandWithEnv(5*time.Minute, []string{
@@ -152,7 +174,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		By("switching the same Fabric chaincode definition to the Java CCaaS sample")
 		javaGeneration := patchSampleChaincode("0.0.4", 4, javaImage)
 		waitForFabricNetworkReadyGeneration(javaGeneration, 25*time.Minute)
-		expectSampleChaincodeReady("0.0.4", 4, javaImage)
+		expectSampleChaincodeReady("0.0.4", 4, javaImage, scaledSampleChaincodeTargets())
 
 		By("invoking and querying the Java CCaaS sample")
 		runCommandWithEnv(5*time.Minute, []string{
@@ -180,6 +202,18 @@ type fabricNetworkProbe struct {
 			PackageLabel string `json:"packageLabel"`
 			Sequence     int32  `json:"sequence"`
 			Ready        bool   `json:"ready"`
+			Workloads    struct {
+				Desired int32 `json:"desired"`
+				Ready   int32 `json:"ready"`
+			} `json:"workloads"`
+			Targets []struct {
+				OrgName       string `json:"orgName"`
+				Namespace     string `json:"namespace"`
+				PeerName      string `json:"peerName"`
+				WorkloadName  string `json:"workloadName"`
+				Installed     bool   `json:"installed"`
+				WorkloadReady bool   `json:"workloadReady"`
+			} `json:"targets"`
 		} `json:"chaincodeStatus"`
 	} `json:"status"`
 }
@@ -224,7 +258,38 @@ func patchSampleChaincode(version string, sequence int32, image string) int64 {
 	return getFabricNetworkProbe().Metadata.Generation
 }
 
-func expectSampleChaincodeReady(version string, sequence int32, image string) {
+func patchSampleBankBPeerScaleUp() int64 {
+	GinkgoHelper()
+
+	patch := `[` +
+		`{"op":"replace","path":"/spec/orgs/2/peer/instances","value":2},` +
+		`{"op":"add","path":"/spec/channels/0/orgs/1/peers/-","value":"peer1"},` +
+		`{"op":"add","path":"/spec/channels/1/orgs/1/peers/-","value":"peer1"}` +
+		`]`
+	runCommand(2*time.Minute, kubectlBin, "patch", "fabricnetwork", sampleName, "-n", sampleNamespace, "--type=json", "-p", patch)
+	return getFabricNetworkProbe().Metadata.Generation
+}
+
+func baseSampleChaincodeTargets() []sampleChaincodeTarget {
+	return []sampleChaincodeTarget{
+		{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer0-ccaas", orgName: "BankA", peerName: "peer0"},
+		{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer1-ccaas", orgName: "BankA", peerName: "peer1"},
+		{namespace: "fo-sample-bankb", name: "settlement-settlement-bankb-peer0-ccaas", orgName: "BankB", peerName: "peer0"},
+	}
+}
+
+func scaledSampleChaincodeTargets() []sampleChaincodeTarget {
+	targets := baseSampleChaincodeTargets()
+	targets = append(targets, sampleChaincodeTarget{
+		namespace: "fo-sample-bankb",
+		name:      "settlement-settlement-bankb-peer1-ccaas",
+		orgName:   "BankB",
+		peerName:  "peer1",
+	})
+	return targets
+}
+
+func expectSampleChaincodeReady(version string, sequence int32, image string, targets []sampleChaincodeTarget) {
 	GinkgoHelper()
 
 	probe := getFabricNetworkProbe()
@@ -233,14 +298,19 @@ func expectSampleChaincodeReady(version string, sequence int32, image string) {
 	Expect(probe.Status.ChaincodeStatus[0].Sequence).To(Equal(sequence))
 	Expect(probe.Status.ChaincodeStatus[0].PackageLabel).To(Equal("settlement_settlement_" + version))
 	Expect(probe.Status.ChaincodeStatus[0].Ready).To(BeTrue())
-	for _, item := range []struct {
-		namespace string
-		name      string
-	}{
-		{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer0-ccaas"},
-		{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer1-ccaas"},
-		{namespace: "fo-sample-bankb", name: "settlement-settlement-bankb-peer0-ccaas"},
-	} {
+	Expect(probe.Status.ChaincodeStatus[0].Workloads.Desired).To(Equal(int32(len(targets))))
+	Expect(probe.Status.ChaincodeStatus[0].Workloads.Ready).To(Equal(int32(len(targets))))
+	Expect(probe.Status.ChaincodeStatus[0].Targets).To(HaveLen(len(targets)))
+
+	for _, item := range targets {
+		Expect(probe.Status.ChaincodeStatus[0].Targets).To(ContainElement(SatisfyAll(
+			HaveField("OrgName", item.orgName),
+			HaveField("Namespace", item.namespace),
+			HaveField("PeerName", item.peerName),
+			HaveField("WorkloadName", item.name),
+			HaveField("Installed", true),
+			HaveField("WorkloadReady", true),
+		)))
 		deploymentImage := strings.TrimSpace(runCommand(
 			30*time.Second,
 			kubectlBin,
