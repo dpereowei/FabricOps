@@ -40,6 +40,10 @@ const (
 	managerName                       = "fabricops-controller-manager"
 	sampleName                        = "fabricnetwork-sample"
 	sampleNamespace                   = "default"
+	succeededJobCleanupAnnotation     = "fabricops.io/succeeded-job-cleanup"
+	fabricNetworkLabel                = "fabricops.io/fabricnetwork"
+	fabricNetworkNamespaceLabel       = "fabricops.io/fabricnetwork-namespace"
+	fastCleanupTTLSeconds             = int32(10)
 	nodeSettlementImageDefault        = "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0"
 	nodeSettlementUpgradeImageDefault = "ghcr.io/dpereowei/fabricops-node-settlement:0.2.0"
 	goSettlementImageDefault          = "ghcr.io/dpereowei/fabricops-go-settlement:0.1.0"
@@ -63,6 +67,15 @@ type sampleChaincodeTarget struct {
 	name      string
 	orgName   string
 	peerName  string
+}
+
+type namespacedName struct {
+	namespace string
+	name      string
+}
+
+func (item namespacedName) String() string {
+	return item.namespace + "/" + item.name
 }
 
 func TestE2E(t *testing.T) {
@@ -123,6 +136,14 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 			"SMOKE_ID=" + smokeID,
 			"PRIVATE_SMOKE_ENABLED=true",
 		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+
+		By("proving successful output-backed helper Jobs and pods are cleaned up after the sample cleanup window")
+		cleanupCandidates := cleanupEligibleSucceededJobs()
+		Expect(cleanupCandidates).NotTo(BeEmpty())
+		cleanupGeneration := patchSampleSucceededJobCleanupTTL(fastCleanupTTLSeconds)
+		waitForFabricNetworkReadyGeneration(cleanupGeneration, 25*time.Minute)
+		expectCleanupEligibleSucceededJobsRemoved(cleanupCandidates, 4*time.Minute)
+		expectRetainedChannelProofJobs()
 
 		By("scaling BankB with a new explicit channel peer")
 		scaledGeneration := patchSampleBankBPeerScaleUp()
@@ -187,6 +208,10 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 			"JOB_NAME=fabricops-java-settlement-invoke-smoke",
 			"SMOKE_ID=" + smokeID + "-java",
 		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+
+		By("confirming cleanup continues after chaincode upgrades without losing channel proof Jobs")
+		expectNoCleanupEligibleSucceededJobs(4 * time.Minute)
+		expectRetainedChannelProofJobs()
 	})
 })
 
@@ -264,6 +289,17 @@ func patchSampleChaincode(version string, sequence int32, image string) int64 {
 	return getFabricNetworkProbe().Metadata.Generation
 }
 
+func patchSampleSucceededJobCleanupTTL(seconds int32) int64 {
+	GinkgoHelper()
+
+	patch := fmt.Sprintf(
+		`[{"op":"replace","path":"/spec/global/jobs/succeededHistoryTTLSeconds","value":%d}]`,
+		seconds,
+	)
+	runCommand(2*time.Minute, kubectlBin, "patch", "fabricnetwork", sampleName, "-n", sampleNamespace, "--type=json", "-p", patch)
+	return getFabricNetworkProbe().Metadata.Generation
+}
+
 func patchSampleBankBPeerScaleUp() int64 {
 	GinkgoHelper()
 
@@ -316,6 +352,108 @@ func expectSampleBankBPeer1ScaledDown() {
 	expectCommandFailure(30*time.Second, kubectlBin, "get", "service", "peer1-operations", "-n", "fo-sample-bankb")
 	expectCommandFailure(30*time.Second, kubectlBin, "get", "deployment", "settlement-settlement-bankb-peer1-ccaas", "-n", "fo-sample-bankb")
 	expectCommandFailure(30*time.Second, kubectlBin, "get", "service", "settlement-settlement-bankb-peer1-ccaas", "-n", "fo-sample-bankb")
+}
+
+type kubernetesJobList struct {
+	Items []struct {
+		Metadata struct {
+			Name        string            `json:"name"`
+			Namespace   string            `json:"namespace"`
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+		Status struct {
+			Succeeded int32 `json:"succeeded"`
+		} `json:"status"`
+	} `json:"items"`
+}
+
+func cleanupEligibleSucceededJobs() []namespacedName {
+	GinkgoHelper()
+
+	output := runCommandQuiet(
+		30*time.Second,
+		kubectlBin,
+		"get",
+		"jobs",
+		"-A",
+		"-l",
+		fabricNetworkLabel+"="+sampleName+","+fabricNetworkNamespaceLabel+"="+sampleNamespace,
+		"-o",
+		"json",
+	)
+	var jobs kubernetesJobList
+	Expect(json.Unmarshal([]byte(output), &jobs)).To(Succeed())
+
+	var names []namespacedName
+	for _, job := range jobs.Items {
+		if job.Status.Succeeded < 1 || job.Metadata.Annotations[succeededJobCleanupAnnotation] != "true" {
+			continue
+		}
+		names = append(names, namespacedName{
+			namespace: job.Metadata.Namespace,
+			name:      job.Metadata.Name,
+		})
+	}
+	return names
+}
+
+func expectCleanupEligibleSucceededJobsRemoved(candidates []namespacedName, timeout time.Duration) {
+	GinkgoHelper()
+
+	expectNoCleanupEligibleSucceededJobs(timeout)
+	Eventually(func(g Gomega) {
+		for _, job := range candidates {
+			output := runCommandQuiet(
+				30*time.Second,
+				kubectlBin,
+				"get",
+				"pods",
+				"-n",
+				job.namespace,
+				"-l",
+				"job-name="+job.name,
+				"-o",
+				"jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+			)
+			g.Expect(strings.TrimSpace(output)).To(BeEmpty(), "expected cleanup to remove pods for %s", job.String())
+		}
+	}, timeout, 5*time.Second).Should(Succeed())
+}
+
+func expectNoCleanupEligibleSucceededJobs(timeout time.Duration) {
+	GinkgoHelper()
+
+	Eventually(func(g Gomega) {
+		jobs := cleanupEligibleSucceededJobs()
+		g.Expect(jobNames(jobs)).To(BeEmpty())
+	}, timeout, 5*time.Second).Should(Succeed())
+}
+
+func expectRetainedChannelProofJobs() {
+	GinkgoHelper()
+
+	jobs := runCommand(
+		30*time.Second,
+		kubectlBin,
+		"get",
+		"jobs",
+		"-A",
+		"-l",
+		fabricNetworkLabel+"="+sampleName+","+fabricNetworkNamespaceLabel+"="+sampleNamespace,
+		"-o",
+		"jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{\"\\n\"}{end}",
+	)
+	Expect(jobs).To(ContainSubstring("orderer-join"))
+	Expect(jobs).To(ContainSubstring("peer-join"))
+	Expect(jobs).To(ContainSubstring("anchor-peer-update"))
+}
+
+func jobNames(items []namespacedName) []string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		names = append(names, item.String())
+	}
+	return names
 }
 
 func expectSampleChaincodeReady(version string, sequence int32, image string, targets []sampleChaincodeTarget) {

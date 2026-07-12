@@ -362,6 +362,8 @@ spec:
 
 This currently applies to enrollment Jobs, channel block generation Jobs, chaincode install Jobs, chaincode approval Jobs, and chaincode commit Jobs. Peer/orderer join Jobs and anchor peer update Jobs are retained until their readiness evidence moves into durable status or live Fabric checks.
 
+The sample `FabricNetwork` opts into a 10-minute successful helper Job history window so local runs stay inspectable without accumulating every completed output-backed Job forever.
+
 ## Observability
 
 Peer and orderer workloads expose Fabric operations endpoints through separate `*-operations` Services. Prometheus metrics are enabled on those operations endpoints.
