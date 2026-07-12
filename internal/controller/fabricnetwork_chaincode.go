@@ -55,10 +55,14 @@ const (
 	chaincodeChaincodeIDKey     = "chaincodeID"
 	chaincodePackageHashKey     = "packageHash"
 	chaincodeQueryInstalledKey  = "queryinstalled.json"
+	chaincodeQueryApprovedKey   = "queryapproved.json"
+	chaincodeQueryCommittedKey  = "querycommitted.json"
 	chaincodePackageIDFile      = "package-id"
 	chaincodeChaincodeIDFile    = "chaincode-id"
 	chaincodePackageHashFile    = "package-hash"
 	chaincodeQueryInstalledFile = "queryinstalled.json"
+	chaincodeQueryApprovedFile  = "queryapproved.json"
+	chaincodeQueryCommittedFile = "querycommitted.json"
 	chaincodePackageArchiveMode = 0o644
 
 	chaincodeWorkDir         = "/fabricops/chaincode"
@@ -82,14 +86,17 @@ const (
 	commitChaincodeContainer         = "commit-chaincode-definition"
 	chaincodeServerContainer         = "chaincode"
 
-	envChaincodePackageIDConfigMap = "FABRICOPS_CHAINCODE_PACKAGE_ID_CONFIGMAP"
-	envChaincodeChannel            = "FABRICOPS_CHAINCODE_CHANNEL"
-	envChaincodeName               = "FABRICOPS_CHAINCODE_NAME"
-	envChaincodePeer               = "FABRICOPS_CHAINCODE_PEER"
-	envCCAASChaincodeID            = "CHAINCODE_ID"
-	envCCAASCoreChaincodeIDName    = "CORE_CHAINCODE_ID_NAME"
-	envCCAASChaincodeServerAddress = "CHAINCODE_SERVER_ADDRESS"
-	envCCAASCoreChaincodeAddress   = "CORE_CHAINCODE_ADDRESS"
+	envChaincodePackageIDConfigMap       = "FABRICOPS_CHAINCODE_PACKAGE_ID_CONFIGMAP"
+	envChaincodeLifecycleResultConfigMap = "FABRICOPS_CHAINCODE_LIFECYCLE_RESULT_CONFIGMAP"
+	envChaincodeLifecycleResultKey       = "FABRICOPS_CHAINCODE_LIFECYCLE_RESULT_KEY"
+	envChaincodeLifecycleResultFile      = "FABRICOPS_CHAINCODE_LIFECYCLE_RESULT_FILE"
+	envChaincodeChannel                  = "FABRICOPS_CHAINCODE_CHANNEL"
+	envChaincodeName                     = "FABRICOPS_CHAINCODE_NAME"
+	envChaincodePeer                     = "FABRICOPS_CHAINCODE_PEER"
+	envCCAASChaincodeID                  = "CHAINCODE_ID"
+	envCCAASCoreChaincodeIDName          = "CORE_CHAINCODE_ID_NAME"
+	envCCAASChaincodeServerAddress       = "CHAINCODE_SERVER_ADDRESS"
+	envCCAASCoreChaincodeAddress         = "CORE_CHAINCODE_ADDRESS"
 
 	chaincodePeerHostnameTemplate    = "{{.peer_hostname}}"
 	chaincodePeerHostnamePlaceholder = "fabricops-peer-hostname"
@@ -318,7 +325,14 @@ func (r *FabricNetworkReconciler) reconcileChaincodes(
 										return statuses, err
 									}
 
-									approved, message, err := r.chaincodeApproveReadiness(ctx, target.Namespace, target.ApproveJobName, org)
+									approved, message, err := r.chaincodeApproveReadiness(
+										ctx,
+										target.Namespace,
+										chaincodeApproveResultConfigMapName(chaincode, org, packageID),
+										target.ApproveJobName,
+										org,
+										chaincodeSequence(chaincode),
+									)
 									if err != nil {
 										return statuses, err
 									}
@@ -1104,11 +1118,19 @@ func buildChaincodeApproveJob(
 	namespace := orgNamespaceName(net, org)
 	labels := chaincodePeerLabels(net, org, chaincode, peerName)
 	labels[labelWorkload] = sanitizeName(adminIdentityName(org))
+	annotations := resourceAnnotations(net, org)
 	backoffLimit := int32(4)
 	volumeMounts := []corev1.VolumeMount{
 		{Name: chaincodeAdminMSPVolume, MountPath: chaincodeAdminMSPPath, ReadOnly: true},
+		{Name: chaincodeOutputVolumeName, MountPath: chaincodeOutputDir},
 	}
 	volumes := []corev1.Volume{
+		{
+			Name: chaincodeOutputVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
 		{
 			Name: chaincodeAdminMSPVolume,
 			VolumeSource: corev1.VolumeSource{
@@ -1176,7 +1198,7 @@ func buildChaincodeApproveJob(
 			Name:        chaincodeApproveJobName(chaincode, org, packageID),
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, org),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
@@ -1189,7 +1211,7 @@ func buildChaincodeApproveJob(
 					ServiceAccountName: chaincodeInstallerName(chaincode, org, peerName),
 					RestartPolicy:      corev1.RestartPolicyNever,
 					Volumes:            volumes,
-					Containers: []corev1.Container{
+					InitContainers: []corev1.Container{
 						{
 							Name:  approveChaincodeContainer,
 							Image: fabricToolsImage(net.Spec.Global.FabricVersion),
@@ -1207,6 +1229,18 @@ func buildChaincodeApproveJob(
 							VolumeMounts: volumeMounts,
 						},
 					},
+					Containers: []corev1.Container{
+						{
+							Name:      publishChaincodeLifecycleResultContainerName(approveChaincodeContainer),
+							Image:     kubectlImage(),
+							Command:   []string{"sh", "-ec", publishChaincodeLifecycleResultScript()},
+							Env:       publishChaincodeLifecycleResultEnv(chaincode, peerName, chaincodeApproveResultConfigMapName(chaincode, org, packageID), chaincodeQueryApprovedKey, chaincodeQueryApprovedFile),
+							Resources: componentResourceRequirements(componentKubectl),
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: chaincodeOutputVolumeName, MountPath: chaincodeOutputDir},
+							},
+						},
+					},
 				},
 			},
 		},
@@ -1216,11 +1250,25 @@ func buildChaincodeApproveJob(
 func (r *FabricNetworkReconciler) chaincodeApproveReadiness(
 	ctx context.Context,
 	namespace string,
+	resultConfigMapName string,
 	approveJobName string,
 	org fabricopsv1alpha1.Org,
+	sequence int32,
 ) (bool, string, error) {
+	resultReady, resultMessage, err := r.chaincodeLifecycleResultReadiness(
+		ctx,
+		namespace,
+		resultConfigMapName,
+		chaincodeQueryApprovedKey,
+		sequence,
+		"chaincode approve",
+	)
+	if err != nil || resultReady {
+		return resultReady, resultMessage, err
+	}
+
 	var job batchv1.Job
-	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: approveJobName}, &job)
+	err = r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: approveJobName}, &job)
 	if apierrors.IsNotFound(err) {
 		return false, "Waiting for chaincode approve Job", nil
 	}
@@ -1231,7 +1279,10 @@ func (r *FabricNetworkReconciler) chaincodeApproveReadiness(
 		return false, fmt.Sprintf("%s: chaincode approve Job failed", org.Organization.Name), nil
 	}
 	if jobSucceeded(job) {
-		return true, "", nil
+		if resultMessage != "" {
+			return false, resultMessage, nil
+		}
+		return false, "Waiting for chaincode approve result ConfigMap", nil
 	}
 
 	return false, "Waiting for chaincode approve Job", nil
@@ -1257,8 +1308,15 @@ func (r *FabricNetworkReconciler) reconcileChaincodeCommit(
 	submitter := peers[0]
 	namespace := submitter.namespace
 	jobName := chaincodeCommitJobName(chaincode, packageID)
+	resultConfigMapName := chaincodeCommitResultConfigMapName(chaincode, packageID)
 
-	committed, message, err := r.chaincodeCommitReadiness(ctx, namespace, jobName)
+	committed, message, err := r.chaincodeCommitReadiness(
+		ctx,
+		namespace,
+		resultConfigMapName,
+		jobName,
+		chaincodeSequence(chaincode),
+	)
 	if err != nil {
 		return false, "", err
 	}
@@ -1269,6 +1327,12 @@ func (r *FabricNetworkReconciler) reconcileChaincodeCommit(
 		return false, "", err
 	}
 	if err := r.ensureServiceAccount(ctx, buildChaincodeCommitServiceAccount(net, chaincode, submitter.org, namespace)); err != nil {
+		return false, "", err
+	}
+	if err := r.ensureRole(ctx, buildChaincodeCommitRole(net, chaincode, submitter.org, namespace)); err != nil {
+		return false, "", err
+	}
+	if err := r.ensureRoleBinding(ctx, buildChaincodeCommitRoleBinding(net, chaincode, submitter.org, namespace)); err != nil {
 		return false, "", err
 	}
 	if err := r.ensureJob(ctx, buildChaincodeCommitJob(net, channel, chaincode, packageID, submitter, orderer, peers)); err != nil {
@@ -1357,6 +1421,61 @@ func buildChaincodeCommitServiceAccount(
 	}
 }
 
+func buildChaincodeCommitRole(
+	net *fabricopsv1alpha1.FabricNetwork,
+	chaincode fabricopsv1alpha1.Chaincode,
+	hostOrg fabricopsv1alpha1.Org,
+	namespace string,
+) *rbacv1.Role {
+	name := chaincodeCommitterName(chaincode)
+
+	return &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      chaincodeLabels(net, hostOrg, chaincode.Channel, chaincode.Name),
+			Annotations: resourceAnnotations(net, hostOrg),
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get", "create", "update", "patch"},
+			},
+		},
+	}
+}
+
+func buildChaincodeCommitRoleBinding(
+	net *fabricopsv1alpha1.FabricNetwork,
+	chaincode fabricopsv1alpha1.Chaincode,
+	hostOrg fabricopsv1alpha1.Org,
+	namespace string,
+) *rbacv1.RoleBinding {
+	name := chaincodeCommitterName(chaincode)
+
+	return &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      chaincodeLabels(net, hostOrg, chaincode.Channel, chaincode.Name),
+			Annotations: resourceAnnotations(net, hostOrg),
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      name,
+				Namespace: namespace,
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "Role",
+			Name:     name,
+		},
+	}
+}
+
 func buildChaincodeCommitJob(
 	net *fabricopsv1alpha1.FabricNetwork,
 	channel fabricopsv1alpha1.Channel,
@@ -1368,11 +1487,19 @@ func buildChaincodeCommitJob(
 ) *batchv1.Job {
 	labels := chaincodeLabels(net, submitter.org, chaincode.Channel, chaincode.Name)
 	labels[labelWorkload] = sanitizeName(adminIdentityName(submitter.org))
+	annotations := resourceAnnotations(net, submitter.org)
 	backoffLimit := int32(4)
 	volumeMounts := []corev1.VolumeMount{
 		{Name: chaincodeAdminMSPVolume, MountPath: chaincodeAdminMSPPath, ReadOnly: true},
+		{Name: chaincodeOutputVolumeName, MountPath: chaincodeOutputDir},
 	}
 	volumes := []corev1.Volume{
+		{
+			Name: chaincodeOutputVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
 		{
 			Name: chaincodeAdminMSPVolume,
 			VolumeSource: corev1.VolumeSource{
@@ -1459,7 +1586,7 @@ func buildChaincodeCommitJob(
 			Name:        chaincodeCommitJobName(chaincode, packageID),
 			Namespace:   submitter.namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, submitter.org),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
@@ -1472,7 +1599,7 @@ func buildChaincodeCommitJob(
 					ServiceAccountName: chaincodeCommitterName(chaincode),
 					RestartPolicy:      corev1.RestartPolicyNever,
 					Volumes:            volumes,
-					Containers: []corev1.Container{
+					InitContainers: []corev1.Container{
 						{
 							Name:  commitChaincodeContainer,
 							Image: fabricToolsImage(net.Spec.Global.FabricVersion),
@@ -1488,6 +1615,18 @@ func buildChaincodeCommitJob(
 							VolumeMounts: volumeMounts,
 						},
 					},
+					Containers: []corev1.Container{
+						{
+							Name:      publishChaincodeLifecycleResultContainerName(commitChaincodeContainer),
+							Image:     kubectlImage(),
+							Command:   []string{"sh", "-ec", publishChaincodeLifecycleResultScript()},
+							Env:       publishChaincodeLifecycleResultEnv(chaincode, submitter.peerName, chaincodeCommitResultConfigMapName(chaincode, packageID), chaincodeQueryCommittedKey, chaincodeQueryCommittedFile),
+							Resources: componentResourceRequirements(componentKubectl),
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: chaincodeOutputVolumeName, MountPath: chaincodeOutputDir},
+							},
+						},
+					},
 				},
 			},
 		},
@@ -1497,10 +1636,24 @@ func buildChaincodeCommitJob(
 func (r *FabricNetworkReconciler) chaincodeCommitReadiness(
 	ctx context.Context,
 	namespace string,
+	resultConfigMapName string,
 	commitJobName string,
+	sequence int32,
 ) (bool, string, error) {
+	resultReady, resultMessage, err := r.chaincodeLifecycleResultReadiness(
+		ctx,
+		namespace,
+		resultConfigMapName,
+		chaincodeQueryCommittedKey,
+		sequence,
+		"chaincode commit",
+	)
+	if err != nil || resultReady {
+		return resultReady, resultMessage, err
+	}
+
 	var job batchv1.Job
-	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: commitJobName}, &job)
+	err = r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: commitJobName}, &job)
 	if apierrors.IsNotFound(err) {
 		return false, "Waiting for chaincode commit Job", nil
 	}
@@ -1511,10 +1664,59 @@ func (r *FabricNetworkReconciler) chaincodeCommitReadiness(
 		return false, "Chaincode commit Job failed", nil
 	}
 	if jobSucceeded(job) {
-		return true, "", nil
+		if resultMessage != "" {
+			return false, resultMessage, nil
+		}
+		return false, "Waiting for chaincode commit result ConfigMap", nil
 	}
 
 	return false, "Waiting for chaincode commit Job", nil
+}
+
+func (r *FabricNetworkReconciler) chaincodeLifecycleResultReadiness(
+	ctx context.Context,
+	namespace string,
+	configMapName string,
+	resultKey string,
+	sequence int32,
+	operation string,
+) (bool, string, error) {
+	var result corev1.ConfigMap
+	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: configMapName}, &result)
+	if apierrors.IsNotFound(err) {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+
+	raw := strings.TrimSpace(result.Data[resultKey])
+	if raw == "" {
+		return false, fmt.Sprintf("Waiting for %s result ConfigMap data", operation), nil
+	}
+	if !chaincodeLifecycleResultSequenceMatches(raw, sequence) {
+		return false, fmt.Sprintf("Waiting for %s result ConfigMap sequence %d", operation, sequence), nil
+	}
+
+	return true, "", nil
+}
+
+func chaincodeLifecycleResultSequenceMatches(raw string, sequence int32) bool {
+	var payload struct {
+		Sequence any `json:"sequence"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return false
+	}
+
+	switch value := payload.Sequence.(type) {
+	case float64:
+		return value == float64(sequence)
+	case string:
+		return value == fmt.Sprintf("%d", sequence)
+	default:
+		return false
+	}
 }
 
 func (r *FabricNetworkReconciler) chaincodeInstallReadiness(
@@ -1673,12 +1875,15 @@ ORDERER_ADDRESS=%q
 ENDORSEMENT_POLICY=%q
 INIT_REQUIRED=%q
 COLLECTIONS_CONFIG=%q
-QUERY_APPROVED_FILE=/tmp/fabricops-chaincode-approved.json
+OUTPUT_DIR=%q
+QUERY_APPROVED_FILE="$OUTPUT_DIR/%s"
 
 export CORE_PEER_LOCALMSPID=%q
 export CORE_PEER_ADDRESS=%q
 export CORE_PEER_MSPCONFIGPATH=%q
 %s
+
+mkdir -p "$OUTPUT_DIR"
 
 if peer lifecycle chaincode queryapproved \
   --channelID "$CHANNEL_ID" \
@@ -1711,6 +1916,11 @@ if [ -n "$COLLECTIONS_CONFIG" ]; then
 fi
 
 "$@"
+
+peer lifecycle chaincode queryapproved \
+  --channelID "$CHANNEL_ID" \
+  --name "$CHAINCODE_NAME" \
+  --output json > "$QUERY_APPROVED_FILE"
 `, channel.Name,
 		chaincode.Name,
 		chaincode.Version,
@@ -1720,6 +1930,8 @@ fi
 		chaincodeEndorsementPolicy(net, channel, chaincode),
 		boolString(chaincode.InitRequired),
 		chaincodeCollectionsConfigPath(chaincode),
+		chaincodeOutputDir,
+		chaincodeQueryApprovedFile,
 		org.Organization.MSPName,
 		serviceDNS(peerName, namespace, peerPort),
 		chaincodeAdminMSPPath,
@@ -1768,12 +1980,15 @@ ORDERER_ADDRESS=%q
 ENDORSEMENT_POLICY=%q
 INIT_REQUIRED=%q
 COLLECTIONS_CONFIG=%q
-QUERY_COMMITTED_FILE=/tmp/fabricops-chaincode-committed.json
+OUTPUT_DIR=%q
+QUERY_COMMITTED_FILE="$OUTPUT_DIR/%s"
 
 export CORE_PEER_LOCALMSPID=%q
 export CORE_PEER_ADDRESS=%q
 export CORE_PEER_MSPCONFIGPATH=%q
 %s
+
+mkdir -p "$OUTPUT_DIR"
 
 if peer lifecycle chaincode querycommitted \
   --channelID "$CHANNEL_ID" \
@@ -1819,6 +2034,8 @@ peer lifecycle chaincode querycommitted \
 		chaincodeEndorsementPolicy(net, channel, chaincode),
 		boolString(chaincode.InitRequired),
 		chaincodeCollectionsConfigPath(chaincode),
+		chaincodeOutputDir,
+		chaincodeQueryCommittedFile,
 		submitter.org.Organization.MSPName,
 		serviceDNS(submitter.peerName, submitter.namespace, peerPort),
 		chaincodeAdminMSPPath,
@@ -1855,6 +2072,52 @@ func publishChaincodeInstallEnv(
 ) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: envChaincodePackageIDConfigMap, Value: chaincodePackageIDConfigMapName(chaincode, org, peerName)},
+		{Name: envChaincodeChannel, Value: sanitizeName(chaincode.Channel)},
+		{Name: envChaincodeName, Value: sanitizeName(chaincode.Name)},
+		{Name: envChaincodePeer, Value: sanitizeName(peerName)},
+		{
+			Name: envPodNamespace,
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.namespace",
+				},
+			},
+		},
+	}
+}
+
+func publishChaincodeLifecycleResultContainerName(operation string) string {
+	return sanitizeName("publish-" + operation + "-result")
+}
+
+func publishChaincodeLifecycleResultScript() string {
+	return `set -eu
+
+kubectl -n "$POD_NAMESPACE" create configmap "$FABRICOPS_CHAINCODE_LIFECYCLE_RESULT_CONFIGMAP" \
+  --from-file="$FABRICOPS_CHAINCODE_LIFECYCLE_RESULT_KEY=` + chaincodeOutputDir + `/$FABRICOPS_CHAINCODE_LIFECYCLE_RESULT_FILE" \
+  --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
+
+kubectl -n "$POD_NAMESPACE" label configmap "$FABRICOPS_CHAINCODE_LIFECYCLE_RESULT_CONFIGMAP" \
+  fabricops.io/component=chaincode \
+  fabricops.io/channel="$FABRICOPS_CHAINCODE_CHANNEL" \
+  fabricops.io/chaincode="$FABRICOPS_CHAINCODE_NAME" \
+  fabricops.io/workload="$FABRICOPS_CHAINCODE_PEER" \
+  app.kubernetes.io/component=chaincode \
+  --overwrite
+`
+}
+
+func publishChaincodeLifecycleResultEnv(
+	chaincode fabricopsv1alpha1.Chaincode,
+	peerName string,
+	configMapName string,
+	resultKey string,
+	resultFile string,
+) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: envChaincodeLifecycleResultConfigMap, Value: configMapName},
+		{Name: envChaincodeLifecycleResultKey, Value: resultKey},
+		{Name: envChaincodeLifecycleResultFile, Value: resultFile},
 		{Name: envChaincodeChannel, Value: sanitizeName(chaincode.Channel)},
 		{Name: envChaincodeName, Value: sanitizeName(chaincode.Name)},
 		{Name: envChaincodePeer, Value: sanitizeName(peerName)},
@@ -2180,11 +2443,23 @@ func chaincodeApproveJobName(
 	return sanitizeName(strings.Join(parts, "-"))
 }
 
+func chaincodeApproveResultConfigMapName(
+	chaincode fabricopsv1alpha1.Chaincode,
+	org fabricopsv1alpha1.Org,
+	packageID string,
+) string {
+	return sanitizeName(chaincodeApproveJobName(chaincode, org, packageID) + "-result")
+}
+
 func chaincodeCommitJobName(chaincode fabricopsv1alpha1.Chaincode, packageID string) string {
 	parts := []string{chaincodePackageLabel(chaincode), chaincodePackageHash(packageID)}
 	parts = append(parts, chaincodeDefinitionNameHash(chaincode))
 	parts = append(parts, "commit")
 	return sanitizeName(strings.Join(parts, "-"))
+}
+
+func chaincodeCommitResultConfigMapName(chaincode fabricopsv1alpha1.Chaincode, packageID string) string {
+	return sanitizeName(chaincodeCommitJobName(chaincode, packageID) + "-result")
 }
 
 func chaincodeInstallJobName(

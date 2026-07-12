@@ -360,7 +360,7 @@ spec:
       succeededHistoryTTLSeconds: 600
 ```
 
-This currently applies to enrollment Jobs, channel block generation Jobs, and chaincode install Jobs. Lifecycle proof Jobs such as peer/orderer joins, anchor peer updates, chaincode approvals, and commits are retained until their readiness evidence moves into durable status or live Fabric checks.
+This currently applies to enrollment Jobs, channel block generation Jobs, chaincode install Jobs, chaincode approval Jobs, and chaincode commit Jobs. Peer/orderer join Jobs and anchor peer update Jobs are retained until their readiness evidence moves into durable status or live Fabric checks.
 
 ## Observability
 
