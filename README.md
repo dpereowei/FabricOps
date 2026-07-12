@@ -155,6 +155,7 @@ FabricOps supports:
 - Kubernetes status conditions for component, identity, channel, chaincode, and observability readiness
 - Fabric peer/orderer operations endpoints and optional Prometheus Operator `ServiceMonitor` resources
 - Optional org-boundary NetworkPolicies for FabricOps-managed pods
+- Opt-in cleanup for successful helper Jobs whose outputs are stored in durable FabricOps resources
 - Finalizer-based cleanup for generated org namespaces
 
 See [SUPPORTED_FEATURES.md](SUPPORTED_FEATURES.md) for the detailed
@@ -347,6 +348,19 @@ Default sizes are:
 CA pods mount persistent data at `/etc/hyperledger/fabric-ca-server`. Orderer and peer pods mount persistent data at `/var/hyperledger/production`.
 
 Fabric component instances run as singleton Deployments with `Recreate` rollout strategy and one PVC per instance.
+
+## Job Cleanup
+
+FabricOps keeps failed Jobs for diagnostics. To remove successful helper Jobs whose results are already stored in durable resources, set:
+
+```yaml
+spec:
+  global:
+    jobs:
+      succeededHistoryTTLSeconds: 600
+```
+
+This currently applies to enrollment Jobs, channel block generation Jobs, and chaincode install Jobs. Lifecycle proof Jobs such as peer/orderer joins, anchor peer updates, chaincode approvals, and commits are retained until their readiness evidence moves into durable status or live Fabric checks.
 
 ## Observability
 

@@ -970,7 +970,12 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, err
 		}
 
-		return ctrl.Result{}, nil
+		cleanupAfter, err := r.cleanupSucceededJobs(ctx, &network)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return resultWithCleanupRequeue(ctrl.Result{}, cleanupAfter), nil
 	}
 
 	readyReason := "ComponentsNotReady"
@@ -1017,7 +1022,12 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	cleanupAfter, err := r.cleanupSucceededJobs(ctx, &network)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return resultWithCleanupRequeue(ctrl.Result{RequeueAfter: 10 * time.Second}, cleanupAfter), nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -304,6 +304,7 @@ func buildAdminEnrollmentJob(
 	labels := identityLabels(net, org, componentAdmin, adminName, map[string]string{
 		labelIdentityKind: secretKindAdminEnroll,
 	})
+	annotations := resourceAnnotations(net, org)
 	backoffLimit := int32(4)
 
 	return &batchv1.Job{
@@ -311,7 +312,7 @@ func buildAdminEnrollmentJob(
 			Name:        adminEnrollmentJobName(org),
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, org),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
@@ -378,6 +379,7 @@ func buildWorkloadEnrollmentJob(
 	labels := identityLabels(net, org, component, workloadName, map[string]string{
 		labelIdentityKind: secretKindWorkloadEnroll,
 	})
+	annotations := resourceAnnotations(net, org)
 	backoffLimit := int32(4)
 
 	return &batchv1.Job{
@@ -385,7 +387,7 @@ func buildWorkloadEnrollmentJob(
 			Name:        workloadEnrollmentJobName(workloadName),
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, org),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,

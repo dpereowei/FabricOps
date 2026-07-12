@@ -947,6 +947,7 @@ func buildChannelBlockJob(
 	namespace string,
 ) *batchv1.Job {
 	labels := channelLabels(net, hostOrg, channel.Name)
+	annotations := resourceAnnotations(net, hostOrg)
 	backoffLimit := int32(4)
 	volumes := []corev1.Volume{
 		{
@@ -1014,7 +1015,7 @@ func buildChannelBlockJob(
 			Name:        channelBlockJobName(channel.Name),
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, hostOrg),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,

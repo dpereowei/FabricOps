@@ -949,6 +949,7 @@ func buildChaincodeInstallJob(
 ) *batchv1.Job {
 	namespace := orgNamespaceName(net, org)
 	labels := chaincodePeerLabels(net, org, chaincode, peerName)
+	annotations := resourceAnnotations(net, org)
 	packageFile := chaincodePackageLabel(chaincode) + ".tar.gz"
 	backoffLimit := int32(4)
 	volumeMounts := []corev1.VolumeMount{
@@ -1015,7 +1016,7 @@ func buildChaincodeInstallJob(
 			Name:        chaincodeInstallJobName(chaincode, org, peerName),
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, org),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,

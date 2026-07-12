@@ -527,6 +527,19 @@ spec:
                     minLength: 1
                     pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
                     type: string
+                  jobs:
+                    properties:
+                      succeededHistoryTTLSeconds:
+                        description: |-
+                          SucceededHistoryTTLSeconds deletes eligible successful FabricOps helper
+                          Jobs after this many seconds. Failed Jobs are retained for diagnostics.
+                          Only Jobs whose result is represented by durable FabricOps resources are
+                          eligible.
+                        format: int32
+                        maximum: 604800
+                        minimum: 0
+                        type: integer
+                    type: object
                   networkPolicy:
                     properties:
                       enabled:

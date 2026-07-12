@@ -575,6 +575,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			}, &job)).To(Succeed())
 			Expect(job.Labels[labelAppComponent]).To(Equal(componentAdmin))
 			Expect(job.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(job.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(job.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
 			Expect(job.Spec.Template.Spec.ServiceAccountName).To(Equal(enrollmentServiceAccountName(bankOrg)))
 			Expect(job.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
@@ -608,6 +609,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Namespace: ordererNamespace,
 				Name:      workloadEnrollmentJobName("orderer0"),
 			}, &ordererJob)).To(Succeed())
+			Expect(ordererJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			ordererEnrollContainer := ordererJob.Spec.Template.Spec.InitContainers[0]
 			Expect(ordererEnrollContainer.Name).To(Equal(enrollWorkloadContainerName))
 			Expect(envMap(ordererEnrollContainer)[envWorkloadName]).To(Equal("orderer0"))
@@ -622,6 +624,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Name:      workloadEnrollmentJobName("peer0"),
 			}, &peerJob)).To(Succeed())
 			Expect(peerJob.Labels[labelWorkload]).To(Equal("peer0"))
+			Expect(peerJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(peerJob.Spec.Template.Annotations[annotationOrg]).To(Equal("BankA"))
 			Expect(peerJob.Spec.Template.Spec.ServiceAccountName).To(Equal(enrollmentServiceAccountName(bankOrg)))
 			Expect(peerJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
@@ -2175,6 +2178,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			}, &job)).To(Succeed())
 			Expect(job.Labels[labelAppComponent]).To(Equal(componentChannel))
 			Expect(job.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(job.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(job.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-channel-bootstrapper"))
 			Expect(job.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
 			Expect(job.Spec.Template.Spec.InitContainers).To(HaveLen(1))
@@ -2431,6 +2435,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(chaincodeInstallJob.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(chaincodeInstallJob.Labels[labelChaincode]).To(Equal("settlement"))
 			Expect(chaincodeInstallJob.Labels[labelWorkload]).To(Equal("peer0"))
+			Expect(chaincodeInstallJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(chaincodeInstallJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-banka-peer0-installer"))
 			Expect(chaincodeInstallJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
 			Expect(chaincodeInstallJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
@@ -2589,6 +2594,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(approveJob.Labels[labelAppComponent]).To(Equal(componentChaincode))
 			Expect(approveJob.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(approveJob.Labels[labelChaincode]).To(Equal("settlement"))
+			Expect(approveJob.Annotations).NotTo(HaveKey(annotationSucceededJobCleanup))
 			Expect(approveJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-banka-peer0-installer"))
 			Expect(secretVolumeNames(approveJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminMSPVolume, "banka-admin-msp"))
 			Expect(secretVolumeNames(approveJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminTLSVolume, "banka-admin-tls"))
@@ -2649,6 +2655,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(commitJob.Labels[labelAppComponent]).To(Equal(componentChaincode))
 			Expect(commitJob.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(commitJob.Labels[labelChaincode]).To(Equal("settlement"))
+			Expect(commitJob.Annotations).NotTo(HaveKey(annotationSucceededJobCleanup))
 			Expect(commitJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-committer"))
 			Expect(secretVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminMSPVolume, "banka-admin-msp"))
 			Expect(secretVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminTLSVolume, "banka-admin-tls"))
@@ -2876,6 +2883,70 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(chaincodeStatus.Message).To(Equal("Chaincode committed and workload ready"))
 			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseReady))
 		})
+
+		It("should clean up only eligible succeeded Jobs after the configured history TTL", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Global.Jobs = &fabricopsv1alpha1.JobCleanupConfig{
+				SucceededHistoryTTLSeconds: int32Ptr(0),
+			}
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			bankOrg := network.Spec.Orgs[1]
+			namespace := orgNamespaceName(&network, bankOrg)
+			Expect(controllerReconciler.ensureNamespace(ctx, buildOrgNamespace(&network, bankOrg))).To(Succeed())
+
+			createCleanupTestJob(ctx, &network, bankOrg, namespace, "eligible-succeeded", true)
+			markJobComplete(ctx, namespace, "eligible-succeeded")
+			createCleanupTestJob(ctx, &network, bankOrg, namespace, "proof-succeeded", false)
+			markJobComplete(ctx, namespace, "proof-succeeded")
+			createCleanupTestJob(ctx, &network, bankOrg, namespace, "eligible-failed", true)
+			markJobFailed(ctx, namespace, "eligible-failed")
+
+			cleanupAfter, err := controllerReconciler.cleanupSucceededJobs(ctx, &network)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cleanupAfter).To(Equal(time.Duration(0)))
+
+			Eventually(func(g Gomega) {
+				var job batchv1.Job
+				err := k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "eligible-succeeded"}, &job)
+				g.Expect(errors.IsNotFound(err)).To(BeTrue())
+			}).Should(Succeed())
+
+			var retained batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "proof-succeeded"}, &retained)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "eligible-failed"}, &retained)).To(Succeed())
+		})
+
+		It("should requeue cleanup when an eligible succeeded Job is newer than the configured history TTL", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Global.Jobs = &fabricopsv1alpha1.JobCleanupConfig{
+				SucceededHistoryTTLSeconds: int32Ptr(60),
+			}
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			bankOrg := network.Spec.Orgs[1]
+			namespace := orgNamespaceName(&network, bankOrg)
+			Expect(controllerReconciler.ensureNamespace(ctx, buildOrgNamespace(&network, bankOrg))).To(Succeed())
+
+			createCleanupTestJob(ctx, &network, bankOrg, namespace, "fresh-succeeded", true)
+			markJobCompleteAt(ctx, namespace, "fresh-succeeded", metav1.NewTime(time.Now().Add(-30*time.Second)))
+
+			cleanupAfter, err := controllerReconciler.cleanupSucceededJobs(ctx, &network)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cleanupAfter).To(BeNumerically(">", 0))
+			Expect(cleanupAfter).To(BeNumerically("<=", 60*time.Second))
+
+			var job batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "fresh-succeeded"}, &job)).To(Succeed())
+		})
 	})
 })
 
@@ -3086,31 +3157,75 @@ func markJobFailed(ctx context.Context, namespace, name string) {
 }
 
 func markJobComplete(ctx context.Context, namespace, name string) {
+	markJobCompleteAt(ctx, namespace, name, metav1.Now())
+}
+
+func markJobCompleteAt(ctx context.Context, namespace, name string, completedAt metav1.Time) {
 	var job batchv1.Job
 	Expect(k8sClient.Get(ctx, types.NamespacedName{
 		Namespace: namespace,
 		Name:      name,
 	}, &job)).To(Succeed())
 
-	now := metav1.Now()
 	job.Status.Succeeded = 1
-	job.Status.StartTime = &now
-	job.Status.CompletionTime = &now
+	job.Status.StartTime = &completedAt
+	job.Status.CompletionTime = &completedAt
 	job.Status.Conditions = append(job.Status.Conditions,
 		batchv1.JobCondition{
 			Type:               batchv1.JobSuccessCriteriaMet,
 			Status:             corev1.ConditionTrue,
 			Reason:             "CompletionsReached",
-			LastTransitionTime: now,
+			LastTransitionTime: completedAt,
 		},
 		batchv1.JobCondition{
 			Type:               batchv1.JobComplete,
 			Status:             corev1.ConditionTrue,
 			Reason:             "Completed",
-			LastTransitionTime: now,
+			LastTransitionTime: completedAt,
 		},
 	)
 	Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
+}
+
+func createCleanupTestJob(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	name string,
+	eligible bool,
+) {
+	annotations := resourceAnnotations(net, org)
+	if eligible {
+		annotations = succeededJobCleanupAnnotations(annotations)
+	}
+	backoffLimit := int32(0)
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      orgLabels(net, org, componentChannel),
+			Annotations: annotations,
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: &backoffLimit,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: orgLabels(net, org, componentChannel),
+				},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{
+						{
+							Name:  "test",
+							Image: "busybox",
+						},
+					},
+				},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, job)).To(Succeed())
 }
 
 func writeEnrolledOrgIdentitySecrets(

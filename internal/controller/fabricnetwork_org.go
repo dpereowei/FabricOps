@@ -1210,7 +1210,12 @@ func (r *FabricNetworkReconciler) ensureNetworkPolicyAbsent(
 	return r.Delete(ctx, &existing)
 }
 
-func (r *FabricNetworkReconciler) deleteOwnedObject(ctx context.Context, object client.Object, expectedOwner client.Object) error {
+func (r *FabricNetworkReconciler) deleteOwnedObject(
+	ctx context.Context,
+	object client.Object,
+	expectedOwner client.Object,
+	opts ...client.DeleteOption,
+) error {
 	if !hasFabricNetworkOwner(object) {
 		return nil
 	}
@@ -1220,7 +1225,7 @@ func (r *FabricNetworkReconciler) deleteOwnedObject(ctx context.Context, object 
 
 	log := logf.FromContext(ctx)
 	log.Info("Deleting object", "object", objectDescription(object))
-	return client.IgnoreNotFound(r.Delete(ctx, object))
+	return client.IgnoreNotFound(r.Delete(ctx, object, opts...))
 }
 
 func hasFabricNetworkOwner(object client.Object) bool {
