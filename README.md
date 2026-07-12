@@ -360,7 +360,7 @@ spec:
       succeededHistoryTTLSeconds: 600
 ```
 
-This currently applies to enrollment Jobs, channel block generation Jobs, orderer join Jobs, chaincode install Jobs, chaincode approval Jobs, and chaincode commit Jobs. Peer join Jobs and anchor peer update Jobs are retained until their readiness evidence moves into durable status or live Fabric checks.
+This currently applies to enrollment Jobs, channel block generation Jobs, orderer join Jobs, peer join Jobs, chaincode install Jobs, chaincode approval Jobs, and chaincode commit Jobs. Anchor peer update Jobs are retained until their readiness evidence moves into durable status or live Fabric checks.
 
 The sample `FabricNetwork` opts into a 10-minute successful helper Job history window so local runs stay inspectable without accumulating every completed output-backed Job forever.
 

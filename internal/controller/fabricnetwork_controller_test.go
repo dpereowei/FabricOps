@@ -2331,6 +2331,28 @@ var _ = Describe("FabricNetwork Controller", func() {
 			}, &peerServiceAccount)).To(Succeed())
 			Expect(peerServiceAccount.Labels[labelAppComponent]).To(Equal(componentChannel))
 
+			var peerRole rbacv1.Role
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-channel-bootstrapper",
+			}, &peerRole)).To(Succeed())
+			Expect(peerRole.Rules).To(ContainElement(rbacv1.PolicyRule{
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get", "create", "update", "patch"},
+			}))
+
+			var peerRoleBinding rbacv1.RoleBinding
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-channel-bootstrapper",
+			}, &peerRoleBinding)).To(Succeed())
+			Expect(peerRoleBinding.Subjects).To(ContainElement(rbacv1.Subject{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      "settlement-channel-bootstrapper",
+				Namespace: bankNamespace,
+			}))
+
 			var peerJoinJob batchv1.Job
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Namespace: bankNamespace,
@@ -2339,25 +2361,37 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(peerJoinJob.Labels[labelAppComponent]).To(Equal(componentChannel))
 			Expect(peerJoinJob.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(peerJoinJob.Labels[labelWorkload]).To(Equal("peer0"))
+			Expect(peerJoinJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(peerJoinJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-channel-bootstrapper"))
 			Expect(peerJoinJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(peerJoinJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
 			Expect(peerJoinJob.Spec.Template.Spec.Containers).To(HaveLen(1))
 			Expect(configMapVolumeNames(peerJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue(channelBlockVolumeName, "settlement-channel-block"))
 			Expect(secretVolumeNames(peerJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue("msp-banka", "banka-admin-msp"))
 			Expect(secretVolumeNames(peerJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue("admin-tls-banka", "banka-admin-tls"))
 
-			peerJoinContainer := peerJoinJob.Spec.Template.Spec.Containers[0]
+			peerJoinContainer := peerJoinJob.Spec.Template.Spec.InitContainers[0]
 			Expect(peerJoinContainer.Name).To(Equal(joinPeerContainer))
 			Expect(peerJoinContainer.Image).To(Equal("hyperledger/fabric-tools:2.5.14"))
 			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("peer channel join"))
+			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("peer channel list"))
 			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("CORE_PEER_LOCALMSPID=\"BankAMSP\""))
 			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("peer0.fo-test-banka.svc.cluster.local:7051"))
 			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("--cafile \"$CORE_PEER_TLS_ROOTCERT_FILE\""))
+			Expect(volumeMountPaths(peerJoinContainer)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
 			Expect(volumeMountPaths(peerJoinContainer)).To(HaveKeyWithValue(channelBlockVolumeName, channelBlockDir))
 			Expect(volumeMountPaths(peerJoinContainer)).To(HaveKeyWithValue("msp-banka", channelOrgMSPPath(network.Spec.Orgs[1])))
 			Expect(volumeMountPaths(peerJoinContainer)).To(HaveKeyWithValue("admin-tls-banka", channelOrdererAdminTLSPath(network.Spec.Orgs[1])))
 
+			peerJoinPublisher := peerJoinJob.Spec.Template.Spec.Containers[0]
+			Expect(peerJoinPublisher.Name).To(Equal(publishPeerJoinContainer))
+			Expect(peerJoinPublisher.Image).To(Equal(kubectlImage()))
+			Expect(envMap(peerJoinPublisher)[envPeerJoinResultConfigMap]).To(Equal("settlement-banka-peer0-peer-join-result"))
+			Expect(envMap(peerJoinPublisher)[envPeerJoinResultKey]).To(Equal(channelPeerJoinResultKey))
+			Expect(volumeMountPaths(peerJoinPublisher)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
+
 			markJobComplete(ctx, bankNamespace, "settlement-banka-peer0-peer-join")
+			createPeerJoinResultConfigMap(ctx, bankNamespace, "settlement-banka-peer0-peer-join-result", "settlement")
 
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -2380,6 +2414,30 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(channels.Status).To(Equal(metav1.ConditionFalse))
 			Expect(channels.Reason).To(Equal("ChannelBootstrapPending"))
 			Expect(channels.Message).To(Equal("settlement: Waiting for anchor peer update Jobs"))
+
+			By("Deleting the cleanup-eligible peer join Job after durable result evidence exists")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-banka-peer0-peer-join",
+			}, &peerJoinJob)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &peerJoinJob, &client.DeleteOptions{PropagationPolicy: &propagation})).To(Succeed())
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: bankNamespace,
+					Name:      "settlement-banka-peer0-peer-join",
+				}, &peerJoinJob)
+				return errors.IsNotFound(err)
+			}).Should(BeTrue())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-banka-peer0-peer-join",
+			}, &peerJoinJob)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
 
 			var peerOrdererTLS corev1.Secret
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -3371,6 +3429,19 @@ func createOrdererJoinResultConfigMap(ctx context.Context, namespace, name, chan
 		},
 		Data: map[string]string{
 			channelOrdererJoinResultKey: fmt.Sprintf("Status: 200\n{\"channels\":[{\"name\":%q}]}", channelName),
+		},
+	}
+	Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
+}
+
+func createPeerJoinResultConfigMap(ctx context.Context, namespace, name, channelName string) {
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			channelPeerJoinResultKey: fmt.Sprintf("Channels peers has joined:\n%s\n", channelName),
 		},
 	}
 	Expect(k8sClient.Create(ctx, configMap)).To(Succeed())

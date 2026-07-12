@@ -444,7 +444,7 @@ func expectRetainedChannelProofJobs() {
 		"jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{\"\\n\"}{end}",
 	)
 	Expect(jobs).NotTo(ContainSubstring("orderer-join"))
-	Expect(jobs).To(ContainSubstring("peer-join"))
+	Expect(jobs).NotTo(ContainSubstring("peer-join"))
 	Expect(jobs).To(ContainSubstring("anchor-peer-update"))
 }
 
