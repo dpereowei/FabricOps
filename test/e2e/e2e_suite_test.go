@@ -54,6 +54,7 @@ var (
 	repoRoot         string
 	kindBin          string
 	kubectlBin       string
+	fabricopsctlBin  string
 	kindCluster      string
 	managerImage     string
 	nodeImage        string
@@ -87,6 +88,7 @@ var _ = BeforeSuite(func() {
 	repoRoot = mustRepoRoot()
 	kindBin = envOrDefault("KIND", "kind")
 	kubectlBin = envOrDefault("KUBECTL", "kubectl")
+	fabricopsctlBin = filepath.Join(repoRoot, "bin", "fabricopsctl")
 	kindCluster = envOrDefault("KIND_CLUSTER", "fabricops-test-e2e")
 	managerImage = envOrDefault("IMG", "controller:latest")
 	nodeImage = envOrDefault("NODE_SETTLEMENT_IMAGE", nodeSettlementImageDefault)
@@ -110,6 +112,10 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		runCommand(10*time.Minute, "make", "docker-build", "IMG="+managerImage)
 		runCommand(5*time.Minute, kindBin, "load", "docker-image", managerImage, "--name", kindCluster)
 
+		By("building fabricopsctl")
+		runCommand(30*time.Second, "mkdir", "-p", "bin")
+		runCommand(3*time.Minute, "go", "build", "-o", fabricopsctlBin, "./cmd/fabricopsctl")
+
 		By("building and loading the local settlement chaincode images")
 		runCommand(10*time.Minute, "docker", "build", "-t", nodeImage, "-t", nodeUpgradeImage, "config/samples/chaincodes/node_settlement")
 		runCommand(10*time.Minute, "docker", "build", "-t", goImage, "config/samples/chaincodes/go_settlement")
@@ -128,10 +134,13 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		runCommand(2*time.Minute, kubectlBin, "apply", "-k", "config/samples")
 
 		By("waiting for FabricOps to provision the Fabric network")
-		runCommand(25*time.Minute, kubectlBin, "wait", "fabricnetwork/"+sampleName, "-n", sampleNamespace, "--for=condition=Ready", "--timeout=20m")
+		runFabricOpsctl(25*time.Minute, "wait", "-n", sampleNamespace, "--timeout", "20m", sampleName)
 
 		By("invoking and querying the sample Node CCaaS chaincode through BankA and BankB endorsement sets")
 		smokeID := fmt.Sprintf("e2e-%d", time.Now().Unix())
+		invokeAndQuerySettlement(smokeID+"-cli", "createSettlement", "readSettlement", "BankA/peer0", "BankB/peer0")
+
+		By("running the private-data smoke for package and collection wiring")
 		runCommandWithEnv(5*time.Minute, []string{
 			"SMOKE_ID=" + smokeID,
 			"PRIVATE_SMOKE_ENABLED=true",
@@ -151,14 +160,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		expectSampleChaincodeReady("0.0.1", 1, nodeImage, scaledSampleChaincodeTargets())
 
 		By("invoking through the newly joined BankB peer")
-		runCommandWithEnv(5*time.Minute, []string{
-			"JOB_NAME=fabricops-scaled-bankb-peer-smoke",
-			"SMOKE_ID=" + smokeID + "-scale",
-			"PEER_ADDRESSES=peer0.fo-sample-banka.svc.cluster.local:7051,peer1.fo-sample-bankb.svc.cluster.local:7051",
-			"PEER_NAMESPACES=fo-sample-banka,fo-sample-bankb",
-			"PEER_ORG_SLUGS=banka,bankb",
-			"ENDORSEMENT_SETS=1+2",
-		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+		invokeAndQuerySettlement(smokeID+"-scale", "createSettlement", "readSettlement", "BankA/peer0", "BankB/peer1")
 
 		By("scaling BankB back down while retaining peer state")
 		scaledDownGeneration := patchSampleBankBPeerScaleDown()
@@ -181,9 +183,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 
 		By("invoking and querying the upgraded chaincode")
 		upgradeSmokeID := smokeID + "-upgrade"
-		runCommandWithEnv(5*time.Minute, []string{
-			"SMOKE_ID=" + upgradeSmokeID,
-		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+		invokeAndQuerySettlement(upgradeSmokeID, "createSettlement", "readSettlement", "BankA/peer0", "BankB/peer0")
 
 		By("switching the same Fabric chaincode definition to the Go CCaaS sample")
 		goGeneration := patchSampleChaincode("0.0.3", 3, goImage)
@@ -191,12 +191,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		expectSampleChaincodeReady("0.0.3", 3, goImage, baseSampleChaincodeTargets())
 
 		By("invoking and querying the Go CCaaS sample")
-		runCommandWithEnv(5*time.Minute, []string{
-			"JOB_NAME=fabricops-go-settlement-invoke-smoke",
-			"SMOKE_ID=" + smokeID + "-go",
-			"CREATE_FUNCTION=CreateSettlement",
-			"READ_FUNCTION=ReadSettlement",
-		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+		invokeAndQuerySettlement(smokeID+"-go", "CreateSettlement", "ReadSettlement", "BankA/peer0", "BankB/peer0")
 
 		By("switching the same Fabric chaincode definition to the Java CCaaS sample")
 		javaGeneration := patchSampleChaincode("0.0.4", 4, javaImage)
@@ -204,10 +199,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		expectSampleChaincodeReady("0.0.4", 4, javaImage, baseSampleChaincodeTargets())
 
 		By("invoking and querying the Java CCaaS sample")
-		runCommandWithEnv(5*time.Minute, []string{
-			"JOB_NAME=fabricops-java-settlement-invoke-smoke",
-			"SMOKE_ID=" + smokeID + "-java",
-		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+		invokeAndQuerySettlement(smokeID+"-java", "createSettlement", "readSettlement", "BankA/peer0", "BankB/peer0")
 
 		By("confirming cleanup continues after chaincode upgrades without losing channel proof Jobs")
 		expectNoCleanupEligibleSucceededJobs(4 * time.Minute)
@@ -256,6 +248,59 @@ func getFabricNetworkProbe() fabricNetworkProbe {
 	var probe fabricNetworkProbe
 	Expect(json.Unmarshal([]byte(output), &probe)).To(Succeed())
 	return probe
+}
+
+func invokeAndQuerySettlement(smokeID string, createFunction string, readFunction string, peers ...string) {
+	GinkgoHelper()
+
+	invokeArgs := []string{
+		"invoke",
+		"-n", sampleNamespace,
+		"--org", "BankA",
+		"--channel", "settlement",
+		"--chaincode", "settlement",
+		"--function", createFunction,
+		"--args", jsonStringArray(smokeID, "alice", "bob", "100", "USD"),
+		"-o", "json",
+	}
+	for _, peer := range peers {
+		invokeArgs = append(invokeArgs, "--peer", peer)
+	}
+	invokeArgs = append(invokeArgs, sampleName)
+	runFabricOpsctl(5*time.Minute, invokeArgs...)
+
+	for _, peer := range peers {
+		queryArgs := []string{
+			"query",
+			"-n", sampleNamespace,
+			"--org", orgNameFromPeerSelector(peer),
+			"--peer", peer,
+			"--channel", "settlement",
+			"--chaincode", "settlement",
+			"--function", readFunction,
+			"--args", jsonStringArray(smokeID),
+			"-o", "json",
+			sampleName,
+		}
+		output := runFabricOpsctl(5*time.Minute, queryArgs...)
+		Expect(output).To(ContainSubstring(smokeID))
+	}
+}
+
+func jsonStringArray(values ...string) string {
+	GinkgoHelper()
+
+	encoded, err := json.Marshal(values)
+	Expect(err).NotTo(HaveOccurred())
+	return string(encoded)
+}
+
+func orgNameFromPeerSelector(peer string) string {
+	GinkgoHelper()
+
+	parts := strings.SplitN(peer, "/", 2)
+	Expect(parts).To(HaveLen(2), "peer selector must use Org/peer")
+	return parts[0]
 }
 
 func waitForFabricNetworkReadyGeneration(generation int64, timeout time.Duration) {
@@ -496,6 +541,12 @@ func expectSampleChaincodeReady(version string, sequence int32, image string, ta
 
 func runCommand(timeout time.Duration, name string, args ...string) string {
 	return runCommandWithEnv(timeout, nil, name, args...)
+}
+
+func runFabricOpsctl(timeout time.Duration, args ...string) string {
+	GinkgoHelper()
+
+	return runCommand(timeout, fabricopsctlBin, args...)
 }
 
 func runCommandQuiet(timeout time.Duration, name string, args ...string) string {

@@ -103,12 +103,12 @@ short-lived chaincode operation Jobs:
 
 ```bash
 make build-fabricopsctl
-bin/fabricopsctl status fabricnetwork-sample -n default
-bin/fabricopsctl wait fabricnetwork-sample -n default --timeout 20m
-bin/fabricopsctl connection-profile fabricnetwork-sample -n default --org BankA --format yaml
-bin/fabricopsctl query fabricnetwork-sample -n default --org BankA \
+bin/fabricopsctl status -n default fabricnetwork-sample
+bin/fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
+bin/fabricopsctl connection-profile -n default --org BankA --format yaml fabricnetwork-sample
+bin/fabricopsctl query -n default --org BankA \
   --channel settlement --chaincode settlement --function readSettlement \
-  --args '["settlement-001"]'
+  --args '["settlement-001"]' fabricnetwork-sample
 ```
 
 Tools that render or apply FabricOps resources, including a future Fablo
@@ -251,8 +251,14 @@ kind load docker-image controller:latest --name fabricops-packaging
 kubectl apply -f dist/install.yaml
 kubectl rollout status deployment/fabricops-controller-manager -n fabricops-system --timeout=120s
 kubectl apply -k config/samples
-kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
-config/samples/chaincodes/node_settlement/invoke_smoke.sh
+make build-fabricopsctl
+bin/fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
+bin/fabricopsctl invoke -n default --org BankA --peer BankA/peer0 --peer BankB/peer0 \
+  --channel settlement --chaincode settlement --function createSettlement \
+  --args '["demo-001","alice","bob","100","USD"]' fabricnetwork-sample
+bin/fabricopsctl query -n default --org BankA --peer BankA/peer0 \
+  --channel settlement --chaincode settlement --function readSettlement \
+  --args '["demo-001"]' fabricnetwork-sample
 ```
 
 ### Local Helm Install

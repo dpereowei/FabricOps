@@ -51,8 +51,14 @@ make build-installer IMG=controller:latest
 kubectl apply -f dist/install.yaml
 kubectl rollout status deployment/fabricops-controller-manager -n fabricops-system --timeout=120s
 kubectl apply -k config/samples
-kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
-config/samples/chaincodes/node_settlement/invoke_smoke.sh
+make build-fabricopsctl
+bin/fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
+bin/fabricopsctl invoke -n default --org BankA --peer BankA/peer0 --peer BankB/peer0 \
+  --channel settlement --chaincode settlement --function createSettlement \
+  --args '["orbstack-001","alice","bob","100","USD"]' fabricnetwork-sample
+bin/fabricopsctl query -n default --org BankA --peer BankA/peer0 \
+  --channel settlement --chaincode settlement --function readSettlement \
+  --args '["orbstack-001"]' fabricnetwork-sample
 ```
 
 Enable the private-data smoke after loading a Node settlement image that includes the private settlement transactions:
@@ -72,6 +78,6 @@ make cleanup-sample
 The repository has two kind-backed CI smokes:
 
 - `.github/workflows/test-e2e.yml` runs `make test-e2e` against the generated install bundle and the Node, Go, and Java sample chaincodes.
-- `.github/workflows/test-chart.yml` installs the Helm chart, applies the sample network, waits for `Ready=True`, and runs the Node settlement invoke smoke.
+- `.github/workflows/test-chart.yml` installs the Helm chart, applies the sample network, waits for `Ready=True` with `fabricopsctl`, and invokes/queries the Node settlement chaincode with `fabricopsctl`.
 
 The unit/envtest workflow also runs `go mod tidy` and generated-file drift checks before the repository is ready to release.

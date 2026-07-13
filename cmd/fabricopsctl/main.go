@@ -570,12 +570,12 @@ Common flags:
 Examples:
   fabricopsctl status fabricnetwork-sample
   fabricopsctl status -n default -o json fabricnetwork-sample
-  fabricopsctl wait fabricnetwork-sample -n default --timeout 20m
-  fabricopsctl connection-profile fabricnetwork-sample --org BankA --format yaml
-  fabricopsctl connection-profile fabricnetwork-sample --org BankA --format json --out connection-banka.json
-  fabricopsctl query fabricnetwork-sample --org BankA --channel settlement \
-    --chaincode settlement --function readSettlement --args '["id1"]' -o json
-  fabricopsctl invoke fabricnetwork-sample --org BankA --peer BankA/peer0 --peer BankB/peer0 \
+  fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
+  fabricopsctl connection-profile --org BankA --format yaml fabricnetwork-sample
+  fabricopsctl connection-profile --org BankA --format json --out connection-banka.json fabricnetwork-sample
+  fabricopsctl query --org BankA --channel settlement \
+    --chaincode settlement --function readSettlement --args '["id1"]' -o json fabricnetwork-sample
+  fabricopsctl invoke --org BankA --peer BankA/peer0 --peer BankB/peer0 \
     --channel settlement --chaincode settlement --function createSettlement \
-    --args '["id1","alice","bob","100","USD"]'`)
+    --args '["id1","alice","bob","100","USD"]' fabricnetwork-sample`)
 }

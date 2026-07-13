@@ -43,6 +43,7 @@ jobs:
       - name: Prepare fabricops
         run: |
           make docker-build
+          make build-fabricopsctl
           kind load docker-image "${IMG}" --name "${KIND_CLUSTER}"
 
       - name: Install Helm
@@ -82,10 +83,30 @@ jobs:
       - name: Apply sample network
         run: |
           kubectl apply -k config/samples
-          kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
+          bin/fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
 
-      - name: Run Node chaincode invoke smoke
-        run: config/samples/chaincodes/node_settlement/invoke_smoke.sh
+      - name: Invoke and query with fabricopsctl
+        run: |
+          settlement_id="chart-$(date +%s)"
+          bin/fabricopsctl invoke -n default \
+            --org BankA \
+            --peer BankA/peer0 \
+            --peer BankB/peer0 \
+            --channel settlement \
+            --chaincode settlement \
+            --function createSettlement \
+            --args "[\"${settlement_id}\",\"alice\",\"bob\",\"100\",\"USD\"]" \
+            -o json \
+            fabricnetwork-sample
+          bin/fabricopsctl query -n default \
+            --org BankA \
+            --peer BankA/peer0 \
+            --channel settlement \
+            --chaincode settlement \
+            --function readSettlement \
+            --args "[\"${settlement_id}\"]" \
+            -o json \
+            fabricnetwork-sample
 
       - name: Cleanup kind cluster
         if: always()
