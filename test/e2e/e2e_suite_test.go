@@ -40,19 +40,44 @@ const (
 	managerName                       = "fabricops-controller-manager"
 	sampleName                        = "fabricnetwork-sample"
 	sampleNamespace                   = "default"
+	succeededJobCleanupAnnotation     = "fabricops.io/succeeded-job-cleanup"
+	fabricNetworkLabel                = "fabricops.io/fabricnetwork"
+	fabricNetworkNamespaceLabel       = "fabricops.io/fabricnetwork-namespace"
+	fastCleanupTTLSeconds             = int32(10)
 	nodeSettlementImageDefault        = "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0"
 	nodeSettlementUpgradeImageDefault = "ghcr.io/dpereowei/fabricops-node-settlement:0.2.0"
+	goSettlementImageDefault          = "ghcr.io/dpereowei/fabricops-go-settlement:0.1.0"
+	javaSettlementImageDefault        = "ghcr.io/dpereowei/fabricops-java-settlement:0.1.0"
 )
 
 var (
 	repoRoot         string
 	kindBin          string
 	kubectlBin       string
+	fabricopsctlBin  string
 	kindCluster      string
 	managerImage     string
 	nodeImage        string
 	nodeUpgradeImage string
+	goImage          string
+	javaImage        string
 )
+
+type sampleChaincodeTarget struct {
+	namespace string
+	name      string
+	orgName   string
+	peerName  string
+}
+
+type namespacedName struct {
+	namespace string
+	name      string
+}
+
+func (item namespacedName) String() string {
+	return item.namespace + "/" + item.name
+}
 
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -63,10 +88,13 @@ var _ = BeforeSuite(func() {
 	repoRoot = mustRepoRoot()
 	kindBin = envOrDefault("KIND", "kind")
 	kubectlBin = envOrDefault("KUBECTL", "kubectl")
+	fabricopsctlBin = filepath.Join(repoRoot, "bin", "fabricopsctl")
 	kindCluster = envOrDefault("KIND_CLUSTER", "fabricops-test-e2e")
 	managerImage = envOrDefault("IMG", "controller:latest")
 	nodeImage = envOrDefault("NODE_SETTLEMENT_IMAGE", nodeSettlementImageDefault)
 	nodeUpgradeImage = envOrDefault("NODE_SETTLEMENT_UPGRADE_IMAGE", nodeSettlementUpgradeImageDefault)
+	goImage = envOrDefault("GO_SETTLEMENT_IMAGE", goSettlementImageDefault)
+	javaImage = envOrDefault("JAVA_SETTLEMENT_IMAGE", javaSettlementImageDefault)
 })
 
 var _ = Describe("Kind bundle install", Ordered, func() {
@@ -76,7 +104,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		}
 	})
 
-	It("reconciles the sample network and invokes the Node CCaaS chaincode", func() {
+	It("reconciles the sample network and invokes the Node, Go, and Java CCaaS chaincodes", func() {
 		By("using the target kind context")
 		runCommand(30*time.Second, kubectlBin, "config", "use-context", "kind-"+kindCluster)
 
@@ -84,10 +112,18 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		runCommand(10*time.Minute, "make", "docker-build", "IMG="+managerImage)
 		runCommand(5*time.Minute, kindBin, "load", "docker-image", managerImage, "--name", kindCluster)
 
-		By("building and loading the local Node settlement chaincode images")
+		By("building fabricopsctl")
+		runCommand(30*time.Second, "mkdir", "-p", "bin")
+		runCommand(3*time.Minute, "go", "build", "-o", fabricopsctlBin, "./cmd/fabricopsctl")
+
+		By("building and loading the local settlement chaincode images")
 		runCommand(10*time.Minute, "docker", "build", "-t", nodeImage, "-t", nodeUpgradeImage, "config/samples/chaincodes/node_settlement")
+		runCommand(10*time.Minute, "docker", "build", "-t", goImage, "config/samples/chaincodes/go_settlement")
+		runCommand(10*time.Minute, "docker", "build", "-t", javaImage, "config/samples/chaincodes/java_settlement")
 		runCommand(5*time.Minute, kindBin, "load", "docker-image", nodeImage, "--name", kindCluster)
 		runCommand(5*time.Minute, kindBin, "load", "docker-image", nodeUpgradeImage, "--name", kindCluster)
+		runCommand(5*time.Minute, kindBin, "load", "docker-image", goImage, "--name", kindCluster)
+		runCommand(5*time.Minute, kindBin, "load", "docker-image", javaImage, "--name", kindCluster)
 
 		By("generating and applying the install bundle")
 		runCommand(5*time.Minute, "make", "build-installer", "IMG="+managerImage)
@@ -98,64 +134,76 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		runCommand(2*time.Minute, kubectlBin, "apply", "-k", "config/samples")
 
 		By("waiting for FabricOps to provision the Fabric network")
-		runCommand(25*time.Minute, kubectlBin, "wait", "fabricnetwork/"+sampleName, "-n", sampleNamespace, "--for=condition=Ready", "--timeout=20m")
+		runFabricOpsctl(25*time.Minute, "wait", "-n", sampleNamespace, "--timeout", "20m", sampleName)
 
 		By("invoking and querying the sample Node CCaaS chaincode through BankA and BankB endorsement sets")
 		smokeID := fmt.Sprintf("e2e-%d", time.Now().Unix())
+		invokeAndQuerySettlement(smokeID+"-cli", "createSettlement", "readSettlement", "BankA/peer0", "BankB/peer0")
+
+		By("running the private-data smoke for package and collection wiring")
 		runCommandWithEnv(5*time.Minute, []string{
 			"SMOKE_ID=" + smokeID,
 			"PRIVATE_SMOKE_ENABLED=true",
 		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+
+		By("proving successful output-backed helper Jobs and pods are cleaned up after the sample cleanup window")
+		cleanupCandidates := cleanupEligibleSucceededJobs()
+		Expect(cleanupCandidates).NotTo(BeEmpty())
+		cleanupGeneration := patchSampleSucceededJobCleanupTTL(fastCleanupTTLSeconds)
+		waitForFabricNetworkReadyGeneration(cleanupGeneration, 25*time.Minute)
+		expectCleanupEligibleSucceededJobsRemoved(cleanupCandidates, 4*time.Minute)
+		expectRetainedChannelProofJobs()
+
+		By("scaling BankB with a new explicit channel peer")
+		scaledGeneration := patchSampleBankBPeerScaleUp()
+		waitForFabricNetworkReadyGeneration(scaledGeneration, 25*time.Minute)
+		expectSampleChaincodeReady("0.0.1", 1, nodeImage, scaledSampleChaincodeTargets())
+
+		By("invoking through the newly joined BankB peer")
+		invokeAndQuerySettlement(smokeID+"-scale", "createSettlement", "readSettlement", "BankA/peer0", "BankB/peer1")
+
+		By("scaling BankB back down while retaining peer state")
+		scaledDownGeneration := patchSampleBankBPeerScaleDown()
+		waitForFabricNetworkReadyGeneration(scaledDownGeneration, 25*time.Minute)
+		expectSampleChaincodeReady("0.0.1", 1, nodeImage, baseSampleChaincodeTargets())
+		expectSampleBankBPeer1ScaledDown()
 
 		status := runCommand(30*time.Second, kubectlBin, "get", "fabricnetwork", sampleName, "-n", sampleNamespace, "-o", "jsonpath={.status.phase}{\"\\n\"}{range .status.conditions[*]}{.type}={.status} {.reason}{\"\\n\"}{end}")
 		Expect(status).To(ContainSubstring("Ready\n"))
 		Expect(status).To(ContainSubstring("Ready=True FabricNetworkReady"))
 
 		By("upgrading the sample chaincode declaratively")
-		patch := fmt.Sprintf(
-			`[{"op":"replace","path":"/spec/chaincodes/0/version","value":"0.0.2"},{"op":"replace","path":"/spec/chaincodes/0/sequence","value":2},{"op":"replace","path":"/spec/chaincodes/0/image","value":%q}]`,
-			nodeUpgradeImage,
-		)
-		runCommand(2*time.Minute, kubectlBin, "patch", "fabricnetwork", sampleName, "-n", sampleNamespace, "--type=json", "-p", patch)
-		upgradedGeneration := getFabricNetworkProbe().Metadata.Generation
+		upgradedGeneration := patchSampleChaincode("0.0.2", 2, nodeUpgradeImage)
 
 		By("waiting for FabricOps to complete the chaincode upgrade")
 		waitForFabricNetworkReadyGeneration(upgradedGeneration, 25*time.Minute)
 
 		By("verifying the upgraded chaincode status and workload image")
-		upgraded := getFabricNetworkProbe()
-		Expect(upgraded.Status.ChaincodeStatus).To(HaveLen(1))
-		Expect(upgraded.Status.ChaincodeStatus[0].Version).To(Equal("0.0.2"))
-		Expect(upgraded.Status.ChaincodeStatus[0].Sequence).To(Equal(int32(2)))
-		Expect(upgraded.Status.ChaincodeStatus[0].PackageLabel).To(Equal("settlement_settlement_0.0.2"))
-		Expect(upgraded.Status.ChaincodeStatus[0].Ready).To(BeTrue())
-		for _, item := range []struct {
-			namespace string
-			name      string
-		}{
-			{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer0-ccaas"},
-			{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer1-ccaas"},
-			{namespace: "fo-sample-bankb", name: "settlement-settlement-bankb-peer0-ccaas"},
-		} {
-			image := strings.TrimSpace(runCommand(
-				30*time.Second,
-				kubectlBin,
-				"get",
-				"deployment",
-				item.name,
-				"-n",
-				item.namespace,
-				"-o",
-				"jsonpath={.spec.template.spec.containers[?(@.name==\"chaincode\")].image}",
-			))
-			Expect(image).To(Equal(nodeUpgradeImage))
-		}
+		expectSampleChaincodeReady("0.0.2", 2, nodeUpgradeImage, baseSampleChaincodeTargets())
 
 		By("invoking and querying the upgraded chaincode")
 		upgradeSmokeID := smokeID + "-upgrade"
-		runCommandWithEnv(5*time.Minute, []string{
-			"SMOKE_ID=" + upgradeSmokeID,
-		}, "config/samples/chaincodes/node_settlement/invoke_smoke.sh")
+		invokeAndQuerySettlement(upgradeSmokeID, "createSettlement", "readSettlement", "BankA/peer0", "BankB/peer0")
+
+		By("switching the same Fabric chaincode definition to the Go CCaaS sample")
+		goGeneration := patchSampleChaincode("0.0.3", 3, goImage)
+		waitForFabricNetworkReadyGeneration(goGeneration, 25*time.Minute)
+		expectSampleChaincodeReady("0.0.3", 3, goImage, baseSampleChaincodeTargets())
+
+		By("invoking and querying the Go CCaaS sample")
+		invokeAndQuerySettlement(smokeID+"-go", "CreateSettlement", "ReadSettlement", "BankA/peer0", "BankB/peer0")
+
+		By("switching the same Fabric chaincode definition to the Java CCaaS sample")
+		javaGeneration := patchSampleChaincode("0.0.4", 4, javaImage)
+		waitForFabricNetworkReadyGeneration(javaGeneration, 25*time.Minute)
+		expectSampleChaincodeReady("0.0.4", 4, javaImage, baseSampleChaincodeTargets())
+
+		By("invoking and querying the Java CCaaS sample")
+		invokeAndQuerySettlement(smokeID+"-java", "createSettlement", "readSettlement", "BankA/peer0", "BankB/peer0")
+
+		By("confirming cleanup continues after chaincode upgrades without losing channel proof Jobs")
+		expectNoCleanupEligibleSucceededJobs(4 * time.Minute)
+		expectRetainedChannelProofJobs()
 	})
 })
 
@@ -177,6 +225,18 @@ type fabricNetworkProbe struct {
 			PackageLabel string `json:"packageLabel"`
 			Sequence     int32  `json:"sequence"`
 			Ready        bool   `json:"ready"`
+			Workloads    struct {
+				Desired int32 `json:"desired"`
+				Ready   int32 `json:"ready"`
+			} `json:"workloads"`
+			Targets []struct {
+				OrgName       string `json:"orgName"`
+				Namespace     string `json:"namespace"`
+				PeerName      string `json:"peerName"`
+				WorkloadName  string `json:"workloadName"`
+				Installed     bool   `json:"installed"`
+				WorkloadReady bool   `json:"workloadReady"`
+			} `json:"targets"`
 		} `json:"chaincodeStatus"`
 	} `json:"status"`
 }
@@ -184,10 +244,63 @@ type fabricNetworkProbe struct {
 func getFabricNetworkProbe() fabricNetworkProbe {
 	GinkgoHelper()
 
-	output := runCommand(30*time.Second, kubectlBin, "get", "fabricnetwork", sampleName, "-n", sampleNamespace, "-o", "json")
+	output := runCommandQuiet(30*time.Second, kubectlBin, "get", "fabricnetwork", sampleName, "-n", sampleNamespace, "-o", "json")
 	var probe fabricNetworkProbe
 	Expect(json.Unmarshal([]byte(output), &probe)).To(Succeed())
 	return probe
+}
+
+func invokeAndQuerySettlement(smokeID string, createFunction string, readFunction string, peers ...string) {
+	GinkgoHelper()
+
+	invokeArgs := []string{
+		"invoke",
+		"-n", sampleNamespace,
+		"--org", "BankA",
+		"--channel", "settlement",
+		"--chaincode", "settlement",
+		"--function", createFunction,
+		"--args", jsonStringArray(smokeID, "alice", "bob", "100", "USD"),
+		"-o", "json",
+	}
+	for _, peer := range peers {
+		invokeArgs = append(invokeArgs, "--peer", peer)
+	}
+	invokeArgs = append(invokeArgs, sampleName)
+	runFabricOpsctl(5*time.Minute, invokeArgs...)
+
+	for _, peer := range peers {
+		queryArgs := []string{
+			"query",
+			"-n", sampleNamespace,
+			"--org", orgNameFromPeerSelector(peer),
+			"--peer", peer,
+			"--channel", "settlement",
+			"--chaincode", "settlement",
+			"--function", readFunction,
+			"--args", jsonStringArray(smokeID),
+			"-o", "json",
+			sampleName,
+		}
+		output := runFabricOpsctl(5*time.Minute, queryArgs...)
+		Expect(output).To(ContainSubstring(smokeID))
+	}
+}
+
+func jsonStringArray(values ...string) string {
+	GinkgoHelper()
+
+	encoded, err := json.Marshal(values)
+	Expect(err).NotTo(HaveOccurred())
+	return string(encoded)
+}
+
+func orgNameFromPeerSelector(peer string) string {
+	GinkgoHelper()
+
+	parts := strings.SplitN(peer, "/", 2)
+	Expect(parts).To(HaveLen(2), "peer selector must use Org/peer")
+	return parts[0]
 }
 
 func waitForFabricNetworkReadyGeneration(generation int64, timeout time.Duration) {
@@ -208,11 +321,268 @@ func waitForFabricNetworkReadyGeneration(generation int64, timeout time.Duration
 	}, timeout, 10*time.Second).Should(Succeed())
 }
 
+func patchSampleChaincode(version string, sequence int32, image string) int64 {
+	GinkgoHelper()
+
+	patch := fmt.Sprintf(
+		`[{"op":"replace","path":"/spec/chaincodes/0/version","value":%q},{"op":"replace","path":"/spec/chaincodes/0/sequence","value":%d},{"op":"replace","path":"/spec/chaincodes/0/image","value":%q}]`,
+		version,
+		sequence,
+		image,
+	)
+	runCommand(2*time.Minute, kubectlBin, "patch", "fabricnetwork", sampleName, "-n", sampleNamespace, "--type=json", "-p", patch)
+	return getFabricNetworkProbe().Metadata.Generation
+}
+
+func patchSampleSucceededJobCleanupTTL(seconds int32) int64 {
+	GinkgoHelper()
+
+	patch := fmt.Sprintf(
+		`[{"op":"replace","path":"/spec/global/jobs/succeededHistoryTTLSeconds","value":%d}]`,
+		seconds,
+	)
+	runCommand(2*time.Minute, kubectlBin, "patch", "fabricnetwork", sampleName, "-n", sampleNamespace, "--type=json", "-p", patch)
+	return getFabricNetworkProbe().Metadata.Generation
+}
+
+func patchSampleBankBPeerScaleUp() int64 {
+	GinkgoHelper()
+
+	patch := `[` +
+		`{"op":"replace","path":"/spec/orgs/2/peer/instances","value":2},` +
+		`{"op":"add","path":"/spec/channels/0/orgs/1/peers/-","value":"peer1"},` +
+		`{"op":"add","path":"/spec/channels/1/orgs/1/peers/-","value":"peer1"}` +
+		`]`
+	runCommand(2*time.Minute, kubectlBin, "patch", "fabricnetwork", sampleName, "-n", sampleNamespace, "--type=json", "-p", patch)
+	return getFabricNetworkProbe().Metadata.Generation
+}
+
+func patchSampleBankBPeerScaleDown() int64 {
+	GinkgoHelper()
+
+	patch := `[` +
+		`{"op":"replace","path":"/spec/orgs/2/peer/instances","value":1},` +
+		`{"op":"remove","path":"/spec/channels/0/orgs/1/peers/1"},` +
+		`{"op":"remove","path":"/spec/channels/1/orgs/1/peers/1"}` +
+		`]`
+	runCommand(2*time.Minute, kubectlBin, "patch", "fabricnetwork", sampleName, "-n", sampleNamespace, "--type=json", "-p", patch)
+	return getFabricNetworkProbe().Metadata.Generation
+}
+
+func baseSampleChaincodeTargets() []sampleChaincodeTarget {
+	return []sampleChaincodeTarget{
+		{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer0-ccaas", orgName: "BankA", peerName: "peer0"},
+		{namespace: "fo-sample-banka", name: "settlement-settlement-banka-peer1-ccaas", orgName: "BankA", peerName: "peer1"},
+		{namespace: "fo-sample-bankb", name: "settlement-settlement-bankb-peer0-ccaas", orgName: "BankB", peerName: "peer0"},
+	}
+}
+
+func scaledSampleChaincodeTargets() []sampleChaincodeTarget {
+	targets := baseSampleChaincodeTargets()
+	targets = append(targets, sampleChaincodeTarget{
+		namespace: "fo-sample-bankb",
+		name:      "settlement-settlement-bankb-peer1-ccaas",
+		orgName:   "BankB",
+		peerName:  "peer1",
+	})
+	return targets
+}
+
+func expectSampleBankBPeer1ScaledDown() {
+	GinkgoHelper()
+
+	runCommand(30*time.Second, kubectlBin, "get", "pvc", "peer1-data", "-n", "fo-sample-bankb")
+	expectCommandFailure(30*time.Second, kubectlBin, "get", "deployment", "peer1", "-n", "fo-sample-bankb")
+	expectCommandFailure(30*time.Second, kubectlBin, "get", "service", "peer1", "-n", "fo-sample-bankb")
+	expectCommandFailure(30*time.Second, kubectlBin, "get", "service", "peer1-operations", "-n", "fo-sample-bankb")
+	expectCommandFailure(30*time.Second, kubectlBin, "get", "deployment", "settlement-settlement-bankb-peer1-ccaas", "-n", "fo-sample-bankb")
+	expectCommandFailure(30*time.Second, kubectlBin, "get", "service", "settlement-settlement-bankb-peer1-ccaas", "-n", "fo-sample-bankb")
+}
+
+type kubernetesJobList struct {
+	Items []struct {
+		Metadata struct {
+			Name        string            `json:"name"`
+			Namespace   string            `json:"namespace"`
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+		Status struct {
+			Succeeded int32 `json:"succeeded"`
+		} `json:"status"`
+	} `json:"items"`
+}
+
+func cleanupEligibleSucceededJobs() []namespacedName {
+	GinkgoHelper()
+
+	output := runCommandQuiet(
+		30*time.Second,
+		kubectlBin,
+		"get",
+		"jobs",
+		"-A",
+		"-l",
+		fabricNetworkLabel+"="+sampleName+","+fabricNetworkNamespaceLabel+"="+sampleNamespace,
+		"-o",
+		"json",
+	)
+	var jobs kubernetesJobList
+	Expect(json.Unmarshal([]byte(output), &jobs)).To(Succeed())
+
+	var names []namespacedName
+	for _, job := range jobs.Items {
+		if job.Status.Succeeded < 1 || job.Metadata.Annotations[succeededJobCleanupAnnotation] != "true" {
+			continue
+		}
+		names = append(names, namespacedName{
+			namespace: job.Metadata.Namespace,
+			name:      job.Metadata.Name,
+		})
+	}
+	return names
+}
+
+func expectCleanupEligibleSucceededJobsRemoved(candidates []namespacedName, timeout time.Duration) {
+	GinkgoHelper()
+
+	expectNoCleanupEligibleSucceededJobs(timeout)
+	Eventually(func(g Gomega) {
+		for _, job := range candidates {
+			output := runCommandQuiet(
+				30*time.Second,
+				kubectlBin,
+				"get",
+				"pods",
+				"-n",
+				job.namespace,
+				"-l",
+				"job-name="+job.name,
+				"-o",
+				"jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+			)
+			g.Expect(strings.TrimSpace(output)).To(BeEmpty(), "expected cleanup to remove pods for %s", job.String())
+		}
+	}, timeout, 5*time.Second).Should(Succeed())
+}
+
+func expectNoCleanupEligibleSucceededJobs(timeout time.Duration) {
+	GinkgoHelper()
+
+	Eventually(func(g Gomega) {
+		jobs := cleanupEligibleSucceededJobs()
+		g.Expect(jobNames(jobs)).To(BeEmpty())
+	}, timeout, 5*time.Second).Should(Succeed())
+}
+
+func expectRetainedChannelProofJobs() {
+	GinkgoHelper()
+
+	jobs := runCommand(
+		30*time.Second,
+		kubectlBin,
+		"get",
+		"jobs",
+		"-A",
+		"-l",
+		fabricNetworkLabel+"="+sampleName+","+fabricNetworkNamespaceLabel+"="+sampleNamespace,
+		"-o",
+		"jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name}{\"\\n\"}{end}",
+	)
+	Expect(jobs).NotTo(ContainSubstring("orderer-join"))
+	Expect(jobs).NotTo(ContainSubstring("peer-join"))
+	Expect(jobs).NotTo(ContainSubstring("anchor-peer-update"))
+	Expect(strings.TrimSpace(jobs)).To(BeEmpty())
+}
+
+func jobNames(items []namespacedName) []string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		names = append(names, item.String())
+	}
+	return names
+}
+
+func expectSampleChaincodeReady(version string, sequence int32, image string, targets []sampleChaincodeTarget) {
+	GinkgoHelper()
+
+	probe := getFabricNetworkProbe()
+	Expect(probe.Status.ChaincodeStatus).To(HaveLen(1))
+	Expect(probe.Status.ChaincodeStatus[0].Version).To(Equal(version))
+	Expect(probe.Status.ChaincodeStatus[0].Sequence).To(Equal(sequence))
+	Expect(probe.Status.ChaincodeStatus[0].PackageLabel).To(Equal("settlement_settlement_" + version))
+	Expect(probe.Status.ChaincodeStatus[0].Ready).To(BeTrue())
+	Expect(probe.Status.ChaincodeStatus[0].Workloads.Desired).To(Equal(int32(len(targets))))
+	Expect(probe.Status.ChaincodeStatus[0].Workloads.Ready).To(Equal(int32(len(targets))))
+	Expect(probe.Status.ChaincodeStatus[0].Targets).To(HaveLen(len(targets)))
+
+	for _, item := range targets {
+		Expect(probe.Status.ChaincodeStatus[0].Targets).To(ContainElement(SatisfyAll(
+			HaveField("OrgName", item.orgName),
+			HaveField("Namespace", item.namespace),
+			HaveField("PeerName", item.peerName),
+			HaveField("WorkloadName", item.name),
+			HaveField("Installed", true),
+			HaveField("WorkloadReady", true),
+		)))
+		deploymentImage := strings.TrimSpace(runCommand(
+			30*time.Second,
+			kubectlBin,
+			"get",
+			"deployment",
+			item.name,
+			"-n",
+			item.namespace,
+			"-o",
+			"jsonpath={.spec.template.spec.containers[?(@.name==\"chaincode\")].image}",
+		))
+		Expect(deploymentImage).To(Equal(image))
+	}
+}
+
 func runCommand(timeout time.Duration, name string, args ...string) string {
 	return runCommandWithEnv(timeout, nil, name, args...)
 }
 
+func runFabricOpsctl(timeout time.Duration, args ...string) string {
+	GinkgoHelper()
+
+	return runCommand(timeout, fabricopsctlBin, args...)
+}
+
+func runCommandQuiet(timeout time.Duration, name string, args ...string) string {
+	return runCommandWithEnvAndLogging(timeout, nil, false, name, args...)
+}
+
+func expectCommandFailure(timeout time.Duration, name string, args ...string) string {
+	GinkgoHelper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = repoRoot
+	cmd.Env = os.Environ()
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	commandLine := strings.Join(append([]string{name}, args...), " ")
+	err := cmd.Run()
+	text := output.String()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		Fail(fmt.Sprintf("command timed out after %s: %s\n%s", timeout, commandLine, text))
+	}
+	Expect(err).To(HaveOccurred(), "expected command to fail: %s\n%s", commandLine, text)
+	return text
+}
+
 func runCommandWithEnv(timeout time.Duration, extraEnv []string, name string, args ...string) string {
+	return runCommandWithEnvAndLogging(timeout, extraEnv, true, name, args...)
+}
+
+func runCommandWithEnvAndLogging(timeout time.Duration, extraEnv []string, logOutput bool, name string, args ...string) string {
 	GinkgoHelper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -227,18 +597,32 @@ func runCommandWithEnv(timeout time.Duration, extraEnv []string, name string, ar
 	cmd.Stderr = &output
 
 	commandLine := strings.Join(append([]string{name}, args...), " ")
-	fmt.Fprintf(GinkgoWriter, "\n$ %s\n", commandLine)
+	if logOutput {
+		fmt.Fprintf(GinkgoWriter, "\n$ %s\n", commandLine)
+	}
 
 	err := cmd.Run()
 	text := output.String()
-	if text != "" {
+	if logOutput && text != "" {
 		fmt.Fprintln(GinkgoWriter, text)
 	}
 
 	if ctx.Err() == context.DeadlineExceeded {
+		if !logOutput {
+			fmt.Fprintf(GinkgoWriter, "\n$ %s\n", commandLine)
+			if text != "" {
+				fmt.Fprintln(GinkgoWriter, text)
+			}
+		}
 		Fail(fmt.Sprintf("command timed out after %s: %s\n%s", timeout, commandLine, text))
 	}
 
+	if err != nil && !logOutput {
+		fmt.Fprintf(GinkgoWriter, "\n$ %s\n", commandLine)
+		if text != "" {
+			fmt.Fprintln(GinkgoWriter, text)
+		}
+	}
 	Expect(err).NotTo(HaveOccurred(), "command failed: %s\n%s", commandLine, text)
 	return text
 }

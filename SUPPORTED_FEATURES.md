@@ -10,14 +10,15 @@ The `Fablo v2` and `Fablo v3` columns describe upstream Fablo support for
 Hyperledger Fabric 2.5.x and 3.1.x. The `FabricOps status` column describes the
 current operator implementation in this repository.
 
-CI test links are intentionally empty for now. Fill them only after a feature
-has repeatable CI or e2e coverage in this repository.
+The `CI tests` column may stay empty until a stable per-feature workflow link
+exists. Feature notes call out kind e2e, Helm smoke, or envtest coverage when
+that proof is already present.
 
 ## Status legend
 
 | Status | Meaning |
 |--------|---------|
-| Supported | Implemented in FabricOps and validated through envtest, OrbStack smoke, or both |
+| Supported | Implemented in FabricOps and validated through envtest, kind e2e, Helm smoke, OrbStack smoke, or focused build tests |
 | Partial | Some support exists, but the behavior is incomplete or not broadly validated |
 | Planned | Target feature, not implemented yet |
 | Not applicable | Fablo feature does not map directly to the Kubernetes operator model |
@@ -28,7 +29,7 @@ has repeatable CI or e2e coverage in this repository.
 | Project | Fabric v2 baseline | Fabric v3 baseline | Notes |
 |---------|--------------------|--------------------|-------|
 | Fablo reference | 2.5.12 | 3.1.0 | Upstream Fablo supported-features baseline |
-| FabricOps | Not validated yet | 3.1.0 | Current OrbStack sample smoke uses Fabric `3.1.0`; the operator accepts `spec.global.fabricVersion` |
+| FabricOps | Not validated yet | 3.1.0 | Current kind and Helm smokes use Fabric `3.1.0`; the operator accepts `spec.global.fabricVersion` |
 
 ## FabricOps operator features
 
@@ -42,6 +43,7 @@ has repeatable CI or e2e coverage in this repository.
 | MSP/TLS Secret validation | n/a | n/a | Supported | | | Invalid or missing material is surfaced in status |
 | Persistent data for CAs/orderers/peers | n/a | n/a | Supported | README | | One PVC per Fabric component instance |
 | Resource request/limit defaults | n/a | n/a | Supported | README | | Applies to Fabric workloads and helper Jobs |
+| Succeeded helper Job cleanup | n/a | n/a | Supported | API | | Opt-in `spec.global.jobs.succeededHistoryTTLSeconds` cleans completed output-backed enrollment, channel block, orderer join, peer join, anchor peer update, and chaincode lifecycle Jobs while retaining failures |
 | Status conditions | n/a | n/a | Supported | README | | `Ready`, `IdentityMaterialReady`, `ChannelsReady`, and `ObservabilityReady` |
 | Endpoint discovery status | n/a | n/a | Supported | README, API | | Org status exposes CA, orderer, peer, chaincode, and operations endpoint addresses |
 | Kubernetes Events | n/a | n/a | Supported | | | Ready and failure transitions emit events |
@@ -64,6 +66,8 @@ has repeatable CI or e2e coverage in this repository.
 | TLS | yes | yes | Supported | README | | Workload TLS and orderer admin TLS are enabled when `spec.global.tls=true` |
 | Orderer groups | no | no | Partial | README | | CRD models groups; one group is validated in the sample |
 | Peer dev mode | yes | no | Planned | | | Kubernetes workflow still undecided |
+| Post-bootstrap peer scale-up | n/a | n/a | Supported | samples | | Kind e2e patches a ready network to add a new peer, joins it to declared channels, installs CCaaS packages, and invokes through the new peer |
+| Safe peer scale-down | n/a | n/a | Supported | samples | | Removes stale peer and peer-specific CCaaS workload surfaces while retaining peer PVCs and identity material |
 | Peer DB - LevelDB | yes | yes | Supported | | | Default Fabric peer state database path; explicitly documented support still needed |
 | Peer DB - CouchDB | yes | yes | Planned | | | `spec.orgs[].peer.db` exists but CouchDB sidecars/services are not wired yet |
 | CA DB - SQLite | yes | yes | Supported | README | | Fabric CA default path used by current workloads |
@@ -85,24 +89,26 @@ has repeatable CI or e2e coverage in this repository.
 | Channel readiness status | n/a | n/a | Supported | README | | `.status.channelStatus` and `ChannelsReady` |
 | Multiple channels | yes | yes | Supported | samples | | The sample declares `settlement` and `audit`; kind e2e waits for all declared channels through `Ready=True` |
 | Channel query scripts | yes | yes | Planned | | | Dedicated channel query helper scripts are not implemented yet |
+| Channel config updates beyond anchor peers | yes | yes | Planned | | | Anchor peer updates are supported; broader config updates such as org membership changes need a dedicated flow |
 
 ## Chaincodes
 
 | Feature | Fablo v2 | Fablo v3 | FabricOps status | Documented | CI tests | Notes |
 |---------|----------|----------|------------------|------------|----------|-------|
 | Node chaincode | yes | yes | Supported | README, samples | | Node CCaaS sample image is invoked successfully in kind e2e |
-| Go chaincode | yes | yes | Supported | samples | | Go CCaaS sample image is invoked successfully in OrbStack |
-| Java chaincode | yes | yes | Supported | samples | | Java CCaaS sample image is invoked successfully in OrbStack |
+| Go chaincode | yes | yes | Supported | samples | | Go CCaaS sample image is built, installed, committed, and invoked successfully in kind e2e |
+| Java chaincode | yes | yes | Supported | samples | | Java CCaaS sample image is built, installed, committed, and invoked successfully in kind e2e |
 | Chaincode-as-a-Service (CCaaS) | yes | yes | Supported | README, samples | | Package metadata, install, approve, commit, and workloads are reconciled |
 | CCaaS hot reload | yes | yes | Planned | | | Not modelled yet |
 | Endorsement policies | yes | yes | Supported | samples | | `AND(...)` is validated by kind e2e; topology validation catches unknown, malformed, and outside-channel MSP references |
 | Multi-org endorsements | yes | yes | Supported | samples | | Kind e2e invokes through BankA+BankB endorsement sets and queries both orgs |
 | Private data collections | yes | yes | Supported | docs/private-data-collections.md, samples | | Kind e2e writes private data with transient input, confirms BankA can read it, confirms BankB cannot read the payload, and confirms BankB can query the private data hash |
 | CouchDB index packaging | yes | yes | Supported | API, samples | | Public and private-collection JSON indexes are packaged with CCaaS install archives |
-| Chaincode scripts: invoke/query | yes | yes | Partial | samples | | Node/Go/Java invoke smoke exists; list/query utilities are not generalized yet |
+| Chaincode scripts: invoke/query | yes | yes | Supported | README, samples | | `fabricopsctl invoke/query` creates short-lived Fabric tools Jobs; the sample smoke invokes Node, Go, and Java CCaaS runtimes |
 | Chaincode scripts: list | yes | yes | Planned | | | Not implemented |
 | Chaincode install/upgrade commands | yes | yes | Supported | samples | | Kind e2e proves install/approve/commit, version+sequence upgrade, workload rollout, and post-upgrade invoke/query |
 | Chaincode init-required lifecycle | yes | yes | Partial | API | | `initRequired` field exists; init flow is not smoke validated |
+| State-based endorsement | n/a | n/a | Planned | | | Fabric-level feature; API shape and safe operation model still need study |
 
 ## Tools
 
@@ -110,7 +116,7 @@ has repeatable CI or e2e coverage in this repository.
 |---------|----------|----------|------------------|------------|----------|-------|
 | Fablo REST | yes | yes | Planned | | | Could become a Kubernetes-native gateway/helper workload later |
 | Explorer | yes | no | Planned | | | Not implemented |
-| Gateway client helper | n/a | n/a | Partial | README | | `fabricopsctl` can read status and generated connection profiles; invoke/query helpers are not implemented yet |
+| Gateway client helper | n/a | n/a | Partial | README | | `fabricopsctl` can wait for readiness, read status, export generated connection profiles, and run invoke/query helper Jobs; SDK-specific Gateway wrappers are not implemented |
 | Connection profiles | yes | yes | Supported | README, API | | Per-peer-org ConfigMaps contain JSON/YAML in-cluster Gateway/client profiles and status exposes the ConfigMap name |
 | Export network topology to Mermaid | yes | yes | Planned | | | Not implemented |
 | Other `init` options | n/a | n/a | Planned | | | Not implemented |
@@ -120,11 +126,11 @@ has repeatable CI or e2e coverage in this repository.
 | Fablo command feature | Fablo v2 | Fablo v3 | FabricOps status | Documented | CI tests | Notes |
 |-----------------------|----------|----------|------------------|------------|----------|-------|
 | `generate` | yes | yes | Partial | README | | Operator generates channel config, channel blocks, and CCaaS packages during reconciliation |
-| `up` | yes | yes | Partial | README | | Local flow is `make install`, `make run`, `kubectl apply -k config/samples`; packaged install is pending |
+| `up` | yes | yes | Partial | README | | Install bundle and Helm chart are supported; `fabricopsctl wait` can watch a generated `FabricNetwork`, but FabricOps does not provide a single Fablo-style `up` command |
 | `start`, `stop`, `restart` | yes | yes | Planned | | | Workload lifecycle operations are not exposed as commands |
 | `down`, `reset` | yes | yes | Partial | README | | Deleting a `FabricNetwork` cleans owned namespaces; reset semantics are not modelled |
 | `prune`, `recreate` | yes | yes | Planned | | | Not implemented |
-| `validate`, `extend-config` | yes | yes | Partial | API | | CRD schema gives basic validation; richer topology validation is pending |
+| `validate`, `extend-config` | yes | yes | Partial | API | | CRD schema and topology validation catch many invalid specs; Fablo-style config extension is not implemented |
 | `version` | yes | yes | Planned | | | No FabricOps CLI version command yet |
 | `init` (node, rest, dev) | yes | yes | Partial | samples | | Sample Node, Go, and Java chaincodes exist; no project generator command |
 | `export-network-topology` to Mermaid | yes | yes | Planned | | | Not implemented |

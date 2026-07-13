@@ -98,13 +98,24 @@ kubectl get fabricnetwork fabricnetwork-sample -n default -o jsonpath='{.status.
 kubectl get fabricnetwork fabricnetwork-sample -n default -o jsonpath='{.status.orgStatus[?(@.name=="BankA")].peerEndpoints}'
 ```
 
-When building from source, `fabricopsctl` wraps the same status and profile lookup:
+When building from source, `fabricopsctl` wraps status, profile lookup, and
+short-lived chaincode operation Jobs:
 
 ```bash
 make build-fabricopsctl
-bin/fabricopsctl status fabricnetwork-sample -n default
-bin/fabricopsctl connection-profile fabricnetwork-sample -n default --org BankA --format yaml
+bin/fabricopsctl status -n default fabricnetwork-sample
+bin/fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
+bin/fabricopsctl connection-profile -n default --org BankA --format yaml fabricnetwork-sample
+bin/fabricopsctl query -n default --org BankA \
+  --channel settlement --chaincode settlement --function readSettlement \
+  --args '["settlement-001"]' fabricnetwork-sample
 ```
+
+Tools that render or apply FabricOps resources, including a future Fablo
+Kubernetes engine, can use the same CLI surface after applying the
+`FabricNetwork`: `wait` for readiness, `status` for diagnostics,
+`connection-profile` for client material, and `invoke` or `query` for smoke
+checks.
 
 ### Uninstall
 
@@ -147,10 +158,11 @@ FabricOps supports:
 - CCaaS package metadata generation, install, approve, commit, and chaincode server workloads
 - Per-peer-org client connection profile ConfigMaps for in-cluster Gateway/application clients
 - Endpoint discovery in status for Fabric CAs, peers, orderers, operations Services, and peer chaincode Services
-- `fabricopsctl` helper commands for status and connection profile lookup when built from source
+- `fabricopsctl` helper commands for status, connection profile lookup, and chaincode invoke/query when built from source
 - Kubernetes status conditions for component, identity, channel, chaincode, and observability readiness
 - Fabric peer/orderer operations endpoints and optional Prometheus Operator `ServiceMonitor` resources
 - Optional org-boundary NetworkPolicies for FabricOps-managed pods
+- Opt-in cleanup for successful helper Jobs whose outputs are stored in durable FabricOps resources
 - Finalizer-based cleanup for generated org namespaces
 
 See [SUPPORTED_FEATURES.md](SUPPORTED_FEATURES.md) for the detailed
@@ -239,8 +251,14 @@ kind load docker-image controller:latest --name fabricops-packaging
 kubectl apply -f dist/install.yaml
 kubectl rollout status deployment/fabricops-controller-manager -n fabricops-system --timeout=120s
 kubectl apply -k config/samples
-kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
-config/samples/chaincodes/node_settlement/invoke_smoke.sh
+make build-fabricopsctl
+bin/fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
+bin/fabricopsctl invoke -n default --org BankA --peer BankA/peer0 --peer BankB/peer0 \
+  --channel settlement --chaincode settlement --function createSettlement \
+  --args '["demo-001","alice","bob","100","USD"]' fabricnetwork-sample
+bin/fabricopsctl query -n default --org BankA --peer BankA/peer0 \
+  --channel settlement --chaincode settlement --function readSettlement \
+  --args '["demo-001"]' fabricnetwork-sample
 ```
 
 ### Local Helm Install
@@ -310,7 +328,7 @@ Run the repeatable kind-based e2e proof with:
 make test-e2e
 ```
 
-The e2e target builds the local manager and Node settlement chaincode images, loads them into kind, installs the generated bundle, applies the sample network, waits for `Ready=True`, and runs the Node settlement invoke/private-data smoke. See [docs/e2e-validation.md](docs/e2e-validation.md) for kind, OrbStack, and cleanup notes.
+The e2e target builds the local manager plus Node, Go, and Java settlement chaincode images, loads them into kind, installs the generated bundle, applies the sample network, waits for `Ready=True`, runs the Node invoke/private-data smoke, then declaratively rolls the same chaincode through Go and Java runtime images with invoke/query checks. See [docs/e2e-validation.md](docs/e2e-validation.md) for kind, OrbStack, and cleanup notes.
 
 ## Identity Secrets
 
@@ -343,6 +361,21 @@ Default sizes are:
 CA pods mount persistent data at `/etc/hyperledger/fabric-ca-server`. Orderer and peer pods mount persistent data at `/var/hyperledger/production`.
 
 Fabric component instances run as singleton Deployments with `Recreate` rollout strategy and one PVC per instance.
+
+## Job Cleanup
+
+FabricOps keeps failed Jobs for diagnostics. To remove successful helper Jobs whose results are already stored in durable resources, set:
+
+```yaml
+spec:
+  global:
+    jobs:
+      succeededHistoryTTLSeconds: 600
+```
+
+This currently applies to enrollment Jobs, channel block generation Jobs, orderer join Jobs, peer join Jobs, anchor peer update Jobs, chaincode install Jobs, chaincode approval Jobs, and chaincode commit Jobs.
+
+The sample `FabricNetwork` opts into a 10-minute successful helper Job history window so local runs stay inspectable without accumulating every completed output-backed Job forever.
 
 ## Observability
 

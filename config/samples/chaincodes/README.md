@@ -8,7 +8,7 @@ Implementations:
 - `go_settlement`: Fabric Go contract API
 - `java_settlement`: Fabric Java contract API
 
-Each implementation exposes the same transaction names:
+Each implementation exposes the same settlement operations:
 
 - `initLedger`
 - `createSettlement(id, debtor, creditor, amount, currency)`
@@ -65,6 +65,8 @@ For the Go sample, override the transaction names used by the smoke because Go c
 CREATE_FUNCTION=CreateSettlement READ_FUNCTION=ReadSettlement \
   config/samples/chaincodes/node_settlement/invoke_smoke.sh
 ```
+
+The kind e2e proof rolls the declared `settlement` chaincode from the Node image to the Go image and then to the Java image with sequence bumps, invoking after each rollout. The Node private-data smoke remains Node-specific because the Go and Java samples intentionally cover the common public settlement operations only.
 
 ## Compatibility Baseline
 

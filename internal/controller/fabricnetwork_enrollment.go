@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 
@@ -304,6 +305,7 @@ func buildAdminEnrollmentJob(
 	labels := identityLabels(net, org, componentAdmin, adminName, map[string]string{
 		labelIdentityKind: secretKindAdminEnroll,
 	})
+	annotations := resourceAnnotations(net, org)
 	backoffLimit := int32(4)
 
 	return &batchv1.Job{
@@ -311,7 +313,7 @@ func buildAdminEnrollmentJob(
 			Name:        adminEnrollmentJobName(org),
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, org),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
@@ -378,6 +380,7 @@ func buildWorkloadEnrollmentJob(
 	labels := identityLabels(net, org, component, workloadName, map[string]string{
 		labelIdentityKind: secretKindWorkloadEnroll,
 	})
+	annotations := resourceAnnotations(net, org)
 	backoffLimit := int32(4)
 
 	return &batchv1.Job{
@@ -385,7 +388,7 @@ func buildWorkloadEnrollmentJob(
 			Name:        workloadEnrollmentJobName(workloadName),
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, org),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
@@ -883,7 +886,11 @@ func (r *FabricNetworkReconciler) ensureJob(ctx context.Context, desired *batchv
 	return r.updateObjectWithRetry(ctx, desired, func(object client.Object) (bool, error) {
 		existing := object.(*batchv1.Job)
 		changed := mergeLabels(&existing.Labels, desired.Labels)
-		if mergeAnnotations(&existing.Annotations, desired.Annotations) {
+		desiredAnnotations := maps.Clone(desired.Annotations)
+		if existing.Annotations[annotationSucceededJobCleanup] != "true" {
+			delete(desiredAnnotations, annotationSucceededJobCleanup)
+		}
+		if mergeAnnotations(&existing.Annotations, desiredAnnotations) {
 			changed = true
 		}
 		if !changed {

@@ -685,11 +685,11 @@ func (r *FabricNetworkReconciler) updateStatus(
 // +kubebuilder:rbac:groups=fabricops.io,resources=fabricnetworks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=fabricops.io,resources=fabricnetworks/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -970,7 +970,12 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, err
 		}
 
-		return ctrl.Result{}, nil
+		cleanupAfter, err := r.cleanupSucceededJobs(ctx, &network)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return resultWithCleanupRequeue(ctrl.Result{}, cleanupAfter), nil
 	}
 
 	readyReason := "ComponentsNotReady"
@@ -1017,7 +1022,12 @@ func (r *FabricNetworkReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	cleanupAfter, err := r.cleanupSucceededJobs(ctx, &network)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	return resultWithCleanupRequeue(ctrl.Result{RequeueAfter: 10 * time.Second}, cleanupAfter), nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

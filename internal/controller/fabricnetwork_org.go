@@ -1210,6 +1210,24 @@ func (r *FabricNetworkReconciler) ensureNetworkPolicyAbsent(
 	return r.Delete(ctx, &existing)
 }
 
+func (r *FabricNetworkReconciler) deleteOwnedObject(
+	ctx context.Context,
+	object client.Object,
+	expectedOwner client.Object,
+	opts ...client.DeleteOption,
+) error {
+	if !hasFabricNetworkOwner(object) {
+		return nil
+	}
+	if err := ensureSameFabricNetworkOwner(object, expectedOwner); err != nil {
+		return err
+	}
+
+	log := logf.FromContext(ctx)
+	log.Info("Deleting object", "object", objectDescription(object))
+	return client.IgnoreNotFound(r.Delete(ctx, object, opts...))
+}
+
 func hasFabricNetworkOwner(object client.Object) bool {
 	if _, ok := fabricNetworkOwnerFromAnnotations(object); ok {
 		return true
@@ -1894,9 +1912,10 @@ func (r *FabricNetworkReconciler) reconcilePeers(
 	namespace string,
 ) (fabricopsv1alpha1.WorkloadStatus, error) {
 	status := fabricopsv1alpha1.WorkloadStatus{}
+	desiredPeers := desiredPeerNames(org)
 
 	if org.Peer == nil {
-		return status, nil
+		return status, r.cleanupScaledDownPeerWorkloads(ctx, net, org, namespace, desiredPeers)
 	}
 
 	for i := 0; i < org.Peer.Instances; i++ {
@@ -1931,5 +1950,69 @@ func (r *FabricNetworkReconciler) reconcilePeers(
 		status.Ready += deploymentStatus.Ready
 	}
 
+	if err := r.cleanupScaledDownPeerWorkloads(ctx, net, org, namespace, desiredPeers); err != nil {
+		return status, err
+	}
+
 	return status, nil
+}
+
+func (r *FabricNetworkReconciler) cleanupScaledDownPeerWorkloads(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	desiredPeers map[string]struct{},
+) error {
+	selector := client.MatchingLabels{
+		labelFabricNetwork:          sanitizeName(net.Name),
+		labelFabricNetworkNamespace: sanitizeName(net.Namespace),
+		labelOrg:                    sanitizeName(org.Organization.Name),
+		labelComponent:              componentPeer,
+	}
+	expectedOwner := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   namespace,
+			Labels:      orgLabels(net, org, componentPeer),
+			Annotations: resourceAnnotations(net, org),
+		},
+	}
+
+	var deployments appsv1.DeploymentList
+	if err := r.List(ctx, &deployments, client.InNamespace(namespace), selector); err != nil {
+		return err
+	}
+	for i := range deployments.Items {
+		deployment := &deployments.Items[i]
+		if _, ok := desiredPeers[deployment.Name]; ok {
+			continue
+		}
+		expectedOwner.Name = deployment.Name
+		if err := r.deleteOwnedObject(ctx, deployment, expectedOwner); err != nil {
+			return err
+		}
+	}
+
+	desiredServices := map[string]struct{}{}
+	for name := range desiredPeers {
+		desiredServices[name] = struct{}{}
+		desiredServices[operationsServiceName(name)] = struct{}{}
+	}
+
+	var services corev1.ServiceList
+	if err := r.List(ctx, &services, client.InNamespace(namespace), selector); err != nil {
+		return err
+	}
+	for i := range services.Items {
+		service := &services.Items[i]
+		if _, ok := desiredServices[service.Name]; ok {
+			continue
+		}
+		expectedOwner.Name = service.Name
+		if err := r.deleteOwnedObject(ctx, service, expectedOwner); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

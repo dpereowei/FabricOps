@@ -18,9 +18,11 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"reflect"
+	"slices"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -49,9 +51,34 @@ const (
 	joinOrdererContainer          = "join-orderer"
 	joinPeerContainer             = "join-peer"
 	publishChannelBlockContainer  = "publish-channel-block"
+	publishOrdererJoinContainer   = "publish-orderer-join"
+	publishPeerJoinContainer      = "publish-peer-join"
+	publishAnchorPeerContainer    = "publish-anchor-peer-update"
 
-	envChannelBlockConfigMap = "FABRICOPS_CHANNEL_BLOCK_CONFIGMAP"
-	envChannelBlockFile      = "FABRICOPS_CHANNEL_BLOCK_FILE"
+	channelOrdererJoinResultKey  = "channels.json"
+	channelOrdererJoinResultFile = "orderer-channels.json"
+	channelPeerJoinResultKey     = "channels.txt"
+	channelPeerJoinResultFile    = "peer-channels.txt"
+	channelAnchorPeerResultKey   = "anchor-peer.json"
+	channelAnchorPeerResultFile  = "anchor-peer.json"
+
+	envChannelBlockConfigMap      = "FABRICOPS_CHANNEL_BLOCK_CONFIGMAP"
+	envChannelBlockFile           = "FABRICOPS_CHANNEL_BLOCK_FILE"
+	envOrdererJoinResultConfigMap = "FABRICOPS_ORDERER_JOIN_RESULT_CONFIGMAP"
+	envOrdererJoinResultKey       = "FABRICOPS_ORDERER_JOIN_RESULT_KEY"
+	envOrdererJoinResultFile      = "FABRICOPS_ORDERER_JOIN_RESULT_FILE"
+	envOrdererJoinResultChannel   = "FABRICOPS_ORDERER_JOIN_RESULT_CHANNEL"
+	envOrdererJoinResultOrderer   = "FABRICOPS_ORDERER_JOIN_RESULT_ORDERER"
+	envPeerJoinResultConfigMap    = "FABRICOPS_PEER_JOIN_RESULT_CONFIGMAP"
+	envPeerJoinResultKey          = "FABRICOPS_PEER_JOIN_RESULT_KEY"
+	envPeerJoinResultFile         = "FABRICOPS_PEER_JOIN_RESULT_FILE"
+	envPeerJoinResultChannel      = "FABRICOPS_PEER_JOIN_RESULT_CHANNEL"
+	envPeerJoinResultPeer         = "FABRICOPS_PEER_JOIN_RESULT_PEER"
+	envAnchorPeerResultConfigMap  = "FABRICOPS_ANCHOR_PEER_RESULT_CONFIGMAP"
+	envAnchorPeerResultKey        = "FABRICOPS_ANCHOR_PEER_RESULT_KEY"
+	envAnchorPeerResultFile       = "FABRICOPS_ANCHOR_PEER_RESULT_FILE"
+	envAnchorPeerResultChannel    = "FABRICOPS_ANCHOR_PEER_RESULT_CHANNEL"
+	envAnchorPeerResultOrg        = "FABRICOPS_ANCHOR_PEER_RESULT_ORG"
 
 	channelServiceAccount = "channel-bootstrapper"
 )
@@ -295,6 +322,15 @@ func (r *FabricNetworkReconciler) reconcileOrdererJoins(
 ) (int32, string, error) {
 	var ready int32
 	for _, orderer := range desiredOrdererInstances(net) {
+		resultReady, _, err := r.ordererJoinResultReadiness(ctx, namespace, channel.Name, orderer)
+		if err != nil {
+			return ready, "", err
+		}
+		if resultReady {
+			ready++
+			continue
+		}
+
 		if err := r.ensureJob(ctx, buildOrdererJoinJob(net, channel, hostOrg, namespace, orderer)); err != nil {
 			return ready, "", err
 		}
@@ -320,8 +356,13 @@ func (r *FabricNetworkReconciler) ordererJoinReadiness(
 	channelName string,
 	orderer ordererInstance,
 ) (bool, string, error) {
+	resultReady, resultMessage, err := r.ordererJoinResultReadiness(ctx, namespace, channelName, orderer)
+	if err != nil || resultReady {
+		return resultReady, resultMessage, err
+	}
+
 	var job batchv1.Job
-	err := r.Get(ctx, client.ObjectKey{
+	err = r.Get(ctx, client.ObjectKey{
 		Namespace: namespace,
 		Name:      channelOrdererJoinJobName(channelName, orderer),
 	}, &job)
@@ -335,10 +376,92 @@ func (r *FabricNetworkReconciler) ordererJoinReadiness(
 		return false, fmt.Sprintf("%s: orderer join Job failed", orderer.name), nil
 	}
 	if jobSucceeded(job) {
+		if resultMessage != "" {
+			return false, resultMessage, nil
+		}
+		if succeededJobCleanupEligible(&job) {
+			return false, "Waiting for orderer join result ConfigMap", nil
+		}
 		return true, "", nil
 	}
 
 	return false, "", nil
+}
+
+func (r *FabricNetworkReconciler) ordererJoinResultReadiness(
+	ctx context.Context,
+	namespace string,
+	channelName string,
+	orderer ordererInstance,
+) (bool, string, error) {
+	var result corev1.ConfigMap
+	err := r.Get(ctx, client.ObjectKey{
+		Namespace: namespace,
+		Name:      channelOrdererJoinResultConfigMapName(channelName, orderer),
+	}, &result)
+	if apierrors.IsNotFound(err) {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+
+	raw := strings.TrimSpace(result.Data[channelOrdererJoinResultKey])
+	if raw == "" {
+		return false, fmt.Sprintf("Waiting for %s orderer join result ConfigMap data", orderer.name), nil
+	}
+	if !ordererJoinResultContainsChannel(raw, channelName) {
+		return false, fmt.Sprintf("Waiting for %s orderer join result for channel %s", orderer.name, channelName), nil
+	}
+
+	return true, "", nil
+}
+
+func ordererJoinResultContainsChannel(raw string, channelName string) bool {
+	var payload any
+	if err := json.Unmarshal([]byte(jsonPayload(raw)), &payload); err != nil {
+		return false
+	}
+
+	return jsonObjectHasName(payload, channelName)
+}
+
+func jsonPayload(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	objectStart := strings.Index(trimmed, "{")
+	arrayStart := strings.Index(trimmed, "[")
+
+	start := objectStart
+	if start < 0 || (arrayStart >= 0 && arrayStart < start) {
+		start = arrayStart
+	}
+	if start < 0 {
+		return ""
+	}
+
+	return strings.TrimSpace(trimmed[start:])
+}
+
+func jsonObjectHasName(value any, name string) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		if typedName, ok := typed["name"].(string); ok && typedName == name {
+			return true
+		}
+		for _, child := range typed {
+			if jsonObjectHasName(child, name) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if jsonObjectHasName(child, name) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (r *FabricNetworkReconciler) reconcilePeerJoins(
@@ -359,7 +482,7 @@ func (r *FabricNetworkReconciler) reconcilePeerJoins(
 		}
 
 		namespace := orgNamespaceName(net, org)
-		if err := r.ensureServiceAccount(ctx, buildChannelServiceAccount(net, org, channel.Name, namespace)); err != nil {
+		if err := r.ensureChannelRBAC(ctx, net, org, channel.Name, namespace); err != nil {
 			return ready, "", err
 		}
 		if err := r.ensureChannelBlockConfigMapCopy(ctx, net, channel, hostNamespace, org, namespace); err != nil {
@@ -373,6 +496,15 @@ func (r *FabricNetworkReconciler) reconcilePeerJoins(
 				name:      peerName,
 				namespace: namespace,
 			}
+			resultReady, _, err := r.peerJoinResultReadiness(ctx, namespace, channel.Name, peer)
+			if err != nil {
+				return ready, "", err
+			}
+			if resultReady {
+				orgReady++
+				continue
+			}
+
 			if err := r.ensureJob(ctx, buildPeerJoinJob(net, channel, org, namespace, peer)); err != nil {
 				return ready, "", err
 			}
@@ -444,11 +576,21 @@ func (r *FabricNetworkReconciler) reconcileAnchorPeerUpdates(
 		if err := r.ensureAnchorPeerInputs(ctx, net, channel, org, namespace, targetOrderer); err != nil {
 			return "", err
 		}
+		resultReady, _, err := r.anchorPeerUpdateResultReadiness(ctx, namespace, channel.Name, org, anchorPeer)
+		if err != nil {
+			return "", err
+		}
+		if resultReady {
+			orgStatus.Message = ""
+			orgStatus.Ready = true
+			continue
+		}
+
 		if err := r.ensureJob(ctx, buildAnchorPeerUpdateJob(net, channel, org, namespace, anchorPeer, targetOrderer)); err != nil {
 			return "", err
 		}
 
-		updated, message, err := r.anchorPeerUpdateReadiness(ctx, namespace, channel.Name, org)
+		updated, message, err := r.anchorPeerUpdateReadiness(ctx, namespace, channel.Name, org, anchorPeer)
 		if err != nil {
 			return "", err
 		}
@@ -497,9 +639,15 @@ func (r *FabricNetworkReconciler) anchorPeerUpdateReadiness(
 	namespace string,
 	channelName string,
 	org fabricopsv1alpha1.Org,
+	anchorPeer peerInstance,
 ) (bool, string, error) {
+	resultReady, resultMessage, err := r.anchorPeerUpdateResultReadiness(ctx, namespace, channelName, org, anchorPeer)
+	if err != nil || resultReady {
+		return resultReady, resultMessage, err
+	}
+
 	var job batchv1.Job
-	err := r.Get(ctx, client.ObjectKey{
+	err = r.Get(ctx, client.ObjectKey{
 		Namespace: namespace,
 		Name:      channelAnchorPeerUpdateJobName(channelName, org),
 	}, &job)
@@ -513,10 +661,65 @@ func (r *FabricNetworkReconciler) anchorPeerUpdateReadiness(
 		return false, fmt.Sprintf("%s: anchor peer update Job failed", org.Organization.Name), nil
 	}
 	if jobSucceeded(job) {
+		if resultMessage != "" {
+			return false, resultMessage, nil
+		}
+		if succeededJobCleanupEligible(&job) {
+			return false, "Waiting for anchor peer update result ConfigMap", nil
+		}
 		return true, "", nil
 	}
 
 	return false, "", nil
+}
+
+func (r *FabricNetworkReconciler) anchorPeerUpdateResultReadiness(
+	ctx context.Context,
+	namespace string,
+	channelName string,
+	org fabricopsv1alpha1.Org,
+	anchorPeer peerInstance,
+) (bool, string, error) {
+	var result corev1.ConfigMap
+	err := r.Get(ctx, client.ObjectKey{
+		Namespace: namespace,
+		Name:      channelAnchorPeerUpdateResultConfigMapName(channelName, org),
+	}, &result)
+	if apierrors.IsNotFound(err) {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+
+	raw := strings.TrimSpace(result.Data[channelAnchorPeerResultKey])
+	if raw == "" {
+		return false, fmt.Sprintf("Waiting for %s anchor peer update result ConfigMap data", org.Organization.Name), nil
+	}
+	if !anchorPeerUpdateResultMatches(raw, channelName, org.Organization.MSPName, channelPeerHost(anchorPeer), peerPort) {
+		return false, fmt.Sprintf("Waiting for %s anchor peer update result for channel %s", org.Organization.Name, channelName), nil
+	}
+
+	return true, "", nil
+}
+
+func anchorPeerUpdateResultMatches(raw string, channelName string, mspID string, host string, port int32) bool {
+	var result struct {
+		Channel     string `json:"channel"`
+		MSPID       string `json:"mspID"`
+		AnchorPeers []struct {
+			Host string `json:"host"`
+			Port int32  `json:"port"`
+		} `json:"anchorPeers"`
+	}
+	if err := json.Unmarshal([]byte(jsonPayload(raw)), &result); err != nil {
+		return false
+	}
+	if result.Channel != channelName || result.MSPID != mspID || len(result.AnchorPeers) != 1 {
+		return false
+	}
+
+	return result.AnchorPeers[0].Host == host && result.AnchorPeers[0].Port == port
 }
 
 func (r *FabricNetworkReconciler) ensureChannelBlockConfigMapCopy(
@@ -567,8 +770,13 @@ func (r *FabricNetworkReconciler) peerJoinReadiness(
 	channelName string,
 	peer peerInstance,
 ) (bool, string, error) {
+	resultReady, resultMessage, err := r.peerJoinResultReadiness(ctx, namespace, channelName, peer)
+	if err != nil || resultReady {
+		return resultReady, resultMessage, err
+	}
+
 	var job batchv1.Job
-	err := r.Get(ctx, client.ObjectKey{
+	err = r.Get(ctx, client.ObjectKey{
 		Namespace: namespace,
 		Name:      channelPeerJoinJobName(channelName, peer),
 	}, &job)
@@ -582,10 +790,49 @@ func (r *FabricNetworkReconciler) peerJoinReadiness(
 		return false, fmt.Sprintf("%s: peer join Job failed", peer.name), nil
 	}
 	if jobSucceeded(job) {
+		if resultMessage != "" {
+			return false, resultMessage, nil
+		}
+		if succeededJobCleanupEligible(&job) {
+			return false, "Waiting for peer join result ConfigMap", nil
+		}
 		return true, "", nil
 	}
 
 	return false, "", nil
+}
+
+func (r *FabricNetworkReconciler) peerJoinResultReadiness(
+	ctx context.Context,
+	namespace string,
+	channelName string,
+	peer peerInstance,
+) (bool, string, error) {
+	var result corev1.ConfigMap
+	err := r.Get(ctx, client.ObjectKey{
+		Namespace: namespace,
+		Name:      channelPeerJoinResultConfigMapName(channelName, peer),
+	}, &result)
+	if apierrors.IsNotFound(err) {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+
+	raw := strings.TrimSpace(result.Data[channelPeerJoinResultKey])
+	if raw == "" {
+		return false, fmt.Sprintf("Waiting for %s peer join result ConfigMap data", peer.name), nil
+	}
+	if !fieldsContain(raw, channelName) {
+		return false, fmt.Sprintf("Waiting for %s peer join result for channel %s", peer.name, channelName), nil
+	}
+
+	return true, "", nil
+}
+
+func fieldsContain(raw string, value string) bool {
+	return slices.Contains(strings.Fields(raw), value)
 }
 
 func (r *FabricNetworkReconciler) ensureCopiedSecret(
@@ -947,6 +1194,7 @@ func buildChannelBlockJob(
 	namespace string,
 ) *batchv1.Job {
 	labels := channelLabels(net, hostOrg, channel.Name)
+	annotations := resourceAnnotations(net, hostOrg)
 	backoffLimit := int32(4)
 	volumes := []corev1.Volume{
 		{
@@ -1014,7 +1262,7 @@ func buildChannelBlockJob(
 			Name:        channelBlockJobName(channel.Name),
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, hostOrg),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
@@ -1064,6 +1312,7 @@ func buildOrdererJoinJob(
 	labels := channelLabels(net, hostOrg, channel.Name)
 	labels[labelInstance] = orderer.name
 	labels[labelWorkload] = orderer.name
+	annotations := resourceAnnotations(net, hostOrg)
 	backoffLimit := int32(4)
 	adminTLSVolumeName := channelOrdererAdminTLSVolumeName(orderer.org)
 
@@ -1072,7 +1321,7 @@ func buildOrdererJoinJob(
 			Name:        channelOrdererJoinJobName(channel.Name, orderer),
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, hostOrg),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
@@ -1085,6 +1334,12 @@ func buildOrdererJoinJob(
 					ServiceAccountName: channelServiceAccountName(channel.Name),
 					RestartPolicy:      corev1.RestartPolicyNever,
 					Volumes: []corev1.Volume{
+						{
+							Name: channelOutputVolumeName,
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
 						{
 							Name: channelBlockVolumeName,
 							VolumeSource: corev1.VolumeSource{
@@ -1112,15 +1367,28 @@ func buildOrdererJoinJob(
 							},
 						},
 					},
-					Containers: []corev1.Container{
+					InitContainers: []corev1.Container{
 						{
 							Name:      joinOrdererContainer,
 							Image:     fabricToolsImage(net.Spec.Global.FabricVersion),
 							Command:   []string{"sh", "-ec", joinOrdererScript(channel.Name, ordererAdminAddress(orderer), channelOrdererAdminTLSPath(orderer.org))},
 							Resources: componentResourceRequirements(componentOrderer),
 							VolumeMounts: []corev1.VolumeMount{
+								{Name: channelOutputVolumeName, MountPath: channelOutputDir},
 								{Name: channelBlockVolumeName, MountPath: channelBlockDir, ReadOnly: true},
 								{Name: adminTLSVolumeName, MountPath: channelOrdererAdminTLSPath(orderer.org), ReadOnly: true},
+							},
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Name:      publishOrdererJoinContainer,
+							Image:     kubectlImage(),
+							Command:   []string{"sh", "-ec", publishOrdererJoinResultScript()},
+							Env:       publishOrdererJoinResultEnv(channel.Name, orderer),
+							Resources: componentResourceRequirements(componentKubectl),
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: channelOutputVolumeName, MountPath: channelOutputDir},
 							},
 						},
 					},
@@ -1140,6 +1408,7 @@ func buildPeerJoinJob(
 	labels := channelLabels(net, org, channel.Name)
 	labels[labelInstance] = peer.name
 	labels[labelWorkload] = peer.name
+	annotations := resourceAnnotations(net, org)
 	backoffLimit := int32(4)
 	adminMSPVolumeName := channelOrgMSPVolumeName(org)
 	adminTLSVolumeName := channelOrdererAdminTLSVolumeName(org)
@@ -1149,7 +1418,7 @@ func buildPeerJoinJob(
 			Name:        channelPeerJoinJobName(channel.Name, peer),
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, org),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
@@ -1162,6 +1431,12 @@ func buildPeerJoinJob(
 					ServiceAccountName: channelServiceAccountName(channel.Name),
 					RestartPolicy:      corev1.RestartPolicyNever,
 					Volumes: []corev1.Volume{
+						{
+							Name: channelOutputVolumeName,
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
 						{
 							Name: channelBlockVolumeName,
 							VolumeSource: corev1.VolumeSource{
@@ -1199,16 +1474,29 @@ func buildPeerJoinJob(
 							},
 						},
 					},
-					Containers: []corev1.Container{
+					InitContainers: []corev1.Container{
 						{
 							Name:      joinPeerContainer,
 							Image:     fabricToolsImage(net.Spec.Global.FabricVersion),
 							Command:   []string{"sh", "-ec", joinPeerScript(channel.Name, org.Organization.MSPName, peerAddress(peer), channelOrgMSPPath(org), channelOrdererAdminTLSPath(org))},
 							Resources: componentResourceRequirements(componentPeer),
 							VolumeMounts: []corev1.VolumeMount{
+								{Name: channelOutputVolumeName, MountPath: channelOutputDir},
 								{Name: channelBlockVolumeName, MountPath: channelBlockDir, ReadOnly: true},
 								{Name: adminMSPVolumeName, MountPath: channelOrgMSPPath(org), ReadOnly: true},
 								{Name: adminTLSVolumeName, MountPath: channelOrdererAdminTLSPath(org), ReadOnly: true},
+							},
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Name:      publishPeerJoinContainer,
+							Image:     kubectlImage(),
+							Command:   []string{"sh", "-ec", publishPeerJoinResultScript()},
+							Env:       publishPeerJoinResultEnv(channel.Name, peer),
+							Resources: componentResourceRequirements(componentKubectl),
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: channelOutputVolumeName, MountPath: channelOutputDir},
 							},
 						},
 					},
@@ -1229,6 +1517,7 @@ func buildAnchorPeerUpdateJob(
 	labels := channelLabels(net, org, channel.Name)
 	labels[labelInstance] = anchorPeer.name
 	labels[labelWorkload] = anchorPeer.name
+	annotations := resourceAnnotations(net, org)
 	backoffLimit := int32(4)
 	adminMSPVolumeName := channelOrgMSPVolumeName(org)
 	adminTLSVolumeName := channelOrdererAdminTLSVolumeName(org)
@@ -1283,7 +1572,7 @@ func buildAnchorPeerUpdateJob(
 			Name:        channelAnchorPeerUpdateJobName(channel.Name, org),
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, org),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
@@ -1296,7 +1585,7 @@ func buildAnchorPeerUpdateJob(
 					ServiceAccountName: channelServiceAccountName(channel.Name),
 					RestartPolicy:      corev1.RestartPolicyNever,
 					Volumes:            volumes,
-					Containers: []corev1.Container{
+					InitContainers: []corev1.Container{
 						{
 							Name:  updateAnchorPeerContainer,
 							Image: fabricToolsImage(net.Spec.Global.FabricVersion),
@@ -1313,6 +1602,18 @@ func buildAnchorPeerUpdateJob(
 							)},
 							Resources:    componentResourceRequirements(componentPeer),
 							VolumeMounts: volumeMounts,
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Name:      publishAnchorPeerContainer,
+							Image:     kubectlImage(),
+							Command:   []string{"sh", "-ec", publishAnchorPeerUpdateResultScript()},
+							Env:       publishAnchorPeerUpdateResultEnv(channel.Name, org),
+							Resources: componentResourceRequirements(componentKubectl),
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: channelOutputVolumeName, MountPath: channelOutputDir},
+							},
 						},
 					},
 				},
@@ -1623,12 +1924,24 @@ func channelOrdererJoinJobName(channelName string, orderer ordererInstance) stri
 	return sanitizeName(channelName + "-" + orderer.org.Organization.Name + "-" + orderer.name + "-orderer-join")
 }
 
+func channelOrdererJoinResultConfigMapName(channelName string, orderer ordererInstance) string {
+	return sanitizeName(channelOrdererJoinJobName(channelName, orderer) + "-result")
+}
+
 func channelPeerJoinJobName(channelName string, peer peerInstance) string {
 	return sanitizeName(channelName + "-" + peer.org.Organization.Name + "-" + peer.name + "-peer-join")
 }
 
+func channelPeerJoinResultConfigMapName(channelName string, peer peerInstance) string {
+	return sanitizeName(channelPeerJoinJobName(channelName, peer) + "-result")
+}
+
 func channelAnchorPeerUpdateJobName(channelName string, org fabricopsv1alpha1.Org) string {
 	return sanitizeName(channelName + "-" + org.Organization.Name + "-anchor-peer-update")
+}
+
+func channelAnchorPeerUpdateResultConfigMapName(channelName string, org fabricopsv1alpha1.Org) string {
+	return sanitizeName(channelAnchorPeerUpdateJobName(channelName, org) + "-result")
 }
 
 func channelServiceAccountName(channelName string) string {
@@ -1770,7 +2083,10 @@ CHANNEL_ID=%q
 ORDERER_ADMIN_ADDRESS=%q
 BLOCK_FILE=%q
 ADMIN_TLS_DIR=%q
-CHANNELS_FILE=/tmp/fabricops-osnadmin-channels.json
+OUTPUT_DIR=%q
+CHANNELS_FILE="$OUTPUT_DIR/%s"
+
+mkdir -p "$OUTPUT_DIR"
 
 if osnadmin channel list \
   -o "$ORDERER_ADMIN_ADDRESS" \
@@ -1790,7 +2106,13 @@ osnadmin channel join \
   --client-cert "$ADMIN_TLS_DIR/client.crt" \
   --client-key "$ADMIN_TLS_DIR/client.key" \
   --ca-file "$ADMIN_TLS_DIR/ca.crt"
-`, channelName, ordererAddress, channelBlockFilePath(channelName), adminTLSPath)
+
+osnadmin channel list \
+  -o "$ORDERER_ADMIN_ADDRESS" \
+  --ca-file "$ADMIN_TLS_DIR/ca.crt" \
+  --client-cert "$ADMIN_TLS_DIR/client.crt" \
+  --client-key "$ADMIN_TLS_DIR/client.key" > "$CHANNELS_FILE"
+`, channelName, ordererAddress, channelBlockFilePath(channelName), adminTLSPath, channelOutputDir, channelOrdererJoinResultFile)
 }
 
 func joinPeerScript(channelName string, mspID string, peerAddress string, mspPath string, adminTLSPath string) string {
@@ -1799,7 +2121,10 @@ func joinPeerScript(channelName string, mspID string, peerAddress string, mspPat
 CHANNEL_ID=%q
 BLOCK_FILE=%q
 ADMIN_TLS_DIR=%q
-CHANNELS_FILE=/tmp/fabricops-peer-channels.txt
+OUTPUT_DIR=%q
+CHANNELS_FILE="$OUTPUT_DIR/%s"
+
+mkdir -p "$OUTPUT_DIR"
 
 export CORE_PEER_LOCALMSPID=%q
 export CORE_PEER_ADDRESS=%q
@@ -1820,7 +2145,11 @@ peer channel join \
   -b "$BLOCK_FILE" \
   --tls \
   --cafile "$CORE_PEER_TLS_ROOTCERT_FILE"
-`, channelName, channelBlockFilePath(channelName), adminTLSPath, mspID, peerAddress, mspPath)
+
+peer channel list \
+  --tls \
+  --cafile "$CORE_PEER_TLS_ROOTCERT_FILE" > "$CHANNELS_FILE"
+`, channelName, channelBlockFilePath(channelName), adminTLSPath, channelOutputDir, channelPeerJoinResultFile, mspID, peerAddress, mspPath)
 }
 
 func updateAnchorPeerScript(
@@ -1845,6 +2174,7 @@ ADMIN_TLS_DIR=%q
 ORDERER_TLS_DIR=%q
 ANCHOR_UPDATE_FILE=%q
 OUTPUT_DIR=%q
+RESULT_FILE="$OUTPUT_DIR/%s"
 
 export CORE_PEER_LOCALMSPID="$MSP_ID"
 export CORE_PEER_ADDRESS=%q
@@ -1866,6 +2196,16 @@ ENVELOPE_JSON="$OUTPUT_DIR/anchor_update_envelope.json"
 
 mkdir -p "$OUTPUT_DIR"
 
+write_anchor_result() {
+  jq -n \
+    --arg channel "$CHANNEL_ID" \
+    --arg msp "$MSP_ID" \
+    --arg host "$ANCHOR_HOST" \
+    --argjson port "$ANCHOR_PORT" \
+    '{"channel":$channel,"mspID":$msp,"anchorPeers":[{"host":$host,"port":$port}]}' \
+    > "$RESULT_FILE"
+}
+
 peer channel fetch config "$CONFIG_BLOCK" \
   -c "$CHANNEL_ID" \
   -o "$ORDERER_ADDRESS" \
@@ -1886,6 +2226,7 @@ if jq -e \
   '(.channel_group.groups.Application.groups[$msp].values.AnchorPeers.value.anchor_peers // []) == [{"host": $host, "port": $port}]' \
   "$CONFIG_JSON" >/dev/null; then
   echo "Anchor peers already configured for $MSP_ID on channel $CHANNEL_ID"
+  write_anchor_result
   exit 0
 fi
 
@@ -1937,7 +2278,9 @@ peer channel update \
   -f "$ANCHOR_UPDATE_FILE" \
   --tls \
   --cafile "$ORDERER_TLS_DIR/ca.crt"
-`, channelName, mspID, anchorHost, peerPort, ordererAddress, adminTLSPath, ordererTLSPath, anchorUpdateFile, channelOutputDir, peerAddress, mspPath)
+
+write_anchor_result
+`, channelName, mspID, anchorHost, peerPort, ordererAddress, adminTLSPath, ordererTLSPath, anchorUpdateFile, channelOutputDir, channelAnchorPeerResultFile, peerAddress, mspPath)
 }
 
 func publishChannelBlockEnv(channelName string) []corev1.EnvVar {
@@ -1965,6 +2308,108 @@ kubectl -n "$POD_NAMESPACE" create configmap "$FABRICOPS_CHANNEL_BLOCK_CONFIGMAP
 kubectl -n "$POD_NAMESPACE" label configmap "$FABRICOPS_CHANNEL_BLOCK_CONFIGMAP" \
   fabricops.io/component=channel \
   fabricops.io/channel="${FABRICOPS_CHANNEL_BLOCK_FILE%.block}" \
+  app.kubernetes.io/component=channel \
+  --overwrite
+`
+}
+
+func publishOrdererJoinResultEnv(channelName string, orderer ordererInstance) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: envOrdererJoinResultConfigMap, Value: channelOrdererJoinResultConfigMapName(channelName, orderer)},
+		{Name: envOrdererJoinResultKey, Value: channelOrdererJoinResultKey},
+		{Name: envOrdererJoinResultFile, Value: channelOrdererJoinResultFile},
+		{Name: envOrdererJoinResultChannel, Value: sanitizeName(channelName)},
+		{Name: envOrdererJoinResultOrderer, Value: sanitizeName(orderer.name)},
+		{
+			Name: envPodNamespace,
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.namespace",
+				},
+			},
+		},
+	}
+}
+
+func publishOrdererJoinResultScript() string {
+	return `set -eu
+
+kubectl -n "$POD_NAMESPACE" create configmap "$FABRICOPS_ORDERER_JOIN_RESULT_CONFIGMAP" \
+  --from-file="$FABRICOPS_ORDERER_JOIN_RESULT_KEY=` + channelOutputDir + `/$FABRICOPS_ORDERER_JOIN_RESULT_FILE" \
+  --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
+
+kubectl -n "$POD_NAMESPACE" label configmap "$FABRICOPS_ORDERER_JOIN_RESULT_CONFIGMAP" \
+  fabricops.io/component=channel \
+  fabricops.io/channel="$FABRICOPS_ORDERER_JOIN_RESULT_CHANNEL" \
+  fabricops.io/workload="$FABRICOPS_ORDERER_JOIN_RESULT_ORDERER" \
+  app.kubernetes.io/component=channel \
+  --overwrite
+`
+}
+
+func publishPeerJoinResultEnv(channelName string, peer peerInstance) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: envPeerJoinResultConfigMap, Value: channelPeerJoinResultConfigMapName(channelName, peer)},
+		{Name: envPeerJoinResultKey, Value: channelPeerJoinResultKey},
+		{Name: envPeerJoinResultFile, Value: channelPeerJoinResultFile},
+		{Name: envPeerJoinResultChannel, Value: sanitizeName(channelName)},
+		{Name: envPeerJoinResultPeer, Value: sanitizeName(peer.name)},
+		{
+			Name: envPodNamespace,
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.namespace",
+				},
+			},
+		},
+	}
+}
+
+func publishPeerJoinResultScript() string {
+	return `set -eu
+
+kubectl -n "$POD_NAMESPACE" create configmap "$FABRICOPS_PEER_JOIN_RESULT_CONFIGMAP" \
+  --from-file="$FABRICOPS_PEER_JOIN_RESULT_KEY=` + channelOutputDir + `/$FABRICOPS_PEER_JOIN_RESULT_FILE" \
+  --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
+
+kubectl -n "$POD_NAMESPACE" label configmap "$FABRICOPS_PEER_JOIN_RESULT_CONFIGMAP" \
+  fabricops.io/component=channel \
+  fabricops.io/channel="$FABRICOPS_PEER_JOIN_RESULT_CHANNEL" \
+  fabricops.io/workload="$FABRICOPS_PEER_JOIN_RESULT_PEER" \
+  app.kubernetes.io/component=channel \
+  --overwrite
+`
+}
+
+func publishAnchorPeerUpdateResultEnv(channelName string, org fabricopsv1alpha1.Org) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: envAnchorPeerResultConfigMap, Value: channelAnchorPeerUpdateResultConfigMapName(channelName, org)},
+		{Name: envAnchorPeerResultKey, Value: channelAnchorPeerResultKey},
+		{Name: envAnchorPeerResultFile, Value: channelAnchorPeerResultFile},
+		{Name: envAnchorPeerResultChannel, Value: sanitizeName(channelName)},
+		{Name: envAnchorPeerResultOrg, Value: sanitizeName(org.Organization.Name)},
+		{
+			Name: envPodNamespace,
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.namespace",
+				},
+			},
+		},
+	}
+}
+
+func publishAnchorPeerUpdateResultScript() string {
+	return `set -eu
+
+kubectl -n "$POD_NAMESPACE" create configmap "$FABRICOPS_ANCHOR_PEER_RESULT_CONFIGMAP" \
+  --from-file="$FABRICOPS_ANCHOR_PEER_RESULT_KEY=` + channelOutputDir + `/$FABRICOPS_ANCHOR_PEER_RESULT_FILE" \
+  --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
+
+kubectl -n "$POD_NAMESPACE" label configmap "$FABRICOPS_ANCHOR_PEER_RESULT_CONFIGMAP" \
+  fabricops.io/component=channel \
+  fabricops.io/channel="$FABRICOPS_ANCHOR_PEER_RESULT_CHANNEL" \
+  fabricops.io/org="$FABRICOPS_ANCHOR_PEER_RESULT_ORG" \
   app.kubernetes.io/component=channel \
   --overwrite
 `

@@ -26,6 +26,9 @@ go.work
 *.swo
 *~
 
+# Gradle local build cache
+**/.gradle/
+
 # Kubeconfig might contain secrets
 *.kubeconfig
 

@@ -11,7 +11,6 @@ rules:
   - persistentvolumeclaims
   - secrets
   - serviceaccounts
-  - services
   verbs:
   - create
   - get
@@ -30,6 +29,7 @@ rules:
   - ""
   resources:
   - namespaces
+  - services
   verbs:
   - create
   - delete
@@ -44,6 +44,7 @@ rules:
   - deployments
   verbs:
   - create
+  - delete
   - get
   - list
   - patch

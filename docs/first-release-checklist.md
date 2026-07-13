@@ -65,16 +65,28 @@ kind create cluster --name fabricops-release-bundle
 kubectl apply -f dist/install.yaml
 kubectl rollout status deployment/fabricops-controller-manager -n fabricops-system --timeout=120s
 kubectl apply -k config/samples
-kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
-config/samples/chaincodes/node_settlement/invoke_smoke.sh
+make build-fabricopsctl
+bin/fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
+bin/fabricopsctl invoke -n default --org BankA --peer BankA/peer0 --peer BankB/peer0 \
+  --channel settlement --chaincode settlement --function createSettlement \
+  --args '["release-bundle-001","alice","bob","100","USD"]' fabricnetwork-sample
+bin/fabricopsctl query -n default --org BankA --peer BankA/peer0 \
+  --channel settlement --chaincode settlement --function readSettlement \
+  --args '["release-bundle-001"]' fabricnetwork-sample
 ```
 
 ```bash
 kind create cluster --name fabricops-release-helm
 make helm-deploy-release VERSION=0.1.0
 kubectl apply -k config/samples
-kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
-config/samples/chaincodes/node_settlement/invoke_smoke.sh
+make build-fabricopsctl
+bin/fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
+bin/fabricopsctl invoke -n default --org BankA --peer BankA/peer0 --peer BankB/peer0 \
+  --channel settlement --chaincode settlement --function createSettlement \
+  --args '["release-helm-001","alice","bob","100","USD"]' fabricnetwork-sample
+bin/fabricopsctl query -n default --org BankA --peer BankA/peer0 \
+  --channel settlement --chaincode settlement --function readSettlement \
+  --args '["release-helm-001"]' fabricnetwork-sample
 ```
 
 ## Publish

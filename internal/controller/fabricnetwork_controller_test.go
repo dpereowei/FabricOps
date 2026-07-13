@@ -575,6 +575,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			}, &job)).To(Succeed())
 			Expect(job.Labels[labelAppComponent]).To(Equal(componentAdmin))
 			Expect(job.Annotations[annotationOrg]).To(Equal("BankA"))
+			Expect(job.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(job.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
 			Expect(job.Spec.Template.Spec.ServiceAccountName).To(Equal(enrollmentServiceAccountName(bankOrg)))
 			Expect(job.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
@@ -608,6 +609,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Namespace: ordererNamespace,
 				Name:      workloadEnrollmentJobName("orderer0"),
 			}, &ordererJob)).To(Succeed())
+			Expect(ordererJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			ordererEnrollContainer := ordererJob.Spec.Template.Spec.InitContainers[0]
 			Expect(ordererEnrollContainer.Name).To(Equal(enrollWorkloadContainerName))
 			Expect(envMap(ordererEnrollContainer)[envWorkloadName]).To(Equal("orderer0"))
@@ -622,6 +624,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Name:      workloadEnrollmentJobName("peer0"),
 			}, &peerJob)).To(Succeed())
 			Expect(peerJob.Labels[labelWorkload]).To(Equal("peer0"))
+			Expect(peerJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(peerJob.Spec.Template.Annotations[annotationOrg]).To(Equal("BankA"))
 			Expect(peerJob.Spec.Template.Spec.ServiceAccountName).To(Equal(enrollmentServiceAccountName(bankOrg)))
 			Expect(peerJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
@@ -1704,11 +1707,13 @@ var _ = Describe("FabricNetwork Controller", func() {
 			bankAApproveJob := buildChaincodeApproveJob(&network, channel, chaincode, bankAOrg, "peer0", packageID, orderer)
 			Expect(bankAApproveJob.Namespace).To(Equal("fo-test-banka"))
 			Expect(bankAApproveJob.Name).To(Equal("settlement-settlement-0-0-1-abc123-" + definitionHash + "-banka-approve"))
+			Expect(bankAApproveJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(bankAApproveJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-banka-peer0-installer"))
-			bankAApproveCommand := bankAApproveJob.Spec.Template.Spec.Containers[0].Command[2]
+			bankAApproveCommand := bankAApproveJob.Spec.Template.Spec.InitContainers[0].Command[2]
 			Expect(bankAApproveCommand).To(ContainSubstring("CORE_PEER_LOCALMSPID=\"BankAMSP\""))
 			Expect(bankAApproveCommand).To(ContainSubstring("CORE_PEER_ADDRESS=\"peer0.fo-test-banka.svc.cluster.local:7051\""))
 			Expect(bankAApproveCommand).To(ContainSubstring("ENDORSEMENT_POLICY=\"AND('BankAMSP.member','BankBMSP.member')\""))
+			Expect(bankAApproveJob.Spec.Template.Spec.Containers[0].Name).To(Equal(publishChaincodeLifecycleResultContainerName(approveChaincodeContainer)))
 
 			bankBApproveJob := buildChaincodeApproveJob(&network, channel, chaincode, bankBOrg, "peer0", packageID, orderer)
 			Expect(bankBApproveJob.Namespace).To(Equal("fo-test-bankb"))
@@ -1716,7 +1721,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(bankBApproveJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-bankb-peer0-installer"))
 			Expect(secretVolumeNames(bankBApproveJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminMSPVolume, "bankb-admin-msp"))
 			Expect(secretVolumeNames(bankBApproveJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminTLSVolume, "bankb-admin-tls"))
-			bankBApproveCommand := bankBApproveJob.Spec.Template.Spec.Containers[0].Command[2]
+			bankBApproveCommand := bankBApproveJob.Spec.Template.Spec.InitContainers[0].Command[2]
 			Expect(bankBApproveCommand).To(ContainSubstring("CORE_PEER_LOCALMSPID=\"BankBMSP\""))
 			Expect(bankBApproveCommand).To(ContainSubstring("CORE_PEER_ADDRESS=\"peer0.fo-test-bankb.svc.cluster.local:7051\""))
 			Expect(bankBApproveCommand).To(ContainSubstring("ENDORSEMENT_POLICY=\"AND('BankAMSP.member','BankBMSP.member')\""))
@@ -1730,7 +1735,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(secretVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodePeerTLSVolumeName(bankAOrg, "peer1"), "settlement-settlement-0-0-1-banka-peer1-tls"))
 			Expect(secretVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodePeerTLSVolumeName(bankBOrg, "peer0"), "settlement-settlement-0-0-1-bankb-peer0-tls"))
 
-			commitCommand := commitJob.Spec.Template.Spec.Containers[0].Command[2]
+			commitCommand := commitJob.Spec.Template.Spec.InitContainers[0].Command[2]
 			Expect(commitCommand).To(ContainSubstring("set -- \"$@\" --peerAddresses \"peer0.fo-test-banka.svc.cluster.local:7051\""))
 			Expect(commitCommand).To(ContainSubstring("set -- \"$@\" --peerAddresses \"peer1.fo-test-banka.svc.cluster.local:7051\""))
 			Expect(commitCommand).To(ContainSubstring("set -- \"$@\" --peerAddresses \"peer0.fo-test-bankb.svc.cluster.local:7051\""))
@@ -1738,7 +1743,151 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(commitCommand).To(ContainSubstring("--tlsRootCertFiles \"/fabricops/chaincode/crypto/peers/banka/peer1/tls/ca.crt\""))
 			Expect(commitCommand).To(ContainSubstring("--tlsRootCertFiles \"/fabricops/chaincode/crypto/peers/bankb/peer0/tls/ca.crt\""))
 			Expect(commitCommand).To(ContainSubstring("ENDORSEMENT_POLICY=\"AND('BankAMSP.member','BankBMSP.member')\""))
-			Expect(volumeMountPaths(commitJob.Spec.Template.Spec.Containers[0])).To(HaveKeyWithValue(chaincodePeerTLSVolumeName(bankBOrg, "peer0"), chaincodePeerTLSPath(bankBOrg, "peer0")))
+			Expect(volumeMountPaths(commitJob.Spec.Template.Spec.InitContainers[0])).To(HaveKeyWithValue(chaincodePeerTLSVolumeName(bankBOrg, "peer0"), chaincodePeerTLSPath(bankBOrg, "peer0")))
+			Expect(commitJob.Spec.Template.Spec.Containers[0].Name).To(Equal(publishChaincodeLifecycleResultContainerName(commitChaincodeContainer)))
+		})
+
+		It("should model post-bootstrap peer scale-up as explicit channel membership", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+
+			bankAOrg := network.Spec.Orgs[1]
+			channel := fabricopsv1alpha1.Channel{
+				Name: "settlement",
+				Orgs: []fabricopsv1alpha1.ChannelOrg{
+					{
+						Name:  "BankA",
+						Peers: []string{"peer0"},
+					},
+				},
+			}
+
+			Expect(desiredPeerNames(bankAOrg)).To(HaveKey("peer0"))
+			Expect(desiredPeerNames(bankAOrg)).NotTo(HaveKey("peer1"))
+			Expect(chaincodeLifecyclePeers(&network, channel)).To(HaveLen(1))
+
+			network.Spec.Orgs[1].Peer.Instances = 2
+			bankAOrg = network.Spec.Orgs[1]
+
+			Expect(desiredPeerNames(bankAOrg)).To(HaveKey("peer1"))
+			Expect(unknownChannelPeers(bankAOrg, []string{"peer0", "peer1"})).To(BeEmpty())
+			Expect(chaincodeLifecyclePeers(&network, channel)).To(HaveLen(1))
+			Expect(channelPeerCountsByOrg(channel)).To(HaveKeyWithValue("BankA", 1))
+
+			channel.Orgs[0].Peers = append(channel.Orgs[0].Peers, "peer1")
+
+			peers := chaincodeLifecyclePeers(&network, channel)
+			Expect(peers).To(HaveLen(2))
+			Expect(peers[0].peerName).To(Equal("peer0"))
+			Expect(peers[1].peerName).To(Equal("peer1"))
+			Expect(peers[1].namespace).To(Equal("fo-test-banka"))
+			Expect(channelPeerCountsByOrg(channel)).To(HaveKeyWithValue("BankA", 2))
+			Expect(chaincodeApprovalPeers(channel)).To(HaveKeyWithValue("BankA", "peer0"))
+
+			chaincode := fabricopsv1alpha1.Chaincode{
+				Name:    "settlement",
+				Version: "0.0.1",
+				Channel: "settlement",
+				Image:   "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0",
+			}
+			peer1InstallJob := buildChaincodeInstallJob(&network, chaincode, bankAOrg, "peer1")
+			Expect(peer1InstallJob.Name).To(Equal("settlement-settlement-0-0-1-banka-peer1-install"))
+			Expect(peer1InstallJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-banka-peer1-installer"))
+			Expect(peer1InstallJob.Spec.Template.Spec.InitContainers[0].Command[2]).To(ContainSubstring("CORE_PEER_ADDRESS=\"peer1.fo-test-banka.svc.cluster.local:7051\""))
+		})
+
+		It("should stop scaled-down peer workloads without deleting peer state", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			bankNamespace := "fo-test-banka"
+			bankOrg := network.Spec.Orgs[1]
+			bankOrg.Peer.Instances = 2
+			Expect(controllerReconciler.ensureNamespace(ctx, buildOrgNamespace(&network, bankOrg))).To(Succeed())
+
+			peer1Deploy := buildPeerDeployment(&network, bankOrg, 1, bankNamespace)
+			peer1PVC, err := buildDataPVC(&network, bankOrg, bankNamespace, peer1Deploy.Name, componentPeer)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Create(ctx, peer1PVC)).To(Succeed())
+			Expect(k8sClient.Create(ctx, peer1Deploy)).To(Succeed())
+			Expect(k8sClient.Create(ctx, buildPeerService(&network, bankOrg, 1, bankNamespace))).To(Succeed())
+			Expect(k8sClient.Create(ctx, buildPeerOperationsService(&network, bankOrg, 1, bankNamespace))).To(Succeed())
+
+			bankOrg.Peer.Instances = 1
+			status, err := controllerReconciler.reconcilePeers(ctx, &network, bankOrg, bankNamespace)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status.Desired).To(Equal(int32(1)))
+
+			var peer0Deploy appsv1.Deployment
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "peer0",
+			}, &peer0Deploy)).To(Succeed())
+			var peer0Service corev1.Service
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "peer0",
+			}, &peer0Service)).To(Succeed())
+
+			expectDeploymentNotFound(ctx, bankNamespace, "peer1")
+			expectServiceNotFound(ctx, bankNamespace, "peer1")
+			expectServiceNotFound(ctx, bankNamespace, "peer1-operations")
+			expectPersistentVolumeClaim(ctx, bankNamespace, "peer1-data", "12Gi", "fabricops-peer")
+		})
+
+		It("should remove stale CCaaS workloads when a peer leaves chaincode targets", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			bankNamespace := "fo-test-banka"
+			bankOrg := network.Spec.Orgs[1]
+			Expect(controllerReconciler.ensureNamespace(ctx, buildOrgNamespace(&network, bankOrg))).To(Succeed())
+
+			channel := fabricopsv1alpha1.Channel{
+				Name: "settlement",
+				Orgs: []fabricopsv1alpha1.ChannelOrg{
+					{
+						Name:  "BankA",
+						Peers: []string{"peer0"},
+					},
+				},
+			}
+			chaincode := fabricopsv1alpha1.Chaincode{
+				Name:    "settlement",
+				Version: "0.0.1",
+				Channel: "settlement",
+				Image:   "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0",
+				CCAAS: &fabricopsv1alpha1.ChaincodeAsAService{
+					ServicePort: 7052,
+				},
+			}
+			network.Spec.Channels = []fabricopsv1alpha1.Channel{channel}
+			network.Spec.Chaincodes = []fabricopsv1alpha1.Chaincode{chaincode}
+
+			Expect(k8sClient.Create(ctx, buildChaincodeDeployment(&network, chaincode, bankOrg, "peer1", "settlement_settlement_0.0.1:abc123"))).To(Succeed())
+			Expect(k8sClient.Create(ctx, buildChaincodeService(&network, chaincode, bankOrg, "peer1"))).To(Succeed())
+
+			statuses, err := controllerReconciler.reconcileChaincodes(ctx, &network, []fabricopsv1alpha1.ChannelStatus{
+				{
+					Name:  "settlement",
+					Ready: true,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(statuses).To(HaveLen(1))
+			Expect(statuses[0].Targets).To(HaveLen(1))
+			Expect(statuses[0].Targets[0].PeerName).To(Equal("peer0"))
+
+			expectDeploymentNotFound(ctx, bankNamespace, "settlement-settlement-banka-peer1-ccaas")
+			expectServiceNotFound(ctx, bankNamespace, "settlement-settlement-banka-peer1-ccaas")
 		})
 
 		It("should render private data collections and mount them into lifecycle jobs", func() {
@@ -1850,7 +1999,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			approveJob := buildChaincodeApproveJob(&network, channel, chaincode, bankOrg, "peer0", packageID, orderer)
 			Expect(approveJob.Name).To(Equal("settlement-settlement-0-0-1-abc123-" + definitionHash + "-banka-approve"))
 			Expect(configMapVolumeNames(approveJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeCollectionsVolume, "settlement-settlement-collections"))
-			approveContainer := approveJob.Spec.Template.Spec.Containers[0]
+			approveContainer := approveJob.Spec.Template.Spec.InitContainers[0]
 			Expect(volumeMountPaths(approveContainer)).To(HaveKeyWithValue(chaincodeCollectionsVolume, chaincodeCollectionsDir))
 			Expect(approveContainer.Command[2]).To(ContainSubstring("COLLECTIONS_CONFIG=\"/fabricops/chaincode/collections/collections.json\""))
 			Expect(approveContainer.Command[2]).To(ContainSubstring("--collections-config \"$COLLECTIONS_CONFIG\""))
@@ -1859,7 +2008,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			commitJob := buildChaincodeCommitJob(&network, channel, chaincode, packageID, peers[0], orderer, peers)
 			Expect(commitJob.Name).To(Equal("settlement-settlement-0-0-1-abc123-" + definitionHash + "-commit"))
 			Expect(configMapVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeCollectionsVolume, "settlement-settlement-collections"))
-			commitContainer := commitJob.Spec.Template.Spec.Containers[0]
+			commitContainer := commitJob.Spec.Template.Spec.InitContainers[0]
 			Expect(volumeMountPaths(commitContainer)).To(HaveKeyWithValue(chaincodeCollectionsVolume, chaincodeCollectionsDir))
 			Expect(commitContainer.Command[2]).To(ContainSubstring("COLLECTIONS_CONFIG=\"/fabricops/chaincode/collections/collections.json\""))
 			Expect(commitContainer.Command[2]).To(ContainSubstring("--collections-config \"$COLLECTIONS_CONFIG\""))
@@ -1901,6 +2050,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			chaincode := network.Spec.Chaincodes[0]
 			definitionHash := chaincodeDefinitionNameHash(chaincode)
 			Expect(definitionHash).NotTo(BeEmpty())
+			packageID := "settlement_settlement_0.0.1:abc123"
 			approveJobName := "settlement-settlement-0-0-1-abc123-" + definitionHash + "-banka-approve"
 			commitJobName := "settlement-settlement-0-0-1-abc123-" + definitionHash + "-commit"
 
@@ -2032,6 +2182,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			}, &job)).To(Succeed())
 			Expect(job.Labels[labelAppComponent]).To(Equal(componentChannel))
 			Expect(job.Labels[labelChannel]).To(Equal("settlement"))
+			Expect(job.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(job.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-channel-bootstrapper"))
 			Expect(job.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
 			Expect(job.Spec.Template.Spec.InitContainers).To(HaveLen(1))
@@ -2098,22 +2249,34 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(ordererJoinJob.Labels[labelAppComponent]).To(Equal(componentChannel))
 			Expect(ordererJoinJob.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(ordererJoinJob.Labels[labelWorkload]).To(Equal("orderer0"))
+			Expect(ordererJoinJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(ordererJoinJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-channel-bootstrapper"))
 			Expect(ordererJoinJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(ordererJoinJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
 			Expect(ordererJoinJob.Spec.Template.Spec.Containers).To(HaveLen(1))
 			Expect(configMapVolumeNames(ordererJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue(channelBlockVolumeName, "settlement-channel-block"))
 			Expect(secretVolumeNames(ordererJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue("admin-tls-orderer", "settlement-orderer-admin-tls"))
 
-			joinContainer := ordererJoinJob.Spec.Template.Spec.Containers[0]
+			joinContainer := ordererJoinJob.Spec.Template.Spec.InitContainers[0]
 			Expect(joinContainer.Name).To(Equal(joinOrdererContainer))
 			Expect(joinContainer.Image).To(Equal("hyperledger/fabric-tools:2.5.14"))
 			Expect(joinContainer.Command[2]).To(ContainSubstring("osnadmin channel join"))
+			Expect(joinContainer.Command[2]).To(ContainSubstring("osnadmin channel list"))
 			Expect(joinContainer.Command[2]).To(ContainSubstring("orderer0.fo-test-orderer.svc.cluster.local:9443"))
 			Expect(joinContainer.Command[2]).To(ContainSubstring("--client-cert \"$ADMIN_TLS_DIR/client.crt\""))
+			Expect(volumeMountPaths(joinContainer)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
 			Expect(volumeMountPaths(joinContainer)).To(HaveKeyWithValue(channelBlockVolumeName, channelBlockDir))
 			Expect(volumeMountPaths(joinContainer)).To(HaveKeyWithValue("admin-tls-orderer", channelOrdererAdminTLSPath(network.Spec.Orgs[0])))
 
+			joinPublisher := ordererJoinJob.Spec.Template.Spec.Containers[0]
+			Expect(joinPublisher.Name).To(Equal(publishOrdererJoinContainer))
+			Expect(joinPublisher.Image).To(Equal(kubectlImage()))
+			Expect(envMap(joinPublisher)[envOrdererJoinResultConfigMap]).To(Equal("settlement-orderer-orderer0-orderer-join-result"))
+			Expect(envMap(joinPublisher)[envOrdererJoinResultKey]).To(Equal(channelOrdererJoinResultKey))
+			Expect(volumeMountPaths(joinPublisher)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
+
 			markJobComplete(ctx, ordererNamespace, "settlement-orderer-orderer0-orderer-join")
+			createOrdererJoinResultConfigMap(ctx, ordererNamespace, "settlement-orderer-orderer0-orderer-join-result", "settlement")
 
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -2126,6 +2289,31 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(network.Status.ChannelStatus[0].Orderers.Ready).To(Equal(int32(1)))
 			Expect(network.Status.ChannelStatus[0].Ready).To(BeFalse())
 			Expect(network.Status.ChannelStatus[0].Message).To(Equal("Waiting for peer join Jobs"))
+
+			By("Deleting the cleanup-eligible orderer join Job after durable result evidence exists")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "settlement-orderer-orderer0-orderer-join",
+			}, &ordererJoinJob)).To(Succeed())
+			propagation := metav1.DeletePropagationBackground
+			Expect(k8sClient.Delete(ctx, &ordererJoinJob, &client.DeleteOptions{PropagationPolicy: &propagation})).To(Succeed())
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: ordererNamespace,
+					Name:      "settlement-orderer-orderer0-orderer-join",
+				}, &ordererJoinJob)
+				return errors.IsNotFound(err)
+			}).Should(BeTrue())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: ordererNamespace,
+				Name:      "settlement-orderer-orderer0-orderer-join",
+			}, &ordererJoinJob)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
 
 			var peerBlockConfigMap corev1.ConfigMap
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -2143,6 +2331,28 @@ var _ = Describe("FabricNetwork Controller", func() {
 			}, &peerServiceAccount)).To(Succeed())
 			Expect(peerServiceAccount.Labels[labelAppComponent]).To(Equal(componentChannel))
 
+			var peerRole rbacv1.Role
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-channel-bootstrapper",
+			}, &peerRole)).To(Succeed())
+			Expect(peerRole.Rules).To(ContainElement(rbacv1.PolicyRule{
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get", "create", "update", "patch"},
+			}))
+
+			var peerRoleBinding rbacv1.RoleBinding
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-channel-bootstrapper",
+			}, &peerRoleBinding)).To(Succeed())
+			Expect(peerRoleBinding.Subjects).To(ContainElement(rbacv1.Subject{
+				Kind:      rbacv1.ServiceAccountKind,
+				Name:      "settlement-channel-bootstrapper",
+				Namespace: bankNamespace,
+			}))
+
 			var peerJoinJob batchv1.Job
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Namespace: bankNamespace,
@@ -2151,25 +2361,37 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(peerJoinJob.Labels[labelAppComponent]).To(Equal(componentChannel))
 			Expect(peerJoinJob.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(peerJoinJob.Labels[labelWorkload]).To(Equal("peer0"))
+			Expect(peerJoinJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(peerJoinJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-channel-bootstrapper"))
 			Expect(peerJoinJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(peerJoinJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
 			Expect(peerJoinJob.Spec.Template.Spec.Containers).To(HaveLen(1))
 			Expect(configMapVolumeNames(peerJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue(channelBlockVolumeName, "settlement-channel-block"))
 			Expect(secretVolumeNames(peerJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue("msp-banka", "banka-admin-msp"))
 			Expect(secretVolumeNames(peerJoinJob.Spec.Template.Spec)).To(HaveKeyWithValue("admin-tls-banka", "banka-admin-tls"))
 
-			peerJoinContainer := peerJoinJob.Spec.Template.Spec.Containers[0]
+			peerJoinContainer := peerJoinJob.Spec.Template.Spec.InitContainers[0]
 			Expect(peerJoinContainer.Name).To(Equal(joinPeerContainer))
 			Expect(peerJoinContainer.Image).To(Equal("hyperledger/fabric-tools:2.5.14"))
 			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("peer channel join"))
+			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("peer channel list"))
 			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("CORE_PEER_LOCALMSPID=\"BankAMSP\""))
 			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("peer0.fo-test-banka.svc.cluster.local:7051"))
 			Expect(peerJoinContainer.Command[2]).To(ContainSubstring("--cafile \"$CORE_PEER_TLS_ROOTCERT_FILE\""))
+			Expect(volumeMountPaths(peerJoinContainer)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
 			Expect(volumeMountPaths(peerJoinContainer)).To(HaveKeyWithValue(channelBlockVolumeName, channelBlockDir))
 			Expect(volumeMountPaths(peerJoinContainer)).To(HaveKeyWithValue("msp-banka", channelOrgMSPPath(network.Spec.Orgs[1])))
 			Expect(volumeMountPaths(peerJoinContainer)).To(HaveKeyWithValue("admin-tls-banka", channelOrdererAdminTLSPath(network.Spec.Orgs[1])))
 
+			peerJoinPublisher := peerJoinJob.Spec.Template.Spec.Containers[0]
+			Expect(peerJoinPublisher.Name).To(Equal(publishPeerJoinContainer))
+			Expect(peerJoinPublisher.Image).To(Equal(kubectlImage()))
+			Expect(envMap(peerJoinPublisher)[envPeerJoinResultConfigMap]).To(Equal("settlement-banka-peer0-peer-join-result"))
+			Expect(envMap(peerJoinPublisher)[envPeerJoinResultKey]).To(Equal(channelPeerJoinResultKey))
+			Expect(volumeMountPaths(peerJoinPublisher)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
+
 			markJobComplete(ctx, bankNamespace, "settlement-banka-peer0-peer-join")
+			createPeerJoinResultConfigMap(ctx, bankNamespace, "settlement-banka-peer0-peer-join-result", "settlement")
 
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -2193,6 +2415,30 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(channels.Reason).To(Equal("ChannelBootstrapPending"))
 			Expect(channels.Message).To(Equal("settlement: Waiting for anchor peer update Jobs"))
 
+			By("Deleting the cleanup-eligible peer join Job after durable result evidence exists")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-banka-peer0-peer-join",
+			}, &peerJoinJob)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &peerJoinJob, &client.DeleteOptions{PropagationPolicy: &propagation})).To(Succeed())
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: bankNamespace,
+					Name:      "settlement-banka-peer0-peer-join",
+				}, &peerJoinJob)
+				return errors.IsNotFound(err)
+			}).Should(BeTrue())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-banka-peer0-peer-join",
+			}, &peerJoinJob)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+
 			var peerOrdererTLS corev1.Secret
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Namespace: bankNamespace,
@@ -2210,14 +2456,16 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(anchorPeerJob.Labels[labelAppComponent]).To(Equal(componentChannel))
 			Expect(anchorPeerJob.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(anchorPeerJob.Labels[labelWorkload]).To(Equal("peer0"))
+			Expect(anchorPeerJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(anchorPeerJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-channel-bootstrapper"))
 			Expect(anchorPeerJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(anchorPeerJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
 			Expect(anchorPeerJob.Spec.Template.Spec.Containers).To(HaveLen(1))
 			Expect(secretVolumeNames(anchorPeerJob.Spec.Template.Spec)).To(HaveKeyWithValue("msp-banka", "banka-admin-msp"))
 			Expect(secretVolumeNames(anchorPeerJob.Spec.Template.Spec)).To(HaveKeyWithValue("admin-tls-banka", "banka-admin-tls"))
 			Expect(secretVolumeNames(anchorPeerJob.Spec.Template.Spec)).To(HaveKeyWithValue("tls-orderer0", "settlement-orderer0-tls"))
 
-			anchorContainer := anchorPeerJob.Spec.Template.Spec.Containers[0]
+			anchorContainer := anchorPeerJob.Spec.Template.Spec.InitContainers[0]
 			Expect(anchorContainer.Name).To(Equal(updateAnchorPeerContainer))
 			Expect(anchorContainer.Image).To(Equal("hyperledger/fabric-tools:2.5.14"))
 			Expect(anchorContainer.Command[2]).To(ContainSubstring("MSP_ID=\"BankAMSP\""))
@@ -2235,7 +2483,22 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(volumeMountPaths(anchorContainer)).To(HaveKeyWithValue("admin-tls-banka", channelOrdererAdminTLSPath(network.Spec.Orgs[1])))
 			Expect(volumeMountPaths(anchorContainer)).To(HaveKeyWithValue("tls-orderer0", channelOrdererTLSPath("orderer0")))
 
+			anchorPublisher := anchorPeerJob.Spec.Template.Spec.Containers[0]
+			Expect(anchorPublisher.Name).To(Equal(publishAnchorPeerContainer))
+			Expect(anchorPublisher.Image).To(Equal(kubectlImage()))
+			Expect(envMap(anchorPublisher)[envAnchorPeerResultConfigMap]).To(Equal("settlement-banka-anchor-peer-update-result"))
+			Expect(envMap(anchorPublisher)[envAnchorPeerResultKey]).To(Equal(channelAnchorPeerResultKey))
+			Expect(volumeMountPaths(anchorPublisher)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
+
 			markJobComplete(ctx, bankNamespace, "settlement-banka-anchor-peer-update")
+			createAnchorPeerUpdateResultConfigMap(
+				ctx,
+				bankNamespace,
+				"settlement-banka-anchor-peer-update-result",
+				"settlement",
+				"BankAMSP",
+				"peer0.fo-test-banka.svc.cluster.local",
+			)
 
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -2257,6 +2520,30 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(channels).NotTo(BeNil())
 			Expect(channels.Status).To(Equal(metav1.ConditionTrue))
 			Expect(channels.Reason).To(Equal("ChannelsReady"))
+
+			By("Deleting the cleanup-eligible anchor peer update Job after durable result evidence exists")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-banka-anchor-peer-update",
+			}, &anchorPeerJob)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &anchorPeerJob, &client.DeleteOptions{PropagationPolicy: &propagation})).To(Succeed())
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: bankNamespace,
+					Name:      "settlement-banka-anchor-peer-update",
+				}, &anchorPeerJob)
+				return errors.IsNotFound(err)
+			}).Should(BeTrue())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-banka-anchor-peer-update",
+			}, &anchorPeerJob)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
 
 			var chaincodeServiceAccount corev1.ServiceAccount
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -2288,6 +2575,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(chaincodeInstallJob.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(chaincodeInstallJob.Labels[labelChaincode]).To(Equal("settlement"))
 			Expect(chaincodeInstallJob.Labels[labelWorkload]).To(Equal("peer0"))
+			Expect(chaincodeInstallJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(chaincodeInstallJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-banka-peer0-installer"))
 			Expect(chaincodeInstallJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
 			Expect(chaincodeInstallJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
@@ -2355,8 +2643,8 @@ var _ = Describe("FabricNetwork Controller", func() {
 					Namespace: bankNamespace,
 				},
 				Data: map[string]string{
-					chaincodePackageIDKey:      "settlement_settlement_0.0.1:abc123",
-					chaincodeChaincodeIDKey:    "settlement_settlement_0.0.1:abc123",
+					chaincodePackageIDKey:      packageID,
+					chaincodeChaincodeIDKey:    packageID,
 					chaincodePackageHashKey:    "abc123",
 					chaincodeQueryInstalledKey: `{"installed_chaincodes":[{"label":"settlement_settlement_0.0.1","package_id":"settlement_settlement_0.0.1:abc123"}]}`,
 				},
@@ -2446,14 +2734,18 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(approveJob.Labels[labelAppComponent]).To(Equal(componentChaincode))
 			Expect(approveJob.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(approveJob.Labels[labelChaincode]).To(Equal("settlement"))
+			Expect(approveJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(approveJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-banka-peer0-installer"))
 			Expect(secretVolumeNames(approveJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminMSPVolume, "banka-admin-msp"))
 			Expect(secretVolumeNames(approveJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminTLSVolume, "banka-admin-tls"))
 			Expect(secretVolumeNames(approveJob.Spec.Template.Spec)).To(HaveKeyWithValue(channelOrdererTLSVolumeName("orderer0"), "settlement-orderer0-tls"))
 
-			approveContainer := approveJob.Spec.Template.Spec.Containers[0]
+			Expect(approveJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
+			Expect(approveJob.Spec.Template.Spec.Containers).To(HaveLen(1))
+			approveContainer := approveJob.Spec.Template.Spec.InitContainers[0]
 			Expect(approveContainer.Name).To(Equal(approveChaincodeContainer))
 			Expect(approveContainer.Command[2]).To(ContainSubstring("peer lifecycle chaincode approveformyorg"))
+			Expect(approveContainer.Command[2]).To(ContainSubstring("peer lifecycle chaincode queryapproved"))
 			Expect(approveContainer.Command[2]).To(ContainSubstring("--package-id \"$PACKAGE_ID\""))
 			Expect(approveContainer.Command[2]).To(ContainSubstring("ENDORSEMENT_POLICY=\"OR('BankAMSP.member')\""))
 			Expect(approveContainer.Command[2]).To(ContainSubstring("CORE_PEER_LOCALMSPID=\"BankAMSP\""))
@@ -2462,7 +2754,14 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(volumeMountPaths(approveContainer)).To(HaveKeyWithValue(chaincodeAdminTLSVolume, chaincodeAdminTLSPath))
 			Expect(volumeMountPaths(approveContainer)).To(HaveKeyWithValue(channelOrdererTLSVolumeName("orderer0"), chaincodeOrdererTLSPath("orderer0")))
 
+			approvePublisher := approveJob.Spec.Template.Spec.Containers[0]
+			Expect(approvePublisher.Name).To(Equal(publishChaincodeLifecycleResultContainerName(approveChaincodeContainer)))
+			Expect(envMap(approvePublisher)[envChaincodeLifecycleResultConfigMap]).To(Equal(chaincodeApproveResultConfigMapName(chaincode, network.Spec.Orgs[1], packageID)))
+			Expect(envMap(approvePublisher)[envChaincodeLifecycleResultKey]).To(Equal(chaincodeQueryApprovedKey))
+			Expect(volumeMountPaths(approvePublisher)).To(HaveKeyWithValue(chaincodeOutputVolumeName, chaincodeOutputDir))
+
 			markJobComplete(ctx, bankNamespace, approveJobName)
+			createChaincodeLifecycleResultConfigMap(ctx, &network, network.Spec.Orgs[1], chaincode, chaincodeApproveResultConfigMapName(chaincode, network.Spec.Orgs[1], packageID), chaincodeQueryApprovedKey, chaincodeSequence(chaincode))
 
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -2498,6 +2797,17 @@ var _ = Describe("FabricNetwork Controller", func() {
 			}, &commitServiceAccount)).To(Succeed())
 			Expect(commitServiceAccount.Labels[labelAppComponent]).To(Equal(componentChaincode))
 
+			var commitRole rbacv1.Role
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-settlement-0-0-1-committer",
+			}, &commitRole)).To(Succeed())
+			Expect(commitRole.Rules).To(ContainElement(rbacv1.PolicyRule{
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get", "create", "update", "patch"},
+			}))
+
 			var commitJob batchv1.Job
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Namespace: bankNamespace,
@@ -2506,13 +2816,16 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(commitJob.Labels[labelAppComponent]).To(Equal(componentChaincode))
 			Expect(commitJob.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(commitJob.Labels[labelChaincode]).To(Equal("settlement"))
+			Expect(commitJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(commitJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-1-committer"))
 			Expect(secretVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminMSPVolume, "banka-admin-msp"))
 			Expect(secretVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodeAdminTLSVolume, "banka-admin-tls"))
 			Expect(secretVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(channelOrdererTLSVolumeName("orderer0"), "settlement-orderer0-tls"))
 			Expect(secretVolumeNames(commitJob.Spec.Template.Spec)).To(HaveKeyWithValue(chaincodePeerTLSVolumeName(network.Spec.Orgs[1], "peer0"), "settlement-settlement-0-0-1-banka-peer0-tls"))
 
-			commitContainer := commitJob.Spec.Template.Spec.Containers[0]
+			Expect(commitJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
+			Expect(commitJob.Spec.Template.Spec.Containers).To(HaveLen(1))
+			commitContainer := commitJob.Spec.Template.Spec.InitContainers[0]
 			Expect(commitContainer.Name).To(Equal(commitChaincodeContainer))
 			Expect(commitContainer.Command[2]).To(ContainSubstring("peer lifecycle chaincode commit"))
 			Expect(commitContainer.Command[2]).To(ContainSubstring("peer lifecycle chaincode querycommitted"))
@@ -2524,7 +2837,14 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(volumeMountPaths(commitContainer)).To(HaveKeyWithValue(channelOrdererTLSVolumeName("orderer0"), chaincodeOrdererTLSPath("orderer0")))
 			Expect(volumeMountPaths(commitContainer)).To(HaveKeyWithValue(chaincodePeerTLSVolumeName(network.Spec.Orgs[1], "peer0"), chaincodePeerTLSPath(network.Spec.Orgs[1], "peer0")))
 
+			commitPublisher := commitJob.Spec.Template.Spec.Containers[0]
+			Expect(commitPublisher.Name).To(Equal(publishChaincodeLifecycleResultContainerName(commitChaincodeContainer)))
+			Expect(envMap(commitPublisher)[envChaincodeLifecycleResultConfigMap]).To(Equal(chaincodeCommitResultConfigMapName(chaincode, packageID)))
+			Expect(envMap(commitPublisher)[envChaincodeLifecycleResultKey]).To(Equal(chaincodeQueryCommittedKey))
+			Expect(volumeMountPaths(commitPublisher)).To(HaveKeyWithValue(chaincodeOutputVolumeName, chaincodeOutputDir))
+
 			markJobComplete(ctx, bankNamespace, commitJobName)
+			createChaincodeLifecycleResultConfigMap(ctx, &network, network.Spec.Orgs[1], chaincode, chaincodeCommitResultConfigMapName(chaincode, packageID), chaincodeQueryCommittedKey, chaincodeSequence(chaincode))
 
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -2572,6 +2892,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			upgradedChaincode := network.Spec.Chaincodes[0]
 			upgradeDefinitionHash := chaincodeDefinitionNameHash(upgradedChaincode)
 			Expect(upgradeDefinitionHash).NotTo(Equal(definitionHash))
+			upgradePackageID := "settlement_settlement_0.0.2:def456"
 			upgradeApproveJobName := "settlement-settlement-0-0-2-def456-" + upgradeDefinitionHash + "-banka-approve"
 			upgradeCommitJobName := "settlement-settlement-0-0-2-def456-" + upgradeDefinitionHash + "-commit"
 
@@ -2626,8 +2947,8 @@ var _ = Describe("FabricNetwork Controller", func() {
 					Namespace: bankNamespace,
 				},
 				Data: map[string]string{
-					chaincodePackageIDKey:      "settlement_settlement_0.0.2:def456",
-					chaincodeChaincodeIDKey:    "settlement_settlement_0.0.2:def456",
+					chaincodePackageIDKey:      upgradePackageID,
+					chaincodeChaincodeIDKey:    upgradePackageID,
 					chaincodePackageHashKey:    "def456",
 					chaincodeQueryInstalledKey: `{"installed_chaincodes":[{"label":"settlement_settlement_0.0.2","package_id":"settlement_settlement_0.0.2:def456"}]}`,
 				},
@@ -2646,8 +2967,8 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(chaincodeStatus.Workloads.Desired).To(Equal(int32(1)))
 			Expect(chaincodeStatus.Workloads.Ready).To(Equal(int32(0)))
 			Expect(chaincodeStatus.WorkloadsReady).To(BeFalse())
-			Expect(chaincodeStatus.Targets[0].PackageID).To(Equal("settlement_settlement_0.0.2:def456"))
-			Expect(chaincodeStatus.Targets[0].ChaincodeID).To(Equal("settlement_settlement_0.0.2:def456"))
+			Expect(chaincodeStatus.Targets[0].PackageID).To(Equal(upgradePackageID))
+			Expect(chaincodeStatus.Targets[0].ChaincodeID).To(Equal(upgradePackageID))
 			Expect(chaincodeStatus.Targets[0].ApproveJobName).To(Equal(upgradeApproveJobName))
 			Expect(chaincodeStatus.Targets[0].WorkloadReady).To(BeFalse())
 			Expect(chaincodeStatus.Message).To(Equal("Chaincode package installed; waiting for chaincode workloads and lifecycle approval Jobs"))
@@ -2658,8 +2979,8 @@ var _ = Describe("FabricNetwork Controller", func() {
 			}, &chaincodeDeployment)).To(Succeed())
 			chaincodeContainer = chaincodeDeployment.Spec.Template.Spec.Containers[0]
 			Expect(chaincodeContainer.Image).To(Equal("ghcr.io/dpereowei/fabricops-node-settlement:0.2.0"))
-			Expect(envMap(chaincodeContainer)[envCCAASChaincodeID]).To(Equal("settlement_settlement_0.0.2:def456"))
-			Expect(envMap(chaincodeContainer)[envCCAASCoreChaincodeIDName]).To(Equal("settlement_settlement_0.0.2:def456"))
+			Expect(envMap(chaincodeContainer)[envCCAASChaincodeID]).To(Equal(upgradePackageID))
+			Expect(envMap(chaincodeContainer)[envCCAASCoreChaincodeIDName]).To(Equal(upgradePackageID))
 			Expect(chaincodeDeployment.Status.ReadyReplicas).To(Equal(int32(1)))
 			Expect(chaincodeDeployment.Status.ObservedGeneration).To(BeNumerically("<", chaincodeDeployment.Generation))
 
@@ -2669,11 +2990,12 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Name:      upgradeApproveJobName,
 			}, &upgradeApproveJob)).To(Succeed())
 			Expect(upgradeApproveJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-2-banka-peer0-installer"))
-			Expect(upgradeApproveJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("SEQUENCE=2"))
-			Expect(upgradeApproveJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("--sequence \"$SEQUENCE\""))
-			Expect(upgradeApproveJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("--package-id \"$PACKAGE_ID\""))
+			Expect(upgradeApproveJob.Spec.Template.Spec.InitContainers[0].Command[2]).To(ContainSubstring("SEQUENCE=2"))
+			Expect(upgradeApproveJob.Spec.Template.Spec.InitContainers[0].Command[2]).To(ContainSubstring("--sequence \"$SEQUENCE\""))
+			Expect(upgradeApproveJob.Spec.Template.Spec.InitContainers[0].Command[2]).To(ContainSubstring("--package-id \"$PACKAGE_ID\""))
 
 			markJobComplete(ctx, bankNamespace, upgradeApproveJobName)
+			createChaincodeLifecycleResultConfigMap(ctx, &network, network.Spec.Orgs[1], upgradedChaincode, chaincodeApproveResultConfigMapName(upgradedChaincode, network.Spec.Orgs[1], upgradePackageID), chaincodeQueryApprovedKey, chaincodeSequence(upgradedChaincode))
 
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -2695,11 +3017,12 @@ var _ = Describe("FabricNetwork Controller", func() {
 				Name:      upgradeCommitJobName,
 			}, &upgradeCommitJob)).To(Succeed())
 			Expect(upgradeCommitJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-settlement-0-0-2-committer"))
-			Expect(upgradeCommitJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("SEQUENCE=2"))
-			Expect(upgradeCommitJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("--sequence \"$SEQUENCE\""))
-			Expect(upgradeCommitJob.Spec.Template.Spec.Containers[0].Command[2]).To(ContainSubstring("peer lifecycle chaincode querycommitted"))
+			Expect(upgradeCommitJob.Spec.Template.Spec.InitContainers[0].Command[2]).To(ContainSubstring("SEQUENCE=2"))
+			Expect(upgradeCommitJob.Spec.Template.Spec.InitContainers[0].Command[2]).To(ContainSubstring("--sequence \"$SEQUENCE\""))
+			Expect(upgradeCommitJob.Spec.Template.Spec.InitContainers[0].Command[2]).To(ContainSubstring("peer lifecycle chaincode querycommitted"))
 
 			markJobComplete(ctx, bankNamespace, upgradeCommitJobName)
+			createChaincodeLifecycleResultConfigMap(ctx, &network, network.Spec.Orgs[1], upgradedChaincode, chaincodeCommitResultConfigMapName(upgradedChaincode, upgradePackageID), chaincodeQueryCommittedKey, chaincodeSequence(upgradedChaincode))
 
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -2732,6 +3055,108 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(chaincodeStatus.Ready).To(BeTrue())
 			Expect(chaincodeStatus.Message).To(Equal("Chaincode committed and workload ready"))
 			Expect(network.Status.Phase).To(Equal(fabricopsv1alpha1.PhaseReady))
+		})
+
+		It("should clean up only eligible succeeded Jobs after the configured history TTL", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Global.Jobs = &fabricopsv1alpha1.JobCleanupConfig{
+				SucceededHistoryTTLSeconds: int32Ptr(0),
+			}
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			bankOrg := network.Spec.Orgs[1]
+			namespace := orgNamespaceName(&network, bankOrg)
+			Expect(controllerReconciler.ensureNamespace(ctx, buildOrgNamespace(&network, bankOrg))).To(Succeed())
+
+			createCleanupTestJob(ctx, &network, bankOrg, namespace, "eligible-succeeded", true)
+			markJobComplete(ctx, namespace, "eligible-succeeded")
+			createCleanupTestJob(ctx, &network, bankOrg, namespace, "proof-succeeded", false)
+			markJobComplete(ctx, namespace, "proof-succeeded")
+			createCleanupTestJob(ctx, &network, bankOrg, namespace, "eligible-failed", true)
+			markJobFailed(ctx, namespace, "eligible-failed")
+
+			cleanupAfter, err := controllerReconciler.cleanupSucceededJobs(ctx, &network)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cleanupAfter).To(Equal(time.Duration(0)))
+
+			Eventually(func(g Gomega) {
+				var job batchv1.Job
+				err := k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "eligible-succeeded"}, &job)
+				g.Expect(errors.IsNotFound(err)).To(BeTrue())
+			}).Should(Succeed())
+
+			var retained batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "proof-succeeded"}, &retained)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "eligible-failed"}, &retained)).To(Succeed())
+		})
+
+		It("should not retroactively mark existing Jobs as cleanup eligible", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Global.Jobs = &fabricopsv1alpha1.JobCleanupConfig{
+				SucceededHistoryTTLSeconds: int32Ptr(0),
+			}
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			bankOrg := network.Spec.Orgs[1]
+			namespace := orgNamespaceName(&network, bankOrg)
+			Expect(controllerReconciler.ensureNamespace(ctx, buildOrgNamespace(&network, bankOrg))).To(Succeed())
+
+			createCleanupTestJob(ctx, &network, bankOrg, namespace, "legacy-succeeded", false)
+			markJobComplete(ctx, namespace, "legacy-succeeded")
+
+			desired := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "legacy-succeeded",
+					Namespace:   namespace,
+					Labels:      orgLabels(&network, bankOrg, componentChannel),
+					Annotations: succeededJobCleanupAnnotations(resourceAnnotations(&network, bankOrg)),
+				},
+			}
+			Expect(controllerReconciler.ensureJob(ctx, desired)).To(Succeed())
+
+			var job batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "legacy-succeeded"}, &job)).To(Succeed())
+			Expect(job.Annotations).NotTo(HaveKey(annotationSucceededJobCleanup))
+
+			cleanupAfter, err := controllerReconciler.cleanupSucceededJobs(ctx, &network)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cleanupAfter).To(Equal(time.Duration(0)))
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "legacy-succeeded"}, &job)).To(Succeed())
+		})
+
+		It("should requeue cleanup when an eligible succeeded Job is newer than the configured history TTL", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Global.Jobs = &fabricopsv1alpha1.JobCleanupConfig{
+				SucceededHistoryTTLSeconds: int32Ptr(60),
+			}
+
+			controllerReconciler := &FabricNetworkReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			bankOrg := network.Spec.Orgs[1]
+			namespace := orgNamespaceName(&network, bankOrg)
+			Expect(controllerReconciler.ensureNamespace(ctx, buildOrgNamespace(&network, bankOrg))).To(Succeed())
+
+			createCleanupTestJob(ctx, &network, bankOrg, namespace, "fresh-succeeded", true)
+			markJobCompleteAt(ctx, namespace, "fresh-succeeded", metav1.NewTime(time.Now().Add(-30*time.Second)))
+
+			cleanupAfter, err := controllerReconciler.cleanupSucceededJobs(ctx, &network)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cleanupAfter).To(BeNumerically(">", 0))
+			Expect(cleanupAfter).To(BeNumerically("<=", 60*time.Second))
+
+			var job batchv1.Job
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "fresh-succeeded"}, &job)).To(Succeed())
 		})
 	})
 })
@@ -2943,31 +3368,143 @@ func markJobFailed(ctx context.Context, namespace, name string) {
 }
 
 func markJobComplete(ctx context.Context, namespace, name string) {
+	markJobCompleteAt(ctx, namespace, name, metav1.Now())
+}
+
+func markJobCompleteAt(ctx context.Context, namespace, name string, completedAt metav1.Time) {
 	var job batchv1.Job
 	Expect(k8sClient.Get(ctx, types.NamespacedName{
 		Namespace: namespace,
 		Name:      name,
 	}, &job)).To(Succeed())
 
-	now := metav1.Now()
 	job.Status.Succeeded = 1
-	job.Status.StartTime = &now
-	job.Status.CompletionTime = &now
+	job.Status.StartTime = &completedAt
+	job.Status.CompletionTime = &completedAt
 	job.Status.Conditions = append(job.Status.Conditions,
 		batchv1.JobCondition{
 			Type:               batchv1.JobSuccessCriteriaMet,
 			Status:             corev1.ConditionTrue,
 			Reason:             "CompletionsReached",
-			LastTransitionTime: now,
+			LastTransitionTime: completedAt,
 		},
 		batchv1.JobCondition{
 			Type:               batchv1.JobComplete,
 			Status:             corev1.ConditionTrue,
 			Reason:             "Completed",
-			LastTransitionTime: now,
+			LastTransitionTime: completedAt,
 		},
 	)
 	Expect(k8sClient.Status().Update(ctx, &job)).To(Succeed())
+}
+
+func createCleanupTestJob(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	namespace string,
+	name string,
+	eligible bool,
+) {
+	annotations := resourceAnnotations(net, org)
+	if eligible {
+		annotations = succeededJobCleanupAnnotations(annotations)
+	}
+	backoffLimit := int32(0)
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			Labels:      orgLabels(net, org, componentChannel),
+			Annotations: annotations,
+		},
+		Spec: batchv1.JobSpec{
+			BackoffLimit: &backoffLimit,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: orgLabels(net, org, componentChannel),
+				},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{
+						{
+							Name:  "test",
+							Image: "busybox",
+						},
+					},
+				},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, job)).To(Succeed())
+}
+
+func createChaincodeLifecycleResultConfigMap(
+	ctx context.Context,
+	net *fabricopsv1alpha1.FabricNetwork,
+	org fabricopsv1alpha1.Org,
+	chaincode fabricopsv1alpha1.Chaincode,
+	name string,
+	key string,
+	sequence int32,
+) {
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   orgNamespaceName(net, org),
+			Labels:      chaincodeLabels(net, org, chaincode.Channel, chaincode.Name),
+			Annotations: resourceAnnotations(net, org),
+		},
+		Data: map[string]string{
+			key: fmt.Sprintf(`{"sequence":%d}`, sequence),
+		},
+	}
+	Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
+}
+
+func createOrdererJoinResultConfigMap(ctx context.Context, namespace, name, channelName string) {
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			channelOrdererJoinResultKey: fmt.Sprintf("Status: 200\n{\"channels\":[{\"name\":%q}]}", channelName),
+		},
+	}
+	Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
+}
+
+func createPeerJoinResultConfigMap(ctx context.Context, namespace, name, channelName string) {
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			channelPeerJoinResultKey: fmt.Sprintf("Channels peers has joined:\n%s\n", channelName),
+		},
+	}
+	Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
+}
+
+func createAnchorPeerUpdateResultConfigMap(ctx context.Context, namespace, name, channelName, mspID, host string) {
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			channelAnchorPeerResultKey: fmt.Sprintf(
+				`{"channel":%q,"mspID":%q,"anchorPeers":[{"host":%q,"port":%d}]}`,
+				channelName,
+				mspID,
+				host,
+				peerPort,
+			),
+		},
+	}
+	Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
 }
 
 func writeEnrolledOrgIdentitySecrets(

@@ -41,11 +41,24 @@ type GlobalConfig struct {
 	FabricVersion string `json:"fabricVersion"`
 	TLS           bool   `json:"tls"`
 	// +optional
+	Jobs *JobCleanupConfig `json:"jobs,omitempty"`
+	// +optional
 	Storage *StorageConfig `json:"storage,omitempty"`
 	// +optional
 	Observability *ObservabilityConfig `json:"observability,omitempty"`
 	// +optional
 	NetworkPolicy *NetworkPolicyConfig `json:"networkPolicy,omitempty"`
+}
+
+type JobCleanupConfig struct {
+	// SucceededHistoryTTLSeconds deletes eligible successful FabricOps helper
+	// Jobs after this many seconds. Failed Jobs are retained for diagnostics.
+	// Only Jobs whose result is represented by durable FabricOps resources are
+	// eligible.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=604800
+	SucceededHistoryTTLSeconds *int32 `json:"succeededHistoryTTLSeconds,omitempty"`
 }
 
 type StorageConfig struct {
