@@ -104,11 +104,18 @@ short-lived chaincode operation Jobs:
 ```bash
 make build-fabricopsctl
 bin/fabricopsctl status fabricnetwork-sample -n default
+bin/fabricopsctl wait fabricnetwork-sample -n default --timeout 20m
 bin/fabricopsctl connection-profile fabricnetwork-sample -n default --org BankA --format yaml
 bin/fabricopsctl query fabricnetwork-sample -n default --org BankA \
   --channel settlement --chaincode settlement --function readSettlement \
   --args '["settlement-001"]'
 ```
+
+Tools that render or apply FabricOps resources, including a future Fablo
+Kubernetes engine, can use the same CLI surface after applying the
+`FabricNetwork`: `wait` for readiness, `status` for diagnostics,
+`connection-profile` for client material, and `invoke` or `query` for smoke
+checks.
 
 ### Uninstall
 

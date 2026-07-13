@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +41,7 @@ import (
 
 const (
 	defaultNamespace = "default"
+	defaultWaitFor   = "condition=Ready"
 
 	connectionProfileJSONKey = "connection.json"
 	connectionProfileYAMLKey = "connection.yaml"
@@ -82,6 +84,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
+	case "wait":
+		return runWait(args[1:], stdout, stderr)
 	case "connection-profile":
 		return runConnectionProfile(args[1:], stdout, stderr)
 	case "invoke":
@@ -123,6 +127,47 @@ func runStatus(args []string, stdout, stderr io.Writer) error {
 	default:
 		return fmt.Errorf("unsupported output format %q", output)
 	}
+}
+
+func runWait(args []string, stdout, stderr io.Writer) error {
+	var kube kubeOptions
+	var waitFor, timeoutValue, pollIntervalValue string
+	flags := flag.NewFlagSet("wait", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	bindKubeFlags(flags, &kube)
+	flags.StringVar(&waitFor, "for", defaultWaitFor, "Wait target; only condition=Ready is supported")
+	flags.StringVar(&timeoutValue, "timeout", "20m", "How long to wait for readiness")
+	flags.StringVar(&pollIntervalValue, "poll-interval", "5s", "How often to poll FabricNetwork status")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		printLine(stderr, "Usage: fabricopsctl wait [flags] <fabricnetwork>")
+		return errUsage
+	}
+	if waitFor != defaultWaitFor {
+		return fmt.Errorf("unsupported wait target %q; only %s is supported", waitFor, defaultWaitFor)
+	}
+
+	timeout, err := time.ParseDuration(timeoutValue)
+	if err != nil {
+		return fmt.Errorf("invalid --timeout value %q: %w", timeoutValue, err)
+	}
+	pollInterval, err := time.ParseDuration(pollIntervalValue)
+	if err != nil {
+		return fmt.Errorf("invalid --poll-interval value %q: %w", pollIntervalValue, err)
+	}
+
+	return waitForFabricNetworkReady(
+		context.Background(),
+		kube,
+		flags.Arg(0),
+		timeout,
+		pollInterval,
+		stdout,
+		stderr,
+		getFabricNetwork,
+	)
 }
 
 func runConnectionProfile(args []string, stdout, stderr io.Writer) error {
@@ -239,6 +284,76 @@ func printStatus(out io.Writer, network *fabricopsv1alpha1.FabricNetwork) {
 	printOrgStatuses(out, network.Status.OrgStatus)
 	printChannelStatuses(out, network.Status.ChannelStatus)
 	printChaincodeStatuses(out, network.Status.ChaincodeStatus)
+}
+
+type fabricNetworkGetter func(
+	ctx context.Context,
+	kube kubeOptions,
+	name string,
+) (*fabricopsv1alpha1.FabricNetwork, error)
+
+func waitForFabricNetworkReady(
+	ctx context.Context,
+	kube kubeOptions,
+	name string,
+	timeout time.Duration,
+	pollInterval time.Duration,
+	stdout io.Writer,
+	stderr io.Writer,
+	getter fabricNetworkGetter,
+) error {
+	if timeout <= 0 {
+		return fmt.Errorf("--timeout must be greater than zero")
+	}
+	if pollInterval <= 0 {
+		return fmt.Errorf("--poll-interval must be greater than zero")
+	}
+
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	var lastNetwork *fabricopsv1alpha1.FabricNetwork
+	var lastErr error
+	for {
+		network, err := getter(ctx, kube, name)
+		if err == nil {
+			lastNetwork = network
+			lastErr = nil
+			if fabricNetworkReady(network) {
+				printf(stdout, "FabricNetwork %s/%s is Ready\n", network.Namespace, network.Name)
+				return nil
+			}
+		} else {
+			lastErr = err
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			printWaitDiagnostics(stderr, lastNetwork, lastErr)
+			return fmt.Errorf("timed out waiting for FabricNetwork %s/%s to be Ready", kube.namespace, name)
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+func fabricNetworkReady(network *fabricopsv1alpha1.FabricNetwork) bool {
+	for _, condition := range network.Status.Conditions {
+		if condition.Type == "Ready" {
+			return condition.Status == metav1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func printWaitDiagnostics(out io.Writer, network *fabricopsv1alpha1.FabricNetwork, lastErr error) {
+	if lastErr != nil {
+		printf(out, "Last error: %v\n", lastErr)
+	}
+	if network != nil {
+		printStatus(out, network)
+	}
 }
 
 func readyConditionSummary(conditions []metav1.Condition) string {
@@ -442,6 +557,7 @@ func printLine(out io.Writer, args ...any) {
 func printUsage(out io.Writer) {
 	printLine(out, `Usage:
   fabricopsctl status [flags] <fabricnetwork>
+  fabricopsctl wait [flags] <fabricnetwork>
   fabricopsctl connection-profile [flags] <fabricnetwork>
   fabricopsctl invoke [flags] <fabricnetwork>
   fabricopsctl query [flags] <fabricnetwork>
@@ -454,6 +570,7 @@ Common flags:
 Examples:
   fabricopsctl status fabricnetwork-sample
   fabricopsctl status -n default -o json fabricnetwork-sample
+  fabricopsctl wait fabricnetwork-sample -n default --timeout 20m
   fabricopsctl connection-profile fabricnetwork-sample --org BankA --format yaml
   fabricopsctl connection-profile fabricnetwork-sample --org BankA --format json --out connection-banka.json
   fabricopsctl query fabricnetwork-sample --org BankA --channel settlement \

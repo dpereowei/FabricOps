@@ -116,7 +116,7 @@ that proof is already present.
 |---------|----------|----------|------------------|------------|----------|-------|
 | Fablo REST | yes | yes | Planned | | | Could become a Kubernetes-native gateway/helper workload later |
 | Explorer | yes | no | Planned | | | Not implemented |
-| Gateway client helper | n/a | n/a | Partial | README | | `fabricopsctl` can read status, export generated connection profiles, and run invoke/query helper Jobs; SDK-specific Gateway wrappers are not implemented |
+| Gateway client helper | n/a | n/a | Partial | README | | `fabricopsctl` can wait for readiness, read status, export generated connection profiles, and run invoke/query helper Jobs; SDK-specific Gateway wrappers are not implemented |
 | Connection profiles | yes | yes | Supported | README, API | | Per-peer-org ConfigMaps contain JSON/YAML in-cluster Gateway/client profiles and status exposes the ConfigMap name |
 | Export network topology to Mermaid | yes | yes | Planned | | | Not implemented |
 | Other `init` options | n/a | n/a | Planned | | | Not implemented |
@@ -126,7 +126,7 @@ that proof is already present.
 | Fablo command feature | Fablo v2 | Fablo v3 | FabricOps status | Documented | CI tests | Notes |
 |-----------------------|----------|----------|------------------|------------|----------|-------|
 | `generate` | yes | yes | Partial | README | | Operator generates channel config, channel blocks, and CCaaS packages during reconciliation |
-| `up` | yes | yes | Partial | README | | Install bundle and Helm chart are supported; FabricOps does not provide a single Fablo-style `up` command |
+| `up` | yes | yes | Partial | README | | Install bundle and Helm chart are supported; `fabricopsctl wait` can watch a generated `FabricNetwork`, but FabricOps does not provide a single Fablo-style `up` command |
 | `start`, `stop`, `restart` | yes | yes | Planned | | | Workload lifecycle operations are not exposed as commands |
 | `down`, `reset` | yes | yes | Partial | README | | Deleting a `FabricNetwork` cleans owned namespaces; reset semantics are not modelled |
 | `prune`, `recreate` | yes | yes | Planned | | | Not implemented |
