@@ -445,7 +445,8 @@ func expectRetainedChannelProofJobs() {
 	)
 	Expect(jobs).NotTo(ContainSubstring("orderer-join"))
 	Expect(jobs).NotTo(ContainSubstring("peer-join"))
-	Expect(jobs).To(ContainSubstring("anchor-peer-update"))
+	Expect(jobs).NotTo(ContainSubstring("anchor-peer-update"))
+	Expect(strings.TrimSpace(jobs)).To(BeEmpty())
 }
 
 func jobNames(items []namespacedName) []string {

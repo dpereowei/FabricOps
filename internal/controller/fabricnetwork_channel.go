@@ -53,11 +53,14 @@ const (
 	publishChannelBlockContainer  = "publish-channel-block"
 	publishOrdererJoinContainer   = "publish-orderer-join"
 	publishPeerJoinContainer      = "publish-peer-join"
+	publishAnchorPeerContainer    = "publish-anchor-peer-update"
 
 	channelOrdererJoinResultKey  = "channels.json"
 	channelOrdererJoinResultFile = "orderer-channels.json"
 	channelPeerJoinResultKey     = "channels.txt"
 	channelPeerJoinResultFile    = "peer-channels.txt"
+	channelAnchorPeerResultKey   = "anchor-peer.json"
+	channelAnchorPeerResultFile  = "anchor-peer.json"
 
 	envChannelBlockConfigMap      = "FABRICOPS_CHANNEL_BLOCK_CONFIGMAP"
 	envChannelBlockFile           = "FABRICOPS_CHANNEL_BLOCK_FILE"
@@ -71,6 +74,11 @@ const (
 	envPeerJoinResultFile         = "FABRICOPS_PEER_JOIN_RESULT_FILE"
 	envPeerJoinResultChannel      = "FABRICOPS_PEER_JOIN_RESULT_CHANNEL"
 	envPeerJoinResultPeer         = "FABRICOPS_PEER_JOIN_RESULT_PEER"
+	envAnchorPeerResultConfigMap  = "FABRICOPS_ANCHOR_PEER_RESULT_CONFIGMAP"
+	envAnchorPeerResultKey        = "FABRICOPS_ANCHOR_PEER_RESULT_KEY"
+	envAnchorPeerResultFile       = "FABRICOPS_ANCHOR_PEER_RESULT_FILE"
+	envAnchorPeerResultChannel    = "FABRICOPS_ANCHOR_PEER_RESULT_CHANNEL"
+	envAnchorPeerResultOrg        = "FABRICOPS_ANCHOR_PEER_RESULT_ORG"
 
 	channelServiceAccount = "channel-bootstrapper"
 )
@@ -568,11 +576,21 @@ func (r *FabricNetworkReconciler) reconcileAnchorPeerUpdates(
 		if err := r.ensureAnchorPeerInputs(ctx, net, channel, org, namespace, targetOrderer); err != nil {
 			return "", err
 		}
+		resultReady, _, err := r.anchorPeerUpdateResultReadiness(ctx, namespace, channel.Name, org, anchorPeer)
+		if err != nil {
+			return "", err
+		}
+		if resultReady {
+			orgStatus.Message = ""
+			orgStatus.Ready = true
+			continue
+		}
+
 		if err := r.ensureJob(ctx, buildAnchorPeerUpdateJob(net, channel, org, namespace, anchorPeer, targetOrderer)); err != nil {
 			return "", err
 		}
 
-		updated, message, err := r.anchorPeerUpdateReadiness(ctx, namespace, channel.Name, org)
+		updated, message, err := r.anchorPeerUpdateReadiness(ctx, namespace, channel.Name, org, anchorPeer)
 		if err != nil {
 			return "", err
 		}
@@ -621,9 +639,15 @@ func (r *FabricNetworkReconciler) anchorPeerUpdateReadiness(
 	namespace string,
 	channelName string,
 	org fabricopsv1alpha1.Org,
+	anchorPeer peerInstance,
 ) (bool, string, error) {
+	resultReady, resultMessage, err := r.anchorPeerUpdateResultReadiness(ctx, namespace, channelName, org, anchorPeer)
+	if err != nil || resultReady {
+		return resultReady, resultMessage, err
+	}
+
 	var job batchv1.Job
-	err := r.Get(ctx, client.ObjectKey{
+	err = r.Get(ctx, client.ObjectKey{
 		Namespace: namespace,
 		Name:      channelAnchorPeerUpdateJobName(channelName, org),
 	}, &job)
@@ -637,10 +661,65 @@ func (r *FabricNetworkReconciler) anchorPeerUpdateReadiness(
 		return false, fmt.Sprintf("%s: anchor peer update Job failed", org.Organization.Name), nil
 	}
 	if jobSucceeded(job) {
+		if resultMessage != "" {
+			return false, resultMessage, nil
+		}
+		if succeededJobCleanupEligible(&job) {
+			return false, "Waiting for anchor peer update result ConfigMap", nil
+		}
 		return true, "", nil
 	}
 
 	return false, "", nil
+}
+
+func (r *FabricNetworkReconciler) anchorPeerUpdateResultReadiness(
+	ctx context.Context,
+	namespace string,
+	channelName string,
+	org fabricopsv1alpha1.Org,
+	anchorPeer peerInstance,
+) (bool, string, error) {
+	var result corev1.ConfigMap
+	err := r.Get(ctx, client.ObjectKey{
+		Namespace: namespace,
+		Name:      channelAnchorPeerUpdateResultConfigMapName(channelName, org),
+	}, &result)
+	if apierrors.IsNotFound(err) {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+
+	raw := strings.TrimSpace(result.Data[channelAnchorPeerResultKey])
+	if raw == "" {
+		return false, fmt.Sprintf("Waiting for %s anchor peer update result ConfigMap data", org.Organization.Name), nil
+	}
+	if !anchorPeerUpdateResultMatches(raw, channelName, org.Organization.MSPName, channelPeerHost(anchorPeer), peerPort) {
+		return false, fmt.Sprintf("Waiting for %s anchor peer update result for channel %s", org.Organization.Name, channelName), nil
+	}
+
+	return true, "", nil
+}
+
+func anchorPeerUpdateResultMatches(raw string, channelName string, mspID string, host string, port int32) bool {
+	var result struct {
+		Channel     string `json:"channel"`
+		MSPID       string `json:"mspID"`
+		AnchorPeers []struct {
+			Host string `json:"host"`
+			Port int32  `json:"port"`
+		} `json:"anchorPeers"`
+	}
+	if err := json.Unmarshal([]byte(jsonPayload(raw)), &result); err != nil {
+		return false
+	}
+	if result.Channel != channelName || result.MSPID != mspID || len(result.AnchorPeers) != 1 {
+		return false
+	}
+
+	return result.AnchorPeers[0].Host == host && result.AnchorPeers[0].Port == port
 }
 
 func (r *FabricNetworkReconciler) ensureChannelBlockConfigMapCopy(
@@ -1438,6 +1517,7 @@ func buildAnchorPeerUpdateJob(
 	labels := channelLabels(net, org, channel.Name)
 	labels[labelInstance] = anchorPeer.name
 	labels[labelWorkload] = anchorPeer.name
+	annotations := resourceAnnotations(net, org)
 	backoffLimit := int32(4)
 	adminMSPVolumeName := channelOrgMSPVolumeName(org)
 	adminTLSVolumeName := channelOrdererAdminTLSVolumeName(org)
@@ -1492,7 +1572,7 @@ func buildAnchorPeerUpdateJob(
 			Name:        channelAnchorPeerUpdateJobName(channel.Name, org),
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: resourceAnnotations(net, org),
+			Annotations: succeededJobCleanupAnnotations(annotations),
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoffLimit,
@@ -1505,7 +1585,7 @@ func buildAnchorPeerUpdateJob(
 					ServiceAccountName: channelServiceAccountName(channel.Name),
 					RestartPolicy:      corev1.RestartPolicyNever,
 					Volumes:            volumes,
-					Containers: []corev1.Container{
+					InitContainers: []corev1.Container{
 						{
 							Name:  updateAnchorPeerContainer,
 							Image: fabricToolsImage(net.Spec.Global.FabricVersion),
@@ -1522,6 +1602,18 @@ func buildAnchorPeerUpdateJob(
 							)},
 							Resources:    componentResourceRequirements(componentPeer),
 							VolumeMounts: volumeMounts,
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Name:      publishAnchorPeerContainer,
+							Image:     kubectlImage(),
+							Command:   []string{"sh", "-ec", publishAnchorPeerUpdateResultScript()},
+							Env:       publishAnchorPeerUpdateResultEnv(channel.Name, org),
+							Resources: componentResourceRequirements(componentKubectl),
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: channelOutputVolumeName, MountPath: channelOutputDir},
+							},
 						},
 					},
 				},
@@ -1848,6 +1940,10 @@ func channelAnchorPeerUpdateJobName(channelName string, org fabricopsv1alpha1.Or
 	return sanitizeName(channelName + "-" + org.Organization.Name + "-anchor-peer-update")
 }
 
+func channelAnchorPeerUpdateResultConfigMapName(channelName string, org fabricopsv1alpha1.Org) string {
+	return sanitizeName(channelAnchorPeerUpdateJobName(channelName, org) + "-result")
+}
+
 func channelServiceAccountName(channelName string) string {
 	return sanitizeName(channelName + "-" + channelServiceAccount)
 }
@@ -2078,6 +2174,7 @@ ADMIN_TLS_DIR=%q
 ORDERER_TLS_DIR=%q
 ANCHOR_UPDATE_FILE=%q
 OUTPUT_DIR=%q
+RESULT_FILE="$OUTPUT_DIR/%s"
 
 export CORE_PEER_LOCALMSPID="$MSP_ID"
 export CORE_PEER_ADDRESS=%q
@@ -2099,6 +2196,16 @@ ENVELOPE_JSON="$OUTPUT_DIR/anchor_update_envelope.json"
 
 mkdir -p "$OUTPUT_DIR"
 
+write_anchor_result() {
+  jq -n \
+    --arg channel "$CHANNEL_ID" \
+    --arg msp "$MSP_ID" \
+    --arg host "$ANCHOR_HOST" \
+    --argjson port "$ANCHOR_PORT" \
+    '{"channel":$channel,"mspID":$msp,"anchorPeers":[{"host":$host,"port":$port}]}' \
+    > "$RESULT_FILE"
+}
+
 peer channel fetch config "$CONFIG_BLOCK" \
   -c "$CHANNEL_ID" \
   -o "$ORDERER_ADDRESS" \
@@ -2119,6 +2226,7 @@ if jq -e \
   '(.channel_group.groups.Application.groups[$msp].values.AnchorPeers.value.anchor_peers // []) == [{"host": $host, "port": $port}]' \
   "$CONFIG_JSON" >/dev/null; then
   echo "Anchor peers already configured for $MSP_ID on channel $CHANNEL_ID"
+  write_anchor_result
   exit 0
 fi
 
@@ -2170,7 +2278,9 @@ peer channel update \
   -f "$ANCHOR_UPDATE_FILE" \
   --tls \
   --cafile "$ORDERER_TLS_DIR/ca.crt"
-`, channelName, mspID, anchorHost, peerPort, ordererAddress, adminTLSPath, ordererTLSPath, anchorUpdateFile, channelOutputDir, peerAddress, mspPath)
+
+write_anchor_result
+`, channelName, mspID, anchorHost, peerPort, ordererAddress, adminTLSPath, ordererTLSPath, anchorUpdateFile, channelOutputDir, channelAnchorPeerResultFile, peerAddress, mspPath)
 }
 
 func publishChannelBlockEnv(channelName string) []corev1.EnvVar {
@@ -2266,6 +2376,40 @@ kubectl -n "$POD_NAMESPACE" label configmap "$FABRICOPS_PEER_JOIN_RESULT_CONFIGM
   fabricops.io/component=channel \
   fabricops.io/channel="$FABRICOPS_PEER_JOIN_RESULT_CHANNEL" \
   fabricops.io/workload="$FABRICOPS_PEER_JOIN_RESULT_PEER" \
+  app.kubernetes.io/component=channel \
+  --overwrite
+`
+}
+
+func publishAnchorPeerUpdateResultEnv(channelName string, org fabricopsv1alpha1.Org) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: envAnchorPeerResultConfigMap, Value: channelAnchorPeerUpdateResultConfigMapName(channelName, org)},
+		{Name: envAnchorPeerResultKey, Value: channelAnchorPeerResultKey},
+		{Name: envAnchorPeerResultFile, Value: channelAnchorPeerResultFile},
+		{Name: envAnchorPeerResultChannel, Value: sanitizeName(channelName)},
+		{Name: envAnchorPeerResultOrg, Value: sanitizeName(org.Organization.Name)},
+		{
+			Name: envPodNamespace,
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.namespace",
+				},
+			},
+		},
+	}
+}
+
+func publishAnchorPeerUpdateResultScript() string {
+	return `set -eu
+
+kubectl -n "$POD_NAMESPACE" create configmap "$FABRICOPS_ANCHOR_PEER_RESULT_CONFIGMAP" \
+  --from-file="$FABRICOPS_ANCHOR_PEER_RESULT_KEY=` + channelOutputDir + `/$FABRICOPS_ANCHOR_PEER_RESULT_FILE" \
+  --dry-run=client -o yaml | kubectl -n "$POD_NAMESPACE" apply -f -
+
+kubectl -n "$POD_NAMESPACE" label configmap "$FABRICOPS_ANCHOR_PEER_RESULT_CONFIGMAP" \
+  fabricops.io/component=channel \
+  fabricops.io/channel="$FABRICOPS_ANCHOR_PEER_RESULT_CHANNEL" \
+  fabricops.io/org="$FABRICOPS_ANCHOR_PEER_RESULT_ORG" \
   app.kubernetes.io/component=channel \
   --overwrite
 `

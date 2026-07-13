@@ -2456,14 +2456,16 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(anchorPeerJob.Labels[labelAppComponent]).To(Equal(componentChannel))
 			Expect(anchorPeerJob.Labels[labelChannel]).To(Equal("settlement"))
 			Expect(anchorPeerJob.Labels[labelWorkload]).To(Equal("peer0"))
+			Expect(anchorPeerJob.Annotations[annotationSucceededJobCleanup]).To(Equal("true"))
 			Expect(anchorPeerJob.Spec.Template.Spec.ServiceAccountName).To(Equal("settlement-channel-bootstrapper"))
 			Expect(anchorPeerJob.Spec.Template.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+			Expect(anchorPeerJob.Spec.Template.Spec.InitContainers).To(HaveLen(1))
 			Expect(anchorPeerJob.Spec.Template.Spec.Containers).To(HaveLen(1))
 			Expect(secretVolumeNames(anchorPeerJob.Spec.Template.Spec)).To(HaveKeyWithValue("msp-banka", "banka-admin-msp"))
 			Expect(secretVolumeNames(anchorPeerJob.Spec.Template.Spec)).To(HaveKeyWithValue("admin-tls-banka", "banka-admin-tls"))
 			Expect(secretVolumeNames(anchorPeerJob.Spec.Template.Spec)).To(HaveKeyWithValue("tls-orderer0", "settlement-orderer0-tls"))
 
-			anchorContainer := anchorPeerJob.Spec.Template.Spec.Containers[0]
+			anchorContainer := anchorPeerJob.Spec.Template.Spec.InitContainers[0]
 			Expect(anchorContainer.Name).To(Equal(updateAnchorPeerContainer))
 			Expect(anchorContainer.Image).To(Equal("hyperledger/fabric-tools:2.5.14"))
 			Expect(anchorContainer.Command[2]).To(ContainSubstring("MSP_ID=\"BankAMSP\""))
@@ -2481,7 +2483,22 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(volumeMountPaths(anchorContainer)).To(HaveKeyWithValue("admin-tls-banka", channelOrdererAdminTLSPath(network.Spec.Orgs[1])))
 			Expect(volumeMountPaths(anchorContainer)).To(HaveKeyWithValue("tls-orderer0", channelOrdererTLSPath("orderer0")))
 
+			anchorPublisher := anchorPeerJob.Spec.Template.Spec.Containers[0]
+			Expect(anchorPublisher.Name).To(Equal(publishAnchorPeerContainer))
+			Expect(anchorPublisher.Image).To(Equal(kubectlImage()))
+			Expect(envMap(anchorPublisher)[envAnchorPeerResultConfigMap]).To(Equal("settlement-banka-anchor-peer-update-result"))
+			Expect(envMap(anchorPublisher)[envAnchorPeerResultKey]).To(Equal(channelAnchorPeerResultKey))
+			Expect(volumeMountPaths(anchorPublisher)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
+
 			markJobComplete(ctx, bankNamespace, "settlement-banka-anchor-peer-update")
+			createAnchorPeerUpdateResultConfigMap(
+				ctx,
+				bankNamespace,
+				"settlement-banka-anchor-peer-update-result",
+				"settlement",
+				"BankAMSP",
+				"peer0.fo-test-banka.svc.cluster.local",
+			)
 
 			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -2503,6 +2520,30 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(channels).NotTo(BeNil())
 			Expect(channels.Status).To(Equal(metav1.ConditionTrue))
 			Expect(channels.Reason).To(Equal("ChannelsReady"))
+
+			By("Deleting the cleanup-eligible anchor peer update Job after durable result evidence exists")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-banka-anchor-peer-update",
+			}, &anchorPeerJob)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, &anchorPeerJob, &client.DeleteOptions{PropagationPolicy: &propagation})).To(Succeed())
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: bankNamespace,
+					Name:      "settlement-banka-anchor-peer-update",
+				}, &anchorPeerJob)
+				return errors.IsNotFound(err)
+			}).Should(BeTrue())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: bankNamespace,
+				Name:      "settlement-banka-anchor-peer-update",
+			}, &anchorPeerJob)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
 
 			var chaincodeServiceAccount corev1.ServiceAccount
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -3442,6 +3483,25 @@ func createPeerJoinResultConfigMap(ctx context.Context, namespace, name, channel
 		},
 		Data: map[string]string{
 			channelPeerJoinResultKey: fmt.Sprintf("Channels peers has joined:\n%s\n", channelName),
+		},
+	}
+	Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
+}
+
+func createAnchorPeerUpdateResultConfigMap(ctx context.Context, namespace, name, channelName, mspID, host string) {
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Data: map[string]string{
+			channelAnchorPeerResultKey: fmt.Sprintf(
+				`{"channel":%q,"mspID":%q,"anchorPeers":[{"host":%q,"port":%d}]}`,
+				channelName,
+				mspID,
+				host,
+				peerPort,
+			),
 		},
 	}
 	Expect(k8sClient.Create(ctx, configMap)).To(Succeed())

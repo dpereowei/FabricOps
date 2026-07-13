@@ -43,7 +43,7 @@ that proof is already present.
 | MSP/TLS Secret validation | n/a | n/a | Supported | | | Invalid or missing material is surfaced in status |
 | Persistent data for CAs/orderers/peers | n/a | n/a | Supported | README | | One PVC per Fabric component instance |
 | Resource request/limit defaults | n/a | n/a | Supported | README | | Applies to Fabric workloads and helper Jobs |
-| Succeeded helper Job cleanup | n/a | n/a | Partial | API | | Opt-in `spec.global.jobs.succeededHistoryTTLSeconds` cleans completed output-backed enrollment, channel block, orderer join, peer join, and chaincode lifecycle Jobs while retaining failures plus anchor proof Jobs |
+| Succeeded helper Job cleanup | n/a | n/a | Supported | API | | Opt-in `spec.global.jobs.succeededHistoryTTLSeconds` cleans completed output-backed enrollment, channel block, orderer join, peer join, anchor peer update, and chaincode lifecycle Jobs while retaining failures |
 | Status conditions | n/a | n/a | Supported | README | | `Ready`, `IdentityMaterialReady`, `ChannelsReady`, and `ObservabilityReady` |
 | Endpoint discovery status | n/a | n/a | Supported | README, API | | Org status exposes CA, orderer, peer, chaincode, and operations endpoint addresses |
 | Kubernetes Events | n/a | n/a | Supported | | | Ready and failure transitions emit events |
