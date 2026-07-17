@@ -98,8 +98,28 @@ kubectl get fabricnetwork fabricnetwork-sample -n default -o jsonpath='{.status.
 kubectl get fabricnetwork fabricnetwork-sample -n default -o jsonpath='{.status.orgStatus[?(@.name=="BankA")].peerEndpoints}'
 ```
 
-When building from source, `fabricopsctl` wraps status, profile lookup, and
-short-lived chaincode operation Jobs:
+### Install fabricopsctl
+
+`fabricopsctl` is optional, but it makes day-two operations easier by wrapping
+status, readiness, connection profile lookup, and short-lived chaincode
+operation Jobs.
+
+Install the CLI with Go:
+
+```bash
+go install github.com/dpereowei/fabricops/cmd/fabricopsctl@latest
+fabricopsctl status -n default fabricnetwork-sample
+fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
+fabricopsctl connection-profile -n default --org BankA --format yaml fabricnetwork-sample
+fabricopsctl query -n default --org BankA \
+  --channel settlement --chaincode settlement --function readSettlement \
+  --args '["settlement-001"]' fabricnetwork-sample
+```
+
+For reproducible installs, replace `@latest` with a release tag such as
+`@v0.1.1`.
+
+When building from source:
 
 ```bash
 make build-fabricopsctl
@@ -382,6 +402,10 @@ spec:
 This currently applies to enrollment Jobs, channel block generation Jobs, orderer join Jobs, peer join Jobs, anchor peer update Jobs, chaincode install Jobs, chaincode approval Jobs, and chaincode commit Jobs.
 
 The sample `FabricNetwork` opts into a 10-minute successful helper Job history window so local runs stay inspectable without accumulating every completed output-backed Job forever.
+
+If the field is omitted, FabricOps retains successful helper Jobs. This is
+intentional for diagnostics, but tools that generate `FabricNetwork` manifests
+can opt into cleanup by rendering `spec.global.jobs.succeededHistoryTTLSeconds`.
 
 ## Observability
 
