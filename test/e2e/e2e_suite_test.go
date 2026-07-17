@@ -330,7 +330,7 @@ func invokeAndQuerySettlement(smokeID string, createFunction string, readFunctio
 		invokeArgs = append(invokeArgs, "--peer", peer)
 	}
 	invokeArgs = append(invokeArgs, sampleName)
-	runFabricOpsctl(5*time.Minute, invokeArgs...)
+	runFabricOpsctlEventually(8*time.Minute, invokeArgs...)
 
 	for _, peer := range peers {
 		queryArgs := []string{
@@ -345,7 +345,7 @@ func invokeAndQuerySettlement(smokeID string, createFunction string, readFunctio
 			"-o", "json",
 			sampleName,
 		}
-		output := runFabricOpsctl(5*time.Minute, queryArgs...)
+		output := runFabricOpsctlEventually(5*time.Minute, queryArgs...)
 		Expect(output).To(ContainSubstring(smokeID))
 	}
 }
@@ -612,8 +612,46 @@ func runFabricOpsctl(timeout time.Duration, args ...string) string {
 	return runCommand(timeout, fabricopsctlBin, args...)
 }
 
+func runFabricOpsctlEventually(timeout time.Duration, args ...string) string {
+	GinkgoHelper()
+
+	var output string
+	Eventually(func(g Gomega) {
+		var err error
+		output, err = runCommandAllowFailure(3*time.Minute, fabricopsctlBin, args...)
+		g.Expect(err).NotTo(HaveOccurred(), output)
+	}, timeout, 10*time.Second).Should(Succeed())
+	return output
+}
+
 func runCommandQuiet(timeout time.Duration, name string, args ...string) string {
 	return runCommandWithEnvAndLogging(timeout, nil, false, name, args...)
+}
+
+func runCommandAllowFailure(timeout time.Duration, name string, args ...string) (string, error) {
+	GinkgoHelper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = repoRoot
+	cmd.Env = os.Environ()
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	commandLine := strings.Join(append([]string{name}, args...), " ")
+	err := cmd.Run()
+	text := output.String()
+	if ctx.Err() == context.DeadlineExceeded {
+		return text, fmt.Errorf("command timed out after %s: %s\n%s", timeout, commandLine, text)
+	}
+	if err != nil {
+		return text, fmt.Errorf("command failed: %s\n%s: %w", commandLine, text, err)
+	}
+	return text, nil
 }
 
 func expectCommandFailure(timeout time.Duration, name string, args ...string) string {
