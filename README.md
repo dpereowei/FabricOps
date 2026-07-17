@@ -108,6 +108,7 @@ Install the CLI with Go:
 
 ```bash
 go install github.com/dpereowei/fabricops/cmd/fabricopsctl@latest
+export PATH="$(go env GOPATH)/bin:$PATH"
 fabricopsctl status -n default fabricnetwork-sample
 fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
 fabricopsctl connection-profile -n default --org BankA --format yaml fabricnetwork-sample
@@ -118,6 +119,9 @@ fabricopsctl query -n default --org BankA \
 
 For reproducible installs, replace `@latest` with a release tag such as
 `@v0.1.1`.
+
+If `go install` succeeds but your shell cannot find `fabricopsctl`, make the
+PATH export permanent in your shell profile, for example `~/.zshrc`.
 
 When building from source:
 
