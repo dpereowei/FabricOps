@@ -410,20 +410,24 @@ func (r *FabricNetworkReconciler) ordererJoinResultReadiness(
 	if raw == "" {
 		return false, fmt.Sprintf("Waiting for %s orderer join result ConfigMap data", orderer.name), nil
 	}
-	if !ordererJoinResultContainsChannel(raw, channelName) {
+	found, status := ordererJoinResultChannelStatus(raw, channelName)
+	if !found {
 		return false, fmt.Sprintf("Waiting for %s orderer join result for channel %s", orderer.name, channelName), nil
+	}
+	if status != "" && status != "active" {
+		return false, fmt.Sprintf("Waiting for %s orderer channel %s to become active (status: %s)", orderer.name, channelName, status), nil
 	}
 
 	return true, "", nil
 }
 
-func ordererJoinResultContainsChannel(raw string, channelName string) bool {
+func ordererJoinResultChannelStatus(raw string, channelName string) (bool, string) {
 	var payload any
 	if err := json.Unmarshal([]byte(jsonPayload(raw)), &payload); err != nil {
-		return false
+		return false, ""
 	}
 
-	return jsonObjectHasName(payload, channelName)
+	return jsonObjectChannelStatus(payload, channelName)
 }
 
 func jsonPayload(raw string) string {
@@ -442,26 +446,27 @@ func jsonPayload(raw string) string {
 	return strings.TrimSpace(trimmed[start:])
 }
 
-func jsonObjectHasName(value any, name string) bool {
+func jsonObjectChannelStatus(value any, name string) (bool, string) {
 	switch typed := value.(type) {
 	case map[string]any:
 		if typedName, ok := typed["name"].(string); ok && typedName == name {
-			return true
+			status, _ := typed["status"].(string)
+			return true, strings.ToLower(strings.TrimSpace(status))
 		}
 		for _, child := range typed {
-			if jsonObjectHasName(child, name) {
-				return true
+			if found, status := jsonObjectChannelStatus(child, name); found {
+				return true, status
 			}
 		}
 	case []any:
 		for _, child := range typed {
-			if jsonObjectHasName(child, name) {
-				return true
+			if found, status := jsonObjectChannelStatus(child, name); found {
+				return true, status
 			}
 		}
 	}
 
-	return false
+	return false, ""
 }
 
 func (r *FabricNetworkReconciler) reconcilePeerJoins(
@@ -1759,15 +1764,6 @@ func buildConfigtxYAML(net *fabricopsv1alpha1.FabricNetwork, channel fabricopsv1
 		fmt.Fprintf(&b, "        - *%s\n", configtxOrgAnchorName(org))
 	}
 	b.WriteString("      Capabilities:\n        <<: *OrdererCapabilities\n")
-	if !capabilities.isV3 {
-		b.WriteString("    Consortium: SampleConsortium\n")
-		b.WriteString("    Consortiums:\n")
-		b.WriteString("      SampleConsortium:\n")
-		b.WriteString("        Organizations:\n")
-		for _, org := range channelOrgs {
-			fmt.Fprintf(&b, "          - *%s\n", configtxOrgAnchorName(org))
-		}
-	}
 	b.WriteString("    Application:\n")
 	b.WriteString("      <<: *ApplicationDefaults\n")
 	b.WriteString("      Organizations:\n")
@@ -2088,30 +2084,50 @@ CHANNELS_FILE="$OUTPUT_DIR/%s"
 
 mkdir -p "$OUTPUT_DIR"
 
-if osnadmin channel list \
-  -o "$ORDERER_ADMIN_ADDRESS" \
-  --ca-file "$ADMIN_TLS_DIR/ca.crt" \
-  --client-cert "$ADMIN_TLS_DIR/client.crt" \
-  --client-key "$ADMIN_TLS_DIR/client.key" > "$CHANNELS_FILE" 2>/tmp/fabricops-osnadmin-list.err; then
-  if grep -Eq '"name"[[:space:]]*:[[:space:]]*"'"$CHANNEL_ID"'"' "$CHANNELS_FILE"; then
-    echo "Orderer already joined channel $CHANNEL_ID"
-    exit 0
-  fi
+channel_status() {
+  osnadmin channel list \
+    -o "$ORDERER_ADMIN_ADDRESS" \
+    --channelID "$CHANNEL_ID" \
+    --ca-file "$ADMIN_TLS_DIR/ca.crt" \
+    --client-cert "$ADMIN_TLS_DIR/client.crt" \
+    --client-key "$ADMIN_TLS_DIR/client.key" \
+    --no-status > "$CHANNELS_FILE"
+
+  sed -n '/^[[:space:]]*[{[]/,$p' "$CHANNELS_FILE" | jq -r --arg channel "$CHANNEL_ID" '
+    if (.name? == $channel) then
+      (.status // "")
+    else
+      (.channels // [] | map(select(.name == $channel)) | .[0].status // "")
+    end
+  '
+}
+
+status=""
+if status="$(channel_status 2>/tmp/fabricops-osnadmin-list.err)" && [ "$status" = "active" ]; then
+  echo "Orderer already joined active channel $CHANNEL_ID"
+  exit 0
 fi
 
-osnadmin channel join \
-  --channelID "$CHANNEL_ID" \
-  --config-block "$BLOCK_FILE" \
-  -o "$ORDERER_ADMIN_ADDRESS" \
-  --client-cert "$ADMIN_TLS_DIR/client.crt" \
-  --client-key "$ADMIN_TLS_DIR/client.key" \
-  --ca-file "$ADMIN_TLS_DIR/ca.crt"
+if [ -z "$status" ]; then
+  osnadmin channel join \
+    --channelID "$CHANNEL_ID" \
+    --config-block "$BLOCK_FILE" \
+    -o "$ORDERER_ADMIN_ADDRESS" \
+    --client-cert "$ADMIN_TLS_DIR/client.crt" \
+    --client-key "$ADMIN_TLS_DIR/client.key" \
+    --ca-file "$ADMIN_TLS_DIR/ca.crt"
+fi
 
-osnadmin channel list \
-  -o "$ORDERER_ADMIN_ADDRESS" \
-  --ca-file "$ADMIN_TLS_DIR/ca.crt" \
-  --client-cert "$ADMIN_TLS_DIR/client.crt" \
-  --client-key "$ADMIN_TLS_DIR/client.key" > "$CHANNELS_FILE"
+n=1
+until status="$(channel_status)" && [ "$status" = "active" ]; do
+  if [ "$n" -ge 60 ]; then
+    echo "Orderer channel $CHANNEL_ID did not become active; last status: ${status:-missing}"
+    exit 1
+  fi
+  echo "Waiting for orderer channel $CHANNEL_ID to become active; last status: ${status:-missing}"
+  n=$((n + 1))
+  sleep 5
+done
 `, channelName, ordererAddress, channelBlockFilePath(channelName), adminTLSPath, channelOutputDir, channelOrdererJoinResultFile)
 }
 
@@ -2206,7 +2222,23 @@ write_anchor_result() {
     > "$RESULT_FILE"
 }
 
-peer channel fetch config "$CONFIG_BLOCK" \
+retry() {
+  attempts="$1"
+  delay="$2"
+  shift 2
+
+  n=1
+  until "$@"; do
+    if [ "$n" -ge "$attempts" ]; then
+      return 1
+    fi
+    echo "Command failed on attempt $n/$attempts. Retrying in ${delay}s: $*"
+    n=$((n + 1))
+    sleep "$delay"
+  done
+}
+
+retry 30 5 peer channel fetch config "$CONFIG_BLOCK" \
   -c "$CHANNEL_ID" \
   -o "$ORDERER_ADDRESS" \
   --tls \
@@ -2272,7 +2304,7 @@ configtxlator proto_encode \
   --type common.Envelope \
   --output "$ANCHOR_UPDATE_FILE"
 
-peer channel update \
+retry 30 5 peer channel update \
   -c "$CHANNEL_ID" \
   -o "$ORDERER_ADDRESS" \
   -f "$ANCHOR_UPDATE_FILE" \
