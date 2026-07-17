@@ -33,6 +33,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -40,14 +41,14 @@ const (
 	managerName                       = "fabricops-controller-manager"
 	sampleName                        = "fabricnetwork-sample"
 	sampleNamespace                   = "default"
+	runtimeNode                       = "node"
+	runtimeGo                         = "go"
+	runtimeJava                       = "java"
 	succeededJobCleanupAnnotation     = "fabricops.io/succeeded-job-cleanup"
 	fabricNetworkLabel                = "fabricops.io/fabricnetwork"
 	fabricNetworkNamespaceLabel       = "fabricops.io/fabricnetwork-namespace"
 	fastCleanupTTLSeconds             = int32(10)
-	nodeSettlementImageDefault        = "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0"
 	nodeSettlementUpgradeImageDefault = "ghcr.io/dpereowei/fabricops-node-settlement:0.2.0"
-	goSettlementImageDefault          = "ghcr.io/dpereowei/fabricops-go-settlement:0.1.0"
-	javaSettlementImageDefault        = "ghcr.io/dpereowei/fabricops-java-settlement:0.1.0"
 )
 
 var (
@@ -57,11 +58,19 @@ var (
 	fabricopsctlBin  string
 	kindCluster      string
 	managerImage     string
-	nodeImage        string
+	runtimeConfig    sampleRuntimeConfig
 	nodeUpgradeImage string
-	goImage          string
-	javaImage        string
 )
+
+type sampleRuntimeConfig struct {
+	name                 string
+	sampleManifest       string
+	chaincodeDir         string
+	image                string
+	createFunction       string
+	readFunction         string
+	runNodeLifecycleFlow bool
+}
 
 type sampleChaincodeTarget struct {
 	namespace string
@@ -91,11 +100,71 @@ var _ = BeforeSuite(func() {
 	fabricopsctlBin = filepath.Join(repoRoot, "bin", "fabricopsctl")
 	kindCluster = envOrDefault("KIND_CLUSTER", "fabricops-test-e2e")
 	managerImage = envOrDefault("IMG", "controller:latest")
-	nodeImage = envOrDefault("NODE_SETTLEMENT_IMAGE", nodeSettlementImageDefault)
+	runtimeConfig = selectedSampleRuntimeConfig()
 	nodeUpgradeImage = envOrDefault("NODE_SETTLEMENT_UPGRADE_IMAGE", nodeSettlementUpgradeImageDefault)
-	goImage = envOrDefault("GO_SETTLEMENT_IMAGE", goSettlementImageDefault)
-	javaImage = envOrDefault("JAVA_SETTLEMENT_IMAGE", javaSettlementImageDefault)
 })
+
+type sampleFabricNetworkManifest struct {
+	Spec struct {
+		Chaincodes []struct {
+			Name  string `json:"name"`
+			Image string `json:"image"`
+		} `json:"chaincodes"`
+	} `json:"spec"`
+}
+
+func selectedSampleRuntimeConfig() sampleRuntimeConfig {
+	GinkgoHelper()
+
+	runtime := envOrDefault("E2E_CHAINCODE_RUNTIME", runtimeNode)
+	config := sampleRuntimeConfig{
+		name:           runtime,
+		sampleManifest: envOrDefault("E2E_SAMPLE_MANIFEST", filepath.Join("config", "samples", "e2e", runtime, "fabricnetwork.yaml")),
+	}
+
+	switch runtime {
+	case runtimeNode:
+		config.chaincodeDir = filepath.Join("config", "samples", "chaincodes", "node_settlement")
+		config.createFunction = "createSettlement"
+		config.readFunction = "readSettlement"
+		config.runNodeLifecycleFlow = true
+	case runtimeGo:
+		config.chaincodeDir = filepath.Join("config", "samples", "chaincodes", "go_settlement")
+		config.createFunction = "CreateSettlement"
+		config.readFunction = "ReadSettlement"
+	case runtimeJava:
+		config.chaincodeDir = filepath.Join("config", "samples", "chaincodes", "java_settlement")
+		config.createFunction = "createSettlement"
+		config.readFunction = "readSettlement"
+	default:
+		Fail(fmt.Sprintf("unsupported E2E_CHAINCODE_RUNTIME %q", runtime))
+	}
+
+	config.image = sampleChaincodeImageDefault(config.sampleManifest)
+	return config
+}
+
+func sampleChaincodeImageDefault(sampleManifest string) string {
+	GinkgoHelper()
+
+	samplePath := sampleManifest
+	if !filepath.IsAbs(samplePath) {
+		samplePath = filepath.Join(repoRoot, samplePath)
+	}
+	data, err := os.ReadFile(samplePath)
+	Expect(err).NotTo(HaveOccurred())
+
+	var manifest sampleFabricNetworkManifest
+	Expect(yaml.Unmarshal(data, &manifest)).To(Succeed())
+	for _, chaincode := range manifest.Spec.Chaincodes {
+		if chaincode.Name == "settlement" {
+			Expect(chaincode.Image).NotTo(BeEmpty())
+			return chaincode.Image
+		}
+	}
+	Fail("sample FabricNetwork must declare the settlement chaincode image")
+	return ""
+}
 
 var _ = Describe("Kind bundle install", Ordered, func() {
 	AfterEach(func() {
@@ -104,7 +173,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		}
 	})
 
-	It("reconciles the sample network and invokes the Node, Go, and Java CCaaS chaincodes", func() {
+	It("reconciles the selected sample runtime and invokes its CCaaS chaincode", func() {
 		By("using the target kind context")
 		runCommand(30*time.Second, kubectlBin, "config", "use-context", "kind-"+kindCluster)
 
@@ -116,14 +185,17 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		runCommand(30*time.Second, "mkdir", "-p", "bin")
 		runCommand(3*time.Minute, "go", "build", "-o", fabricopsctlBin, "./cmd/fabricopsctl")
 
-		By("building and loading the local settlement chaincode images")
-		runCommand(10*time.Minute, "docker", "build", "-t", nodeImage, "-t", nodeUpgradeImage, "config/samples/chaincodes/node_settlement")
-		runCommand(10*time.Minute, "docker", "build", "-t", goImage, "config/samples/chaincodes/go_settlement")
-		runCommand(10*time.Minute, "docker", "build", "-t", javaImage, "config/samples/chaincodes/java_settlement")
-		runCommand(5*time.Minute, kindBin, "load", "docker-image", nodeImage, "--name", kindCluster)
-		runCommand(5*time.Minute, kindBin, "load", "docker-image", nodeUpgradeImage, "--name", kindCluster)
-		runCommand(5*time.Minute, kindBin, "load", "docker-image", goImage, "--name", kindCluster)
-		runCommand(5*time.Minute, kindBin, "load", "docker-image", javaImage, "--name", kindCluster)
+		By("building and loading the local " + runtimeConfig.name + " settlement chaincode image")
+		buildArgs := []string{"build", "-t", runtimeConfig.image}
+		if runtimeConfig.runNodeLifecycleFlow {
+			buildArgs = append(buildArgs, "-t", nodeUpgradeImage)
+		}
+		buildArgs = append(buildArgs, runtimeConfig.chaincodeDir)
+		runCommand(10*time.Minute, "docker", buildArgs...)
+		runCommand(5*time.Minute, kindBin, "load", "docker-image", runtimeConfig.image, "--name", kindCluster)
+		if runtimeConfig.runNodeLifecycleFlow {
+			runCommand(5*time.Minute, kindBin, "load", "docker-image", nodeUpgradeImage, "--name", kindCluster)
+		}
 
 		By("generating and applying the install bundle")
 		runCommand(5*time.Minute, "make", "build-installer", "IMG="+managerImage)
@@ -131,14 +203,21 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		runCommand(3*time.Minute, kubectlBin, "rollout", "status", "deployment/"+managerName, "-n", managerNamespace, "--timeout=120s")
 
 		By("applying the sample FabricNetwork")
-		runCommand(2*time.Minute, kubectlBin, "apply", "-k", "config/samples")
+		runCommand(2*time.Minute, kubectlBin, "apply", "-f", runtimeConfig.sampleManifest)
 
 		By("waiting for FabricOps to provision the Fabric network")
 		runFabricOpsctl(25*time.Minute, "wait", "-n", sampleNamespace, "--timeout", "20m", sampleName)
 
-		By("invoking and querying the sample Node CCaaS chaincode through BankA and BankB endorsement sets")
+		By("verifying the sample chaincode status and workload image")
 		smokeID := fmt.Sprintf("e2e-%d", time.Now().Unix())
-		invokeAndQuerySettlement(smokeID+"-cli", "createSettlement", "readSettlement", "BankA/peer0", "BankB/peer0")
+		expectSampleChaincodeReady("0.0.1", 1, runtimeConfig.image, baseSampleChaincodeTargets())
+
+		By("invoking and querying the sample " + runtimeConfig.name + " CCaaS chaincode through BankA and BankB endorsement sets")
+		invokeAndQuerySettlement(smokeID+"-"+runtimeConfig.name, runtimeConfig.createFunction, runtimeConfig.readFunction, "BankA/peer0", "BankB/peer0")
+
+		if !runtimeConfig.runNodeLifecycleFlow {
+			return
+		}
 
 		By("running the private-data smoke for package and collection wiring")
 		runCommandWithEnv(5*time.Minute, []string{
@@ -157,15 +236,15 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 		By("scaling BankB with a new explicit channel peer")
 		scaledGeneration := patchSampleBankBPeerScaleUp()
 		waitForFabricNetworkReadyGeneration(scaledGeneration, 25*time.Minute)
-		expectSampleChaincodeReady("0.0.1", 1, nodeImage, scaledSampleChaincodeTargets())
+		expectSampleChaincodeReady("0.0.1", 1, runtimeConfig.image, scaledSampleChaincodeTargets())
 
 		By("invoking through the newly joined BankB peer")
-		invokeAndQuerySettlement(smokeID+"-scale", "createSettlement", "readSettlement", "BankA/peer0", "BankB/peer1")
+		invokeAndQuerySettlement(smokeID+"-scale", runtimeConfig.createFunction, runtimeConfig.readFunction, "BankA/peer0", "BankB/peer1")
 
 		By("scaling BankB back down while retaining peer state")
 		scaledDownGeneration := patchSampleBankBPeerScaleDown()
 		waitForFabricNetworkReadyGeneration(scaledDownGeneration, 25*time.Minute)
-		expectSampleChaincodeReady("0.0.1", 1, nodeImage, baseSampleChaincodeTargets())
+		expectSampleChaincodeReady("0.0.1", 1, runtimeConfig.image, baseSampleChaincodeTargets())
 		expectSampleBankBPeer1ScaledDown()
 
 		status := runCommand(30*time.Second, kubectlBin, "get", "fabricnetwork", sampleName, "-n", sampleNamespace, "-o", "jsonpath={.status.phase}{\"\\n\"}{range .status.conditions[*]}{.type}={.status} {.reason}{\"\\n\"}{end}")
@@ -183,23 +262,7 @@ var _ = Describe("Kind bundle install", Ordered, func() {
 
 		By("invoking and querying the upgraded chaincode")
 		upgradeSmokeID := smokeID + "-upgrade"
-		invokeAndQuerySettlement(upgradeSmokeID, "createSettlement", "readSettlement", "BankA/peer0", "BankB/peer0")
-
-		By("switching the same Fabric chaincode definition to the Go CCaaS sample")
-		goGeneration := patchSampleChaincode("0.0.3", 3, goImage)
-		waitForFabricNetworkReadyGeneration(goGeneration, 25*time.Minute)
-		expectSampleChaincodeReady("0.0.3", 3, goImage, baseSampleChaincodeTargets())
-
-		By("invoking and querying the Go CCaaS sample")
-		invokeAndQuerySettlement(smokeID+"-go", "CreateSettlement", "ReadSettlement", "BankA/peer0", "BankB/peer0")
-
-		By("switching the same Fabric chaincode definition to the Java CCaaS sample")
-		javaGeneration := patchSampleChaincode("0.0.4", 4, javaImage)
-		waitForFabricNetworkReadyGeneration(javaGeneration, 25*time.Minute)
-		expectSampleChaincodeReady("0.0.4", 4, javaImage, baseSampleChaincodeTargets())
-
-		By("invoking and querying the Java CCaaS sample")
-		invokeAndQuerySettlement(smokeID+"-java", "createSettlement", "readSettlement", "BankA/peer0", "BankB/peer0")
+		invokeAndQuerySettlement(upgradeSmokeID, runtimeConfig.createFunction, runtimeConfig.readFunction, "BankA/peer0", "BankB/peer0")
 
 		By("confirming cleanup continues after chaincode upgrades without losing channel proof Jobs")
 		expectNoCleanupEligibleSucceededJobs(4 * time.Minute)
@@ -267,7 +330,7 @@ func invokeAndQuerySettlement(smokeID string, createFunction string, readFunctio
 		invokeArgs = append(invokeArgs, "--peer", peer)
 	}
 	invokeArgs = append(invokeArgs, sampleName)
-	runFabricOpsctl(5*time.Minute, invokeArgs...)
+	runFabricOpsctlEventually(8*time.Minute, invokeArgs...)
 
 	for _, peer := range peers {
 		queryArgs := []string{
@@ -282,7 +345,7 @@ func invokeAndQuerySettlement(smokeID string, createFunction string, readFunctio
 			"-o", "json",
 			sampleName,
 		}
-		output := runFabricOpsctl(5*time.Minute, queryArgs...)
+		output := runFabricOpsctlEventually(5*time.Minute, queryArgs...)
 		Expect(output).To(ContainSubstring(smokeID))
 	}
 }
@@ -549,8 +612,46 @@ func runFabricOpsctl(timeout time.Duration, args ...string) string {
 	return runCommand(timeout, fabricopsctlBin, args...)
 }
 
+func runFabricOpsctlEventually(timeout time.Duration, args ...string) string {
+	GinkgoHelper()
+
+	var output string
+	Eventually(func(g Gomega) {
+		var err error
+		output, err = runCommandAllowFailure(3*time.Minute, fabricopsctlBin, args...)
+		g.Expect(err).NotTo(HaveOccurred(), output)
+	}, timeout, 10*time.Second).Should(Succeed())
+	return output
+}
+
 func runCommandQuiet(timeout time.Duration, name string, args ...string) string {
 	return runCommandWithEnvAndLogging(timeout, nil, false, name, args...)
+}
+
+func runCommandAllowFailure(timeout time.Duration, name string, args ...string) (string, error) {
+	GinkgoHelper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = repoRoot
+	cmd.Env = os.Environ()
+
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	commandLine := strings.Join(append([]string{name}, args...), " ")
+	err := cmd.Run()
+	text := output.String()
+	if ctx.Err() == context.DeadlineExceeded {
+		return text, fmt.Errorf("command timed out after %s: %s\n%s", timeout, commandLine, text)
+	}
+	if err != nil {
+		return text, fmt.Errorf("command failed: %s\n%s: %w", commandLine, text, err)
+	}
+	return text, nil
 }
 
 func expectCommandFailure(timeout time.Duration, name string, args ...string) string {

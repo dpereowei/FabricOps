@@ -808,10 +808,6 @@ func operationsReadinessProbe() *corev1.Probe {
 	return operationsHealthProbe(5, 10, 2, 6)
 }
 
-func operationsLivenessProbe() *corev1.Probe {
-	return operationsHealthProbe(30, 20, 2, 3)
-}
-
 func operationsHealthProbe(
 	initialDelaySeconds int32,
 	periodSeconds int32,
@@ -1549,7 +1545,7 @@ func buildOrdererDeployment(
 								{ContainerPort: ordererOpsPort, Name: endpointOperations, Protocol: corev1.ProtocolTCP},
 							},
 							ReadinessProbe: operationsReadinessProbe(),
-							LivenessProbe:  operationsLivenessProbe(),
+							LivenessProbe:  tcpLivenessProbe(ordererPort),
 							Resources:      componentResourceRequirements(componentOrderer),
 							VolumeMounts: append(
 								identityVolumeMounts(ordererMSPPath, ordererTLSPath, tlsEnabled),
@@ -1728,8 +1724,8 @@ func buildPeerDeployment(
 								{ContainerPort: peerChaincodePort, Name: "chaincode", Protocol: corev1.ProtocolTCP},
 								{ContainerPort: peerOpsPort, Name: endpointOperations, Protocol: corev1.ProtocolTCP},
 							},
-							ReadinessProbe: operationsReadinessProbe(),
-							LivenessProbe:  operationsLivenessProbe(),
+							ReadinessProbe: tcpReadinessProbe(peerPort),
+							LivenessProbe:  tcpLivenessProbe(peerPort),
 							Resources:      componentResourceRequirements(componentPeer),
 							VolumeMounts: append(
 								identityVolumeMounts(peerMSPPath, peerTLSPath, tlsEnabled),

@@ -23,14 +23,14 @@ Requirements:
 Install the latest published release bundle:
 
 ```bash
-kubectl apply -f https://github.com/dpereowei/fabricops/releases/download/v0.1.0/install.yaml
+kubectl apply -f https://github.com/dpereowei/fabricops/releases/download/v0.1.1/install.yaml
 kubectl rollout status deployment/fabricops-controller-manager -n fabricops-system --timeout=120s
 ```
 
 The bundle installs the `FabricNetwork` CRD, RBAC, ServiceAccount, manager Deployment, and metrics Service. The manager image is pinned to the release tag:
 
 ```text
-ghcr.io/dpereowei/fabricops:0.1.0
+ghcr.io/dpereowei/fabricops:0.1.1
 ```
 
 ### Install With Helm
@@ -39,7 +39,7 @@ Install the release chart directly from the GitHub release:
 
 ```bash
 helm upgrade --install fabricops \
-  https://github.com/dpereowei/fabricops/releases/download/v0.1.0/fabricops-0.1.0.tgz \
+  https://github.com/dpereowei/fabricops/releases/download/v0.1.1/fabricops-0.1.1.tgz \
   --namespace fabricops-system \
   --create-namespace \
   --wait
@@ -51,11 +51,11 @@ Override the manager image if needed:
 
 ```bash
 helm upgrade --install fabricops \
-  https://github.com/dpereowei/fabricops/releases/download/v0.1.0/fabricops-0.1.0.tgz \
+  https://github.com/dpereowei/fabricops/releases/download/v0.1.1/fabricops-0.1.1.tgz \
   --namespace fabricops-system \
   --create-namespace \
   --set manager.image.repository=ghcr.io/dpereowei/fabricops \
-  --set manager.image.tag=0.1.0 \
+  --set manager.image.tag=0.1.1 \
   --wait
 ```
 
@@ -65,7 +65,7 @@ If you want to review the Kubernetes objects before applying them:
 
 ```bash
 helm template fabricops \
-  https://github.com/dpereowei/fabricops/releases/download/v0.1.0/fabricops-0.1.0.tgz \
+  https://github.com/dpereowei/fabricops/releases/download/v0.1.1/fabricops-0.1.1.tgz \
   --namespace fabricops-system > fabricops-install.yaml
 
 kubectl apply -f fabricops-install.yaml
@@ -77,7 +77,7 @@ kubectl rollout status deployment/fabricops-controller-manager -n fabricops-syst
 After installing the operator, apply the sample `FabricNetwork`:
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/dpereowei/fabricops/v0.1.0/config/samples/fabricops_v1alpha1_fabricnetwork.yaml
+kubectl apply -f https://raw.githubusercontent.com/dpereowei/fabricops/v0.1.1/config/samples/fabricops_v1alpha1_fabricnetwork.yaml
 kubectl wait fabricnetwork/fabricnetwork-sample -n default --for=condition=Ready --timeout=20m
 ```
 
@@ -123,7 +123,7 @@ Delete `FabricNetwork` resources before removing the operator so FabricOps final
 
 ```bash
 kubectl delete fabricnetwork fabricnetwork-sample -n default --ignore-not-found
-kubectl delete -f https://github.com/dpereowei/fabricops/releases/download/v0.1.0/install.yaml
+kubectl delete -f https://github.com/dpereowei/fabricops/releases/download/v0.1.1/install.yaml
 ```
 
 For Helm installs:
@@ -135,14 +135,14 @@ helm uninstall fabricops -n fabricops-system
 
 ## Release Artifacts
 
-Release `v0.1.0` publishes:
+Release `v0.1.1` publishes:
 
 - `install.yaml`: single-file Kubernetes install bundle
-- `fabricops-0.1.0.tgz`: Helm chart archive
-- `ghcr.io/dpereowei/fabricops:0.1.0`: multi-platform manager image
-- `ghcr.io/dpereowei/fabricops-node-settlement:0.1.0`: Node CCaaS sample
-- `ghcr.io/dpereowei/fabricops-go-settlement:0.1.0`: Go CCaaS sample
-- `ghcr.io/dpereowei/fabricops-java-settlement:0.1.0`: Java CCaaS sample
+- `fabricops-0.1.1.tgz`: Helm chart archive
+- `ghcr.io/dpereowei/fabricops:0.1.1`: multi-platform manager image
+- `ghcr.io/dpereowei/fabricops-node-settlement:0.1.1`: Node CCaaS sample
+- `ghcr.io/dpereowei/fabricops-go-settlement:0.1.1`: Go CCaaS sample
+- `ghcr.io/dpereowei/fabricops-java-settlement:0.1.1`: Java CCaaS sample
 
 ## Capabilities
 
@@ -287,8 +287,8 @@ ghcr.io/dpereowei/fabricops:<version>
 For example:
 
 ```bash
-make docker-buildx-release VERSION=0.1.0
-make build-installer-release VERSION=0.1.0
+make docker-buildx-release VERSION=0.1.1
+make build-installer-release VERSION=0.1.1
 ```
 
 `docker-buildx-release` publishes the manager image for all configured `PLATFORMS`. For local single-platform sanity checks, use `docker-build-release` and `docker-push-release`.
@@ -296,7 +296,7 @@ make build-installer-release VERSION=0.1.0
 Use that same tag for Helm installs:
 
 ```bash
-make helm-deploy-release VERSION=0.1.0
+make helm-deploy-release VERSION=0.1.1
 ```
 
 The release helpers derive `RELEASE_IMG` from `IMAGE_REGISTRY`, `IMAGE_REPOSITORY`, and `VERSION`. Override those variables if the image moves to another registry or repository.
@@ -304,7 +304,7 @@ The release helpers derive `RELEASE_IMG` from `IMAGE_REGISTRY`, `IMAGE_REPOSITOR
 Before publishing release instructions, verify that the manager image and sample chaincode images are publicly pullable from GHCR:
 
 ```bash
-make release-check-ghcr VERSION=0.1.0
+make release-check-ghcr VERSION=0.1.1
 ```
 
 See [docs/first-release-checklist.md](docs/first-release-checklist.md) for the full release checklist.
@@ -328,7 +328,13 @@ Run the repeatable kind-based e2e proof with:
 make test-e2e
 ```
 
-The e2e target builds the local manager plus Node, Go, and Java settlement chaincode images, loads them into kind, installs the generated bundle, applies the sample network, waits for `Ready=True`, runs the Node invoke/private-data smoke, then declaratively rolls the same chaincode through Go and Java runtime images with invoke/query checks. See [docs/e2e-validation.md](docs/e2e-validation.md) for kind, OrbStack, and cleanup notes.
+The e2e target builds the local manager plus one selected settlement chaincode
+runtime, loads those images into kind, installs the generated bundle, applies
+the matching sample manifest, waits for `Ready=True`, and invokes/queries the
+chaincode. CI runs the Node, Go, and Java lanes concurrently; the Node lane also
+covers private data, peer scale changes, cleanup, and chaincode upgrade. See
+[docs/e2e-validation.md](docs/e2e-validation.md) for kind, OrbStack, and
+cleanup notes.
 
 ## Identity Secrets
 
@@ -467,7 +473,7 @@ spec:
     - name: settlement
       version: "0.0.1"
       channel: settlement
-      image: ghcr.io/dpereowei/fabricops-node-settlement:0.1.0
+      image: ghcr.io/dpereowei/fabricops-node-settlement:0.1.1
       sequence: 1
       ccaas:
         replicas: 1

@@ -4,7 +4,7 @@ IMG ?= $(LOCAL_IMG)
 # Canonical manager image location for release builds.
 IMAGE_REGISTRY ?= ghcr.io/dpereowei
 IMAGE_REPOSITORY ?= fabricops
-VERSION ?= 0.1.0
+VERSION ?= 0.1.1
 RELEASE_IMG ?= $(IMAGE_REGISTRY)/$(IMAGE_REPOSITORY):$(VERSION)
 SAMPLE_CHAINCODE_IMAGES ?= $(IMAGE_REGISTRY)/fabricops-node-settlement:$(VERSION) $(IMAGE_REGISTRY)/fabricops-go-settlement:$(VERSION) $(IMAGE_REGISTRY)/fabricops-java-settlement:$(VERSION)
 RELEASE_CHECK_IMAGES ?= $(RELEASE_IMG) $(SAMPLE_CHAINCODE_IMAGES)
@@ -80,6 +80,8 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 KIND_CLUSTER ?= fabricops-test-e2e
 E2E_SKIP_CLEANUP ?= false
 E2E_GO_TEST_TIMEOUT ?= 75m
+E2E_CHAINCODE_RUNTIME ?= node
+E2E_SAMPLE_MANIFEST ?= config/samples/e2e/$(E2E_CHAINCODE_RUNTIME)/fabricnetwork.yaml
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -99,7 +101,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
 	@status=0; \
-	KIND=$(KIND) KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) IMG=$(IMG) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout $(E2E_GO_TEST_TIMEOUT) || status=$$?; \
+	KIND=$(KIND) KUBECTL=$(KUBECTL) KIND_CLUSTER=$(KIND_CLUSTER) IMG=$(IMG) E2E_CHAINCODE_RUNTIME=$(E2E_CHAINCODE_RUNTIME) E2E_SAMPLE_MANIFEST=$(E2E_SAMPLE_MANIFEST) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout $(E2E_GO_TEST_TIMEOUT) || status=$$?; \
 	if [ "$(E2E_SKIP_CLEANUP)" = "true" ]; then \
 		echo "Keeping Kind cluster '$(KIND_CLUSTER)' because E2E_SKIP_CLEANUP=true"; \
 	else \

@@ -45,6 +45,10 @@ jobs:
           make docker-build
           make build-fabricopsctl
           kind load docker-image "${IMG}" --name "${KIND_CLUSTER}"
+          node_image="$(awk '$1 == "image:" && $2 ~ /fabricops-node-settlement/ { print $2; exit }' config/samples/e2e/node/fabricnetwork.yaml)"
+          test -n "${node_image}"
+          docker build -t "${node_image}" config/samples/chaincodes/node_settlement
+          kind load docker-image "${node_image}" --name "${KIND_CLUSTER}"
 
       - name: Install Helm
         run: make install-helm
@@ -82,7 +86,7 @@ jobs:
 
       - name: Apply sample network
         run: |
-          kubectl apply -k config/samples
+          kubectl apply -f config/samples/e2e/node/fabricnetwork.yaml
           bin/fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
 
       - name: Invoke and query with fabricopsctl

@@ -1516,7 +1516,7 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /manager
-        image: ghcr.io/dpereowei/fabricops:0.1.0
+        image: ghcr.io/dpereowei/fabricops:0.1.1
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:

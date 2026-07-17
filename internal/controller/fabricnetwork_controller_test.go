@@ -1031,7 +1031,7 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(ordererDeploy.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
 			Expect(containerPorts(ordererContainer)).To(ContainElements(int32(7050), int32(9443), int32(8443)))
 			expectOperationsProbe(ordererContainer.ReadinessProbe)
-			expectOperationsProbe(ordererContainer.LivenessProbe)
+			expectTCPProbe(ordererContainer.LivenessProbe, ordererPort)
 			expectContainerResources(ordererContainer, defaultOrdererRequestCPU, defaultOrdererRequestMem, defaultOrdererLimitCPU, defaultOrdererLimitMem)
 			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "orderer0-msp"))
 			Expect(secretVolumeNames(ordererDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "orderer0-tls"))
@@ -1090,8 +1090,8 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(peerDeploy.Annotations[annotationOrg]).To(Equal("BankA"))
 			Expect(peerDeploy.Spec.Template.Annotations[annotationFabricNetwork]).To(Equal(resourceName))
 			Expect(containerPorts(peerContainer)).To(ContainElements(int32(7051), int32(7052), int32(9443)))
-			expectOperationsProbe(peerContainer.ReadinessProbe)
-			expectOperationsProbe(peerContainer.LivenessProbe)
+			expectTCPProbe(peerContainer.ReadinessProbe, peerPort)
+			expectTCPProbe(peerContainer.LivenessProbe, peerPort)
 			expectContainerResources(peerContainer, defaultPeerRequestCPU, defaultPeerRequestMem, defaultPeerLimitCPU, defaultPeerLimitMem)
 			Expect(secretVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindMSP, "peer0-msp"))
 			Expect(secretVolumeNames(peerDeploy.Spec.Template.Spec)).To(HaveKeyWithValue(secretKindTLS, "peer0-tls"))
@@ -2014,6 +2014,47 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(commitContainer.Command[2]).To(ContainSubstring("--collections-config \"$COLLECTIONS_CONFIG\""))
 		})
 
+		It("should generate Fabric 2 application channel config without legacy consortium groups", func() {
+			var network fabricopsv1alpha1.FabricNetwork
+			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
+			network.Spec.Global.FabricVersion = "2.4.7"
+
+			configtx, err := buildConfigtxYAML(&network, fabricopsv1alpha1.Channel{
+				Name: "settlement",
+				Orgs: []fabricopsv1alpha1.ChannelOrg{
+					{
+						Name:  "BankA",
+						Peers: []string{"peer0"},
+					},
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(configtx).To(ContainSubstring("Settlement:"))
+			Expect(configtx).To(ContainSubstring("Orderer:"))
+			Expect(configtx).To(ContainSubstring("Application:"))
+			Expect(configtx).To(ContainSubstring("Host: orderer0.fo-test-orderer.svc.cluster.local"))
+			Expect(configtx).To(ContainSubstring("Host: peer0.fo-test-banka.svc.cluster.local"))
+			Expect(configtx).NotTo(ContainSubstring("Consortium:"))
+			Expect(configtx).NotTo(ContainSubstring("Consortiums:"))
+		})
+
+		It("should parse inactive orderer join evidence as not ready", func() {
+			found, status := ordererJoinResultChannelStatus(
+				`Status: 200
+{"channels":[{"name":"settlement","status":"inactive"}]}`,
+				"settlement",
+			)
+			Expect(found).To(BeTrue())
+			Expect(status).To(Equal("inactive"))
+
+			found, status = ordererJoinResultChannelStatus(
+				`{"channels":[{"name":"settlement","status":"active"}]}`,
+				"settlement",
+			)
+			Expect(found).To(BeTrue())
+			Expect(status).To(Equal("active"))
+		})
+
 		It("should generate channel config and a channel block Job after components are ready", func() {
 			var network fabricopsv1alpha1.FabricNetwork
 			Expect(k8sClient.Get(ctx, typeNamespacedName, &network)).To(Succeed())
@@ -2101,6 +2142,8 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("Host: peer0.fo-test-banka.svc.cluster.local"))
 			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("Port: 7051"))
 			Expect(configtx.Data["configtx.yaml"]).To(ContainSubstring("ClientTLSCert: /fabricops/channel/crypto/orderers/orderer0/tls/server.crt"))
+			Expect(configtx.Data["configtx.yaml"]).NotTo(ContainSubstring("Consortium:"))
+			Expect(configtx.Data["configtx.yaml"]).NotTo(ContainSubstring("Consortiums:"))
 
 			var connectionProfile corev1.ConfigMap
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
@@ -2262,6 +2305,10 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(joinContainer.Image).To(Equal("hyperledger/fabric-tools:2.5.14"))
 			Expect(joinContainer.Command[2]).To(ContainSubstring("osnadmin channel join"))
 			Expect(joinContainer.Command[2]).To(ContainSubstring("osnadmin channel list"))
+			Expect(joinContainer.Command[2]).To(ContainSubstring("--channelID \"$CHANNEL_ID\""))
+			Expect(joinContainer.Command[2]).To(ContainSubstring("--no-status"))
+			Expect(joinContainer.Command[2]).To(ContainSubstring("sed -n '/^[[:space:]]*[{[]/,$p'"))
+			Expect(joinContainer.Command[2]).To(ContainSubstring("Orderer channel $CHANNEL_ID did not become active"))
 			Expect(joinContainer.Command[2]).To(ContainSubstring("orderer0.fo-test-orderer.svc.cluster.local:9443"))
 			Expect(joinContainer.Command[2]).To(ContainSubstring("--client-cert \"$ADMIN_TLS_DIR/client.crt\""))
 			Expect(volumeMountPaths(joinContainer)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
@@ -2473,10 +2520,12 @@ var _ = Describe("FabricNetwork Controller", func() {
 			Expect(anchorContainer.Command[2]).To(ContainSubstring("ANCHOR_PORT=7051"))
 			Expect(anchorContainer.Command[2]).To(ContainSubstring("ORDERER_ADDRESS=\"orderer0.fo-test-orderer.svc.cluster.local:7050\""))
 			Expect(anchorContainer.Command[2]).To(ContainSubstring("peer channel fetch config"))
+			Expect(anchorContainer.Command[2]).To(ContainSubstring("retry 30 5 peer channel fetch config"))
 			Expect(anchorContainer.Command[2]).To(ContainSubstring("configtxlator compute_update"))
 			Expect(anchorContainer.Command[2]).To(ContainSubstring("jq -n"))
 			Expect(anchorContainer.Command[2]).To(ContainSubstring("AnchorPeers"))
 			Expect(anchorContainer.Command[2]).To(ContainSubstring("peer channel update"))
+			Expect(anchorContainer.Command[2]).To(ContainSubstring("retry 30 5 peer channel update"))
 			Expect(anchorContainer.Command[2]).To(ContainSubstring("--cafile \"$ORDERER_TLS_DIR/ca.crt\""))
 			Expect(volumeMountPaths(anchorContainer)).To(HaveKeyWithValue(channelOutputVolumeName, channelOutputDir))
 			Expect(volumeMountPaths(anchorContainer)).To(HaveKeyWithValue("msp-banka", channelOrgMSPPath(network.Spec.Orgs[1])))
@@ -3469,7 +3518,7 @@ func createOrdererJoinResultConfigMap(ctx context.Context, namespace, name, chan
 			Namespace: namespace,
 		},
 		Data: map[string]string{
-			channelOrdererJoinResultKey: fmt.Sprintf("Status: 200\n{\"channels\":[{\"name\":%q}]}", channelName),
+			channelOrdererJoinResultKey: fmt.Sprintf("Status: 200\n{\"channels\":[{\"name\":%q,\"status\":\"active\"}]}", channelName),
 		},
 	}
 	Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
