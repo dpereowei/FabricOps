@@ -1,14 +1,30 @@
 # E2E Validation
 
-FabricOps e2e validation provisions a real kind cluster, installs the in-cluster manager, applies the sample `FabricNetwork`, waits for `Ready=True`, and invokes the sample settlement CCaaS chaincode across Node, Go, and Java runtimes.
+FabricOps e2e validation provisions a real kind cluster, installs the in-cluster
+manager, applies a runtime-specific sample `FabricNetwork` manifest, waits for
+`Ready=True`, and invokes the selected settlement CCaaS chaincode runtime.
 
 ## Kind
 
-Run the full local e2e proof from the repository root:
+Run the default Node local e2e proof from the repository root:
 
 ```bash
 make test-e2e
 ```
+
+Run another runtime by selecting its manifest:
+
+```bash
+make test-e2e \
+  E2E_CHAINCODE_RUNTIME=go \
+  KIND_CLUSTER=fabricops-e2e-go
+```
+
+Supported runtime manifests are:
+
+- `config/samples/e2e/node/fabricnetwork.yaml`
+- `config/samples/e2e/go/fabricnetwork.yaml`
+- `config/samples/e2e/java/fabricnetwork.yaml`
 
 The default cluster name is `fabricops-test-e2e`. Override it with:
 
@@ -25,14 +41,13 @@ make test-e2e E2E_SKIP_CLEANUP=true
 When the test completes, it has validated:
 
 - manager image build and kind image load
-- local Node, Go, and Java settlement chaincode image builds and kind image loads
+- selected settlement chaincode image build and kind image load
 - generated install bundle deployment
-- sample `FabricNetwork` reconciliation to `Ready=True`
+- runtime-specific sample manifest reconciliation to `Ready=True`
 - channel bootstrap, chaincode lifecycle, and CCaaS workload readiness
-- committed Node settlement chaincode invokes plus queries through BankA and BankB endorsement sets
-- private data collection lifecycle wiring, transient private write, authorized private read, non-member private read rejection, and non-member private hash query
-- declarative sequence upgrades from the Node image to the Go image and then the Java image
-- committed Go and Java settlement chaincode invokes plus queries through BankA and BankB endorsement sets
+- committed settlement chaincode invokes plus queries through BankA and BankB endorsement sets
+- Node lane private data collection lifecycle wiring, transient private write, authorized private read, non-member private read rejection, and non-member private hash query
+- Node lane peer scale changes, helper Job cleanup, and declarative sequence upgrade
 
 Clean up a retained e2e cluster with:
 
@@ -77,7 +92,7 @@ make cleanup-sample
 
 The repository has two kind-backed CI smokes:
 
-- `.github/workflows/test-e2e.yml` runs `make test-e2e` against the generated install bundle and the Node, Go, and Java sample chaincodes.
-- `.github/workflows/test-chart.yml` installs the Helm chart, applies the sample network, waits for `Ready=True` with `fabricopsctl`, and invokes/queries the Node settlement chaincode with `fabricopsctl`.
+- `.github/workflows/test-e2e.yml` runs `make test-e2e` as concurrent Node, Go, and Java matrix lanes against the generated install bundle.
+- `.github/workflows/test-chart.yml` installs the Helm chart, applies the Node sample manifest, waits for `Ready=True` with `fabricopsctl`, and invokes/queries the Node settlement chaincode with `fabricopsctl`.
 
 The unit/envtest workflow also runs `go mod tidy` and generated-file drift checks before the repository is ready to release.

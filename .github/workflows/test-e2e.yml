@@ -10,11 +10,20 @@ jobs:
   test-e2e:
     permissions:
       contents: read
-    name: Bundle smoke on kind
+    name: Bundle smoke on kind (${{ matrix.runtime }})
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime:
+          - node
+          - go
+          - java
     env:
-      KIND_CLUSTER: fabricops-ci-e2e
+      E2E_CHAINCODE_RUNTIME: ${{ matrix.runtime }}
+      E2E_SAMPLE_MANIFEST: config/samples/e2e/${{ matrix.runtime }}/fabricnetwork.yaml
+      KIND_CLUSTER: fabricops-ci-e2e-${{ matrix.runtime }}
       KIND_VERSION: v0.31.0
       IMG: controller:latest
     steps:

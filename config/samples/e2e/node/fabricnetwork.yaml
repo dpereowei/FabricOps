@@ -1,0 +1,99 @@
+apiVersion: fabricops.io/v1alpha1
+kind: FabricNetwork
+metadata:
+  labels:
+    app.kubernetes.io/name: fabricops
+    app.kubernetes.io/managed-by: kustomize
+  name: fabricnetwork-sample
+spec:
+  global:
+    fabricVersion: "3.1.0"
+    tls: true
+    jobs:
+      succeededHistoryTTLSeconds: 600
+    storage:
+      ca:
+        size: 1Gi
+      orderer:
+        size: 5Gi
+      peer:
+        size: 10Gi
+
+  orgs:
+    - organization:
+        name: Orderer
+        domain: orderer.example.com
+        mspName: OrdererMSP
+      ca:
+        db: sqlite
+      orderers:
+        - groupName: group1
+          type: raft
+          instances: 2
+          prefix: orderer
+
+    - organization:
+        name: BankA
+        domain: banka.example.com
+        mspName: BankAMSP
+      ca:
+        db: postgres
+      peer:
+        instances: 2
+        db: CouchDb
+        prefix: peer
+
+    - organization:
+        name: BankB
+        domain: bankb.example.com
+        mspName: BankBMSP
+      ca:
+        db: postgres
+      peer:
+        instances: 1
+        db: CouchDb
+        prefix: peer
+
+  channels:
+    - name: settlement
+      orgs:
+        - name: BankA
+          peers: ["peer0", "peer1"]
+        - name: BankB
+          peers: ["peer0"]
+    - name: audit
+      orgs:
+        - name: BankA
+          peers: ["peer0", "peer1"]
+        - name: BankB
+          peers: ["peer0"]
+
+  chaincodes:
+    - name: settlement
+      version: "0.0.1"
+      channel: settlement
+      image: ghcr.io/dpereowei/fabricops-node-settlement:0.1.1
+      sequence: 1
+      endorsementPolicy: "AND('BankAMSP.member','BankBMSP.member')"
+      privateData:
+        - name: bank-a-private-settlements
+          orgNames: ["BankA"]
+          requiredPeerCount: 0
+          maxPeerCount: 1
+          memberOnlyRead: true
+          memberOnlyWrite: true
+          endorsementPolicy:
+            signaturePolicy: "OR('BankAMSP.member')"
+      couchdbIndexes:
+        - name: indexOwner
+          fields: ["docType", "owner"]
+          designDocument: indexOwnerDoc
+        - name: privateOwner
+          fields: ["owner", "status"]
+          collection: bank-a-private-settlements
+      ccaas:
+        replicas: 1
+        containerPort: 7052
+        servicePort: 7052
+        dialTimeout: 10s
+        imagePullPolicy: IfNotPresent
