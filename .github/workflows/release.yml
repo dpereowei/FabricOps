@@ -1,0 +1,171 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to publish, for example v0.1.3"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      IMAGE_REGISTRY: ghcr.io/dpereowei
+      IMAGE_REPOSITORY: fabricops
+      PLATFORMS: linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Validate release input
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Run releases from the main branch. Current ref is ${GITHUB_REF}."
+            exit 1
+          fi
+
+          if [[ ! "${REQUESTED_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::release_tag must look like v0.1.3"
+            exit 1
+          fi
+
+          release_version="${REQUESTED_TAG#v}"
+
+          if gh release view "${REQUESTED_TAG}" >/dev/null 2>&1; then
+            echo "::error::GitHub release ${REQUESTED_TAG} already exists."
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${REQUESTED_TAG}" >/tmp/fabricops-release-tag 2>/dev/null; then
+            remote_tag_sha="$(awk '{ print $1 }' /tmp/fabricops-release-tag)"
+            head_sha="$(git rev-parse HEAD)"
+            if [ "${remote_tag_sha}" != "${head_sha}" ]; then
+              echo "::error::Tag ${REQUESTED_TAG} already exists at ${remote_tag_sha}, not current HEAD ${head_sha}."
+              exit 1
+            fi
+          fi
+
+          echo "tag=${REQUESTED_TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${release_version}" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_TAG=${REQUESTED_TAG}" >> "$GITHUB_ENV"
+          echo "VERSION=${release_version}" >> "$GITHUB_ENV"
+
+      - name: Prepare release files
+        run: hack/prepare-release.sh "${RELEASE_TAG}"
+
+      - name: Verify Go modules are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Run unit and envtest suite
+        run: make test
+
+      - name: Run lint
+        run: make lint
+
+      - name: Build binaries
+        run: |
+          make build
+          make build-fabricopsctl
+
+      - name: Build release artifacts
+        run: |
+          make install-helm
+          make build-installer-release VERSION="${VERSION}"
+          helm lint dist/chart
+          helm template fabricops dist/chart --namespace fabricops-system >/tmp/fabricops-chart.yaml
+          rm -f "dist/fabricops-${VERSION}.tgz"
+          helm package dist/chart \
+            --version "${VERSION}" \
+            --app-version "${VERSION}" \
+            --destination dist
+          grep "image: ${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${VERSION}" dist/install.yaml
+
+      - name: Commit release prep
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No release file changes to commit; assuming release prep is already committed."
+          else
+            git commit -s -m "Prepare FabricOps ${RELEASE_TAG} release"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Tag release
+        run: |
+          if git rev-parse "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Tag ${RELEASE_TAG} already exists locally."
+          else
+            git tag "${RELEASE_TAG}"
+          fi
+
+          git push origin "${RELEASE_TAG}"
+
+      - name: Log in to GHCR
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push manager image
+        run: make docker-buildx-release VERSION="${VERSION}"
+
+      - name: Build and push sample chaincode images
+        env:
+          PUSH: "true"
+          PLATFORM: linux/amd64
+        run: |
+          IMAGE="${IMAGE_REGISTRY}/fabricops-node-settlement:${VERSION}" \
+            config/samples/chaincodes/node_settlement/build_and_push.sh
+          IMAGE="${IMAGE_REGISTRY}/fabricops-go-settlement:${VERSION}" \
+            config/samples/chaincodes/go_settlement/build_and_push.sh
+          IMAGE="${IMAGE_REGISTRY}/fabricops-java-settlement:${VERSION}" \
+            config/samples/chaincodes/java_settlement/build_and_push.sh
+
+      - name: Verify public GHCR visibility
+        run: make release-check-ghcr VERSION="${VERSION}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${RELEASE_TAG}" \
+            dist/install.yaml \
+            "dist/fabricops-${VERSION}.tgz" \
+            --verify-tag \
+            --title "FabricOps ${RELEASE_TAG}" \
+            --generate-notes
+
+      - name: Verify release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${RELEASE_TAG}" --json tagName,targetCommitish,url,assets
+          make release-check-ghcr VERSION="${VERSION}"

@@ -1,13 +1,30 @@
-# First Release Checklist
+# Release Checklist
 
 Use this checklist before publishing a FabricOps release tag or pointing users at release install commands.
 
-## Prepare
+## Automated Release
 
-- Confirm the worktree is clean.
-- Choose the SemVer release version, for example `0.1.1`.
-- Confirm `SUPPORTED_FEATURES.md` reflects the current operator behavior.
-- Confirm `README.md` install commands use the intended release version.
+Use the `Release` GitHub Actions workflow from the GitHub UI.
+
+- Run it from the `main` branch.
+- Enter the intended release tag, for example `v0.1.1`.
+- The workflow creates the release-prep commit, pushes the release tag, and
+  publishes the GitHub release assets.
+
+The workflow performs these release gates:
+
+- Validate the release tag and ensure the release does not already exist.
+- Update release-version files.
+- Run Go module tidy verification, unit/envtest tests, lint, and binary builds.
+- Build and push the multi-platform manager image.
+- Build and push sample chaincode images.
+- Build `dist/install.yaml` and `dist/fabricops-<version>.tgz`.
+- Verify GHCR images are publicly pullable before creating the release.
+
+## Manual Sanity Checks
+
+The commands below mirror the automated workflow and are useful for local
+debugging or release dry runs.
 
 ## Build And Publish Images
 
@@ -91,6 +108,7 @@ bin/fabricopsctl query -n default --org BankA --peer BankA/peer0 \
 
 ## Publish
 
-- Create and push the release tag.
-- Create the GitHub release.
-- Re-run `make release-check-ghcr VERSION=<version>` after the release is visible.
+- Prefer the `Release` workflow for final publication.
+- If publishing manually, create and push the release tag, create the GitHub
+  release, upload `install.yaml` and `fabricops-<version>.tgz`, then rerun
+  `make release-check-ghcr VERSION=<version>` after the release is visible.

@@ -108,6 +108,7 @@ Install the CLI with Go:
 
 ```bash
 go install github.com/dpereowei/fabricops/cmd/fabricopsctl@latest
+export PATH="$(go env GOPATH)/bin:$PATH"
 fabricopsctl status -n default fabricnetwork-sample
 fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
 fabricopsctl connection-profile -n default --org BankA --format yaml fabricnetwork-sample
@@ -118,6 +119,9 @@ fabricopsctl query -n default --org BankA \
 
 For reproducible installs, replace `@latest` with a release tag such as
 `@v0.1.1`.
+
+If `go install` succeeds but your shell cannot find `fabricopsctl`, make the
+PATH export permanent in your shell profile, for example `~/.zshrc`.
 
 When building from source:
 
@@ -304,7 +308,19 @@ Local development uses `controller:latest` so OrbStack and kind can run the mana
 ghcr.io/dpereowei/fabricops:<version>
 ```
 
-For example:
+### Release Automation
+
+Use the `Release` GitHub Actions workflow from the GitHub UI when publishing a
+new release. Trigger it from `main` with a release tag such as `v<version>`.
+
+The workflow validates the tag, updates release-version files, runs the Go test
+and lint gates, builds and pushes the manager plus sample chaincode images,
+generates `install.yaml` and the Helm chart package, verifies GHCR public
+visibility, commits the release-prep changes, tags the commit, and creates the
+GitHub release with the generated assets.
+
+The local release helpers remain useful for debugging individual steps. For
+example:
 
 ```bash
 make docker-buildx-release VERSION=0.1.1
