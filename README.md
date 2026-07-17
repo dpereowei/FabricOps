@@ -304,7 +304,19 @@ Local development uses `controller:latest` so OrbStack and kind can run the mana
 ghcr.io/dpereowei/fabricops:<version>
 ```
 
-For example:
+### Release Automation
+
+Use the `Release` GitHub Actions workflow from the GitHub UI when publishing a
+new release. Trigger it from `main` with a release tag such as `v<version>`.
+
+The workflow validates the tag, updates release-version files, runs the Go test
+and lint gates, builds and pushes the manager plus sample chaincode images,
+generates `install.yaml` and the Helm chart package, verifies GHCR public
+visibility, commits the release-prep changes, tags the commit, and creates the
+GitHub release with the generated assets.
+
+The local release helpers remain useful for debugging individual steps. For
+example:
 
 ```bash
 make docker-buildx-release VERSION=0.1.1
