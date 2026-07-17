@@ -45,6 +45,10 @@ jobs:
           make docker-build
           make build-fabricopsctl
           kind load docker-image "${IMG}" --name "${KIND_CLUSTER}"
+          node_image="$(awk '$1 == "image:" && $2 ~ /fabricops-node-settlement/ { print $2; exit }' config/samples/fabricops_v1alpha1_fabricnetwork.yaml)"
+          test -n "${node_image}"
+          docker build -t "${node_image}" config/samples/chaincodes/node_settlement
+          kind load docker-image "${node_image}" --name "${KIND_CLUSTER}"
 
       - name: Install Helm
         run: make install-helm

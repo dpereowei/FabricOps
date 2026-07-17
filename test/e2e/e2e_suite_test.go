@@ -33,6 +33,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -44,10 +45,9 @@ const (
 	fabricNetworkLabel                = "fabricops.io/fabricnetwork"
 	fabricNetworkNamespaceLabel       = "fabricops.io/fabricnetwork-namespace"
 	fastCleanupTTLSeconds             = int32(10)
-	nodeSettlementImageDefault        = "ghcr.io/dpereowei/fabricops-node-settlement:0.1.0"
 	nodeSettlementUpgradeImageDefault = "ghcr.io/dpereowei/fabricops-node-settlement:0.2.0"
-	goSettlementImageDefault          = "ghcr.io/dpereowei/fabricops-go-settlement:0.1.0"
-	javaSettlementImageDefault        = "ghcr.io/dpereowei/fabricops-java-settlement:0.1.0"
+	goSettlementImageDefault          = "ghcr.io/dpereowei/fabricops-go-settlement:0.1.1"
+	javaSettlementImageDefault        = "ghcr.io/dpereowei/fabricops-java-settlement:0.1.1"
 )
 
 var (
@@ -91,11 +91,39 @@ var _ = BeforeSuite(func() {
 	fabricopsctlBin = filepath.Join(repoRoot, "bin", "fabricopsctl")
 	kindCluster = envOrDefault("KIND_CLUSTER", "fabricops-test-e2e")
 	managerImage = envOrDefault("IMG", "controller:latest")
-	nodeImage = envOrDefault("NODE_SETTLEMENT_IMAGE", nodeSettlementImageDefault)
+	nodeImage = envOrDefault("NODE_SETTLEMENT_IMAGE", sampleNodeChaincodeImageDefault())
 	nodeUpgradeImage = envOrDefault("NODE_SETTLEMENT_UPGRADE_IMAGE", nodeSettlementUpgradeImageDefault)
 	goImage = envOrDefault("GO_SETTLEMENT_IMAGE", goSettlementImageDefault)
 	javaImage = envOrDefault("JAVA_SETTLEMENT_IMAGE", javaSettlementImageDefault)
 })
+
+type sampleFabricNetworkManifest struct {
+	Spec struct {
+		Chaincodes []struct {
+			Name  string `json:"name"`
+			Image string `json:"image"`
+		} `json:"chaincodes"`
+	} `json:"spec"`
+}
+
+func sampleNodeChaincodeImageDefault() string {
+	GinkgoHelper()
+
+	samplePath := filepath.Join(repoRoot, "config/samples/fabricops_v1alpha1_fabricnetwork.yaml")
+	data, err := os.ReadFile(samplePath)
+	Expect(err).NotTo(HaveOccurred())
+
+	var manifest sampleFabricNetworkManifest
+	Expect(yaml.Unmarshal(data, &manifest)).To(Succeed())
+	for _, chaincode := range manifest.Spec.Chaincodes {
+		if chaincode.Name == "settlement" {
+			Expect(chaincode.Image).NotTo(BeEmpty())
+			return chaincode.Image
+		}
+	}
+	Fail("sample FabricNetwork must declare the settlement chaincode image")
+	return ""
+}
 
 var _ = Describe("Kind bundle install", Ordered, func() {
 	AfterEach(func() {
