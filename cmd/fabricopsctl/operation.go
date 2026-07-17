@@ -58,6 +58,8 @@ const (
 	tlsCACertKey     = "ca.crt"
 	tlsClientCertKey = "client.crt"
 	tlsClientKeyKey  = "client.key"
+
+	payloadFlagUsage = `Raw Fabric chaincode JSON payload, for example {"Args":["fn","arg"]}`
 )
 
 type chaincodeOperationOptions struct {
@@ -68,6 +70,7 @@ type chaincodeOperationOptions struct {
 	peers        stringListFlag
 	function     string
 	argsJSON     string
+	payload      string
 	transient    string
 	timeout      string
 	output       string
@@ -118,6 +121,7 @@ func runChaincodeOperation(args []string, stdout, stderr io.Writer, operation st
 	flags.Var(&options.peers, "peer", "Target peer as Org/peer or peer; repeat for multi-org endorsement")
 	flags.StringVar(&options.function, "function", "", "Chaincode function")
 	flags.StringVar(&options.argsJSON, "args", "[]", "JSON array of string arguments")
+	flags.StringVar(&options.payload, "payload", "", payloadFlagUsage)
 	flags.StringVar(&options.transient, "transient", "", "Raw transient JSON for invoke operations")
 	flags.StringVar(&options.timeout, "timeout", "180s", "How long to wait for the operation Job")
 	flags.StringVar(&options.output, "o", operationOutputText, "Output format: text or json")
@@ -131,14 +135,14 @@ func runChaincodeOperation(args []string, stdout, stderr io.Writer, operation st
 		printLine(stderr, "Usage: fabricopsctl "+operation+" [flags] <fabricnetwork>")
 		return errUsage
 	}
-	if err := validateOperationOptions(operation, options); err != nil {
+	if err := validateOperationOptions(options); err != nil {
 		return err
 	}
 
 	return runChaincodeOperationWithOptions(context.Background(), flags.Arg(0), operation, options, stdout)
 }
 
-func validateOperationOptions(operation string, options chaincodeOperationOptions) error {
+func validateOperationOptions(options chaincodeOperationOptions) error {
 	missing := []string{}
 	if options.channel == "" {
 		missing = append(missing, "--channel")
@@ -146,14 +150,17 @@ func validateOperationOptions(operation string, options chaincodeOperationOption
 	if options.chaincode == "" {
 		missing = append(missing, "--chaincode")
 	}
-	if options.function == "" {
+	if options.payload == "" && options.function == "" {
 		missing = append(missing, "--function")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required flags: %s", strings.Join(missing, ", "))
 	}
-	if operation == chaincodeOperationQuery && options.transient != "" {
-		return fmt.Errorf("--transient is only supported for invoke")
+	if options.payload != "" && options.function != "" {
+		return fmt.Errorf("--payload cannot be combined with --function")
+	}
+	if options.payload != "" && options.argsJSON != "" && options.argsJSON != "[]" {
+		return fmt.Errorf("--payload cannot be combined with --args")
 	}
 	if err := validateOperationOutput(options.output); err != nil {
 		return err
@@ -176,14 +183,11 @@ func runChaincodeOperationWithOptions(
 	if err != nil {
 		return err
 	}
-	args, err := parseChaincodeArgs(options.argsJSON)
+	payload, function, err := resolveChaincodePayload(options)
 	if err != nil {
 		return err
 	}
-	payload, err := chaincodePayload(options.function, args)
-	if err != nil {
-		return err
-	}
+	options.function = function
 	targets, submitter, err := selectOperationTargets(network.Status.OrgStatus, options.org, options.peers)
 	if err != nil {
 		return err
@@ -277,6 +281,22 @@ func parseChaincodeArgs(argsJSON string) ([]string, error) {
 	return args, nil
 }
 
+func resolveChaincodePayload(options chaincodeOperationOptions) (string, string, error) {
+	if options.payload != "" {
+		return normalizeRawChaincodePayload(options.payload)
+	}
+
+	args, err := parseChaincodeArgs(options.argsJSON)
+	if err != nil {
+		return "", "", err
+	}
+	payload, err := chaincodePayload(options.function, args)
+	if err != nil {
+		return "", "", err
+	}
+	return payload, options.function, nil
+}
+
 func chaincodePayload(function string, args []string) (string, error) {
 	payloadArgs := append([]string{function}, args...)
 	payload := map[string][]string{"Args": payloadArgs}
@@ -285,6 +305,23 @@ func chaincodePayload(function string, args []string) (string, error) {
 		return "", err
 	}
 	return string(encoded), nil
+}
+
+func normalizeRawChaincodePayload(payloadJSON string) (string, string, error) {
+	var payload struct {
+		Args []string `json:"Args"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return "", "", fmt.Errorf("--payload must be a Fabric chaincode JSON payload: %w", err)
+	}
+	if len(payload.Args) == 0 {
+		return "", "", fmt.Errorf("--payload Args must contain at least the chaincode function")
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", "", err
+	}
+	return string(encoded), payload.Args[0], nil
 }
 
 func selectOperationTargets(
@@ -571,10 +608,16 @@ export CORE_PEER_MSPCONFIGPATH=%s
 %s
 
 if [ "$FABRICOPS_OPERATION" = "query" ]; then
-  peer chaincode query \
+  set -- peer chaincode query \
     -C "$FABRICOPS_CHANNEL" \
     -n "$FABRICOPS_CHAINCODE" \
     -c "$FABRICOPS_PAYLOAD"
+
+  if [ -n "$FABRICOPS_TRANSIENT" ]; then
+    set -- "$@" --transient "$FABRICOPS_TRANSIENT"
+  fi
+
+  "$@"
   exit 0
 fi
 

@@ -147,12 +147,69 @@ func TestBuildOperationJobUsesAdminSecretsAndPeerFlags(t *testing.T) {
 	}
 }
 
+func TestOperationScriptPassesTransientForQuery(t *testing.T) {
+	script := operationScript(true, false, 1)
+	for _, want := range []string{
+		`if [ "$FABRICOPS_OPERATION" = "query" ]; then`,
+		`set -- peer chaincode query`,
+		`set -- "$@" --transient "$FABRICOPS_TRANSIENT"`,
+		`"$@"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("operation script does not contain %q\nscript:\n%s", want, script)
+		}
+	}
+}
+
 func TestParseChaincodeArgsRequiresStringArray(t *testing.T) {
 	if _, err := parseChaincodeArgs(`["id1","alice"]`); err != nil {
 		t.Fatalf("parseChaincodeArgs() error = %v", err)
 	}
 	if _, err := parseChaincodeArgs(`["id1",100]`); err == nil {
 		t.Fatal("parseChaincodeArgs() error = nil, want non-string rejection")
+	}
+}
+
+func TestResolveChaincodePayloadSupportsRawFabricPayload(t *testing.T) {
+	payload, function, err := resolveChaincodePayload(chaincodeOperationOptions{
+		payload: `{"Args":["CreateAsset","asset1","blue"]}`,
+	})
+	if err != nil {
+		t.Fatalf("resolveChaincodePayload() error = %v", err)
+	}
+	if function != "CreateAsset" {
+		t.Fatalf("function = %q, want CreateAsset", function)
+	}
+	if payload != `{"Args":["CreateAsset","asset1","blue"]}` {
+		t.Fatalf("payload = %q", payload)
+	}
+}
+
+func TestResolveChaincodePayloadRejectsEmptyRawPayloadArgs(t *testing.T) {
+	if _, _, err := resolveChaincodePayload(chaincodeOperationOptions{payload: `{"Args":[]}`}); err == nil {
+		t.Fatal("resolveChaincodePayload() error = nil, want empty Args rejection")
+	}
+}
+
+func TestValidateOperationOptionsRejectsPayloadMixedWithFunctionArgs(t *testing.T) {
+	err := validateOperationOptions(chaincodeOperationOptions{
+		channel:   "settlement",
+		chaincode: "settlement",
+		function:  "CreateAsset",
+		payload:   `{"Args":["CreateAsset"]}`,
+	})
+	if err == nil {
+		t.Fatal("validateOperationOptions() error = nil, want payload/function rejection")
+	}
+
+	err = validateOperationOptions(chaincodeOperationOptions{
+		channel:   "settlement",
+		chaincode: "settlement",
+		argsJSON:  `["asset1"]`,
+		payload:   `{"Args":["CreateAsset"]}`,
+	})
+	if err == nil {
+		t.Fatal("validateOperationOptions() error = nil, want payload/args rejection")
 	}
 }
 
