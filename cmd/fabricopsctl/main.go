@@ -88,6 +88,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runWait(args[1:], stdout, stderr)
 	case "connection-profile":
 		return runConnectionProfile(args[1:], stdout, stderr)
+	case "join-bundle":
+		return runJoinBundle(args[1:], stdout, stderr)
 	case "invoke":
 		return runChaincodeOperation(args[1:], stdout, stderr, chaincodeOperationInvoke)
 	case "query":
@@ -243,6 +245,27 @@ func getFabricNetwork(ctx context.Context, kube kubeOptions, name string) (*fabr
 	}
 
 	return network, nil
+}
+
+func getFabricParticipant(
+	ctx context.Context,
+	kube kubeOptions,
+	name string,
+) (*fabricopsv1alpha1.FabricParticipant, error) {
+	client, err := newClient(kube)
+	if err != nil {
+		return nil, err
+	}
+
+	participant := &fabricopsv1alpha1.FabricParticipant{}
+	if err := client.Get(ctx, ctrlclient.ObjectKey{
+		Namespace: kube.namespace,
+		Name:      name,
+	}, participant); err != nil {
+		return nil, err
+	}
+
+	return participant, nil
 }
 
 func newClient(kube kubeOptions) (ctrlclient.Client, error) {
@@ -559,8 +582,16 @@ func printUsage(out io.Writer) {
   fabricopsctl status [flags] <fabricnetwork>
   fabricopsctl wait [flags] <fabricnetwork>
   fabricopsctl connection-profile [flags] <fabricnetwork>
+  fabricopsctl join-bundle --org <org> [flags] <fabricnetwork>
+  fabricopsctl join-bundle participant [flags] <fabricparticipant>
+  fabricopsctl join-bundle validate [flags] <bundle.json>
+  fabricopsctl join-bundle plan [flags] <bundle.json>
+  fabricopsctl join-bundle render-org [flags] <bundle.json>
+  fabricopsctl join-bundle render-update [flags] <bundle.json>
   fabricopsctl invoke [flags] <fabricnetwork>
+  fabricopsctl invoke --participant [flags] <fabricparticipant>
   fabricopsctl query [flags] <fabricnetwork>
+  fabricopsctl query --participant [flags] <fabricparticipant>
 
 Common flags:
   -n, --namespace string   FabricNetwork namespace (default "default")
@@ -573,9 +604,17 @@ Examples:
   fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
   fabricopsctl connection-profile --org BankA --format yaml fabricnetwork-sample
   fabricopsctl connection-profile --org BankA --format json --out connection-banka.json fabricnetwork-sample
+  fabricopsctl join-bundle --org BankA --out banka-join-bundle.json fabricnetwork-sample
+  fabricopsctl join-bundle participant --out bankb-join-bundle.json bankb-participant
+  fabricopsctl join-bundle validate banka-join-bundle.json
+  fabricopsctl join-bundle plan --channel settlement banka-join-bundle.json
+  fabricopsctl join-bundle render-org --channel settlement --out banka-org.json banka-join-bundle.json
+  fabricopsctl join-bundle render-update --channel settlement --out settlement-join-update.sh banka-join-bundle.json
   fabricopsctl query --org BankA --channel settlement \
     --chaincode settlement --function readSettlement --args '["id1"]' -o json fabricnetwork-sample
   fabricopsctl invoke --org BankA --peer BankA/peer0 --peer BankB/peer0 \
     --channel settlement --chaincode settlement --function createSettlement \
-    --args '["id1","alice","bob","100","USD"]' fabricnetwork-sample`)
+    --args '["id1","alice","bob","100","USD"]' fabricnetwork-sample
+  fabricopsctl query --participant --org BankB --channel settlement \
+    --chaincode settlement --function readSettlement --args '["id1"]' bankb-participant`)
 }
