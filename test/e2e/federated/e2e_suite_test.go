@@ -147,15 +147,18 @@ var _ = Describe("Federated join handoff", Ordered, func() {
 		By("applying the participant manifest before the channel block is imported")
 		renderParticipantManifest(participantManifestPath, ordererAddress, participantPeerAddress, participantPeerHost)
 		runKubectl(participantContext, 3*time.Minute, "apply", "-f", participantManifestPath)
-		runKubectl(
-			participantContext,
+		runFabricOpsctl(
 			25*time.Minute,
 			"wait",
-			"fabricparticipant/"+participantName,
 			"-n",
 			sampleNamespace,
-			"--for=condition=LocalInfrastructureReady",
+			"--context",
+			participantContext,
+			"--participant",
+			"--for",
+			"condition=LocalInfrastructureReady",
 			"--timeout=20m",
+			participantName,
 		)
 
 		By("exposing the participant peer through a local kind NodePort")

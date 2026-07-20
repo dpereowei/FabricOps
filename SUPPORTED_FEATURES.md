@@ -120,7 +120,7 @@ that proof is already present.
 |---------|----------|----------|------------------|------------|----------|-------|
 | Fablo REST | yes | yes | Planned | | | Could become a Kubernetes-native gateway/helper workload later |
 | Explorer | yes | no | Planned | | | Not implemented |
-| Gateway client helper | n/a | n/a | Partial | README | | `fabricopsctl` can wait for readiness, read status, export generated connection profiles, and run invoke/query helper Jobs for `FabricNetwork` resources or `FabricParticipant` resources with `--participant`; SDK-specific Gateway wrappers are not implemented |
+| Gateway client helper | n/a | n/a | Partial | README | | `fabricopsctl` can wait for named readiness conditions, read status, export generated connection profiles, and run invoke/query helper Jobs for `FabricNetwork` resources or `FabricParticipant` resources with `--participant`; SDK-specific Gateway wrappers are not implemented |
 | Connection profiles | yes | yes | Supported | README, API | | Per-peer-org ConfigMaps contain JSON/YAML in-cluster Gateway/client profiles and status exposes the ConfigMap name |
 | Export network topology to Mermaid | yes | yes | Planned | | | Not implemented |
 | Other `init` options | n/a | n/a | Planned | | | Not implemented |

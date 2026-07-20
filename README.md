@@ -111,6 +111,8 @@ go install github.com/dpereowei/fabricops/cmd/fabricopsctl@latest
 export PATH="$(go env GOPATH)/bin:$PATH"
 fabricopsctl status -n default fabricnetwork-sample
 fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
+fabricopsctl status --participant -n default bankb-participant
+fabricopsctl wait --participant -n default --for condition=LocalInfrastructureReady --timeout 20m bankb-participant
 fabricopsctl connection-profile -n default --org BankA --format yaml fabricnetwork-sample
 fabricopsctl join-bundle -n default --org BankA --out banka-join-bundle.json fabricnetwork-sample
 fabricopsctl join-bundle validate banka-join-bundle.json
@@ -137,6 +139,8 @@ When building from source:
 make build-fabricopsctl
 bin/fabricopsctl status -n default fabricnetwork-sample
 bin/fabricopsctl wait -n default --timeout 20m fabricnetwork-sample
+bin/fabricopsctl status --participant -n default bankb-participant
+bin/fabricopsctl wait --participant -n default --for condition=Ready --timeout 20m bankb-participant
 bin/fabricopsctl connection-profile -n default --org BankA --format yaml fabricnetwork-sample
 bin/fabricopsctl join-bundle -n default --org BankA --out banka-join-bundle.json fabricnetwork-sample
 bin/fabricopsctl join-bundle participant -n default --out bankb-join-bundle.json bankb-participant
@@ -154,7 +158,8 @@ bin/fabricopsctl query --participant -n default --org BankB \
 
 Tools that render or apply FabricOps resources, including a future Fablo
 Kubernetes engine, can use the same CLI surface after applying the
-`FabricNetwork`: `wait` for readiness, `status` for diagnostics,
+`FabricNetwork` or `FabricParticipant`: `wait` for readiness or a named
+condition such as `LocalInfrastructureReady`, `status` for diagnostics,
 `connection-profile` for client material, `join-bundle` for public membership
 artifacts, `join-bundle validate` for offline artifact checks,
 `join-bundle plan` for founder/participant join planning,

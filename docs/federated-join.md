@@ -179,10 +179,23 @@ operator has explicit multi-admin signature orchestration.
    lifecycle to become ready:
 
    ```bash
-   kubectl wait fabricparticipant/bankb-participant \
+   fabricopsctl wait --participant \
      -n default \
      --for=condition=Ready \
-     --timeout=20m
+     --timeout=20m \
+     bankb-participant
+   ```
+
+   During staged handoffs, the participant can also wait only for local CA,
+   peer, and identity material before the founder has exported the channel
+   block:
+
+   ```bash
+   fabricopsctl wait --participant \
+     -n default \
+     --for=condition=LocalInfrastructureReady \
+     --timeout=20m \
+     bankb-participant
    ```
 
 5. Export the participant join bundle for the founder/coordinator:
